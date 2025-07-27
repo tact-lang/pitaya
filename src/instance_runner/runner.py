@@ -1,0 +1,669 @@
+"""
+Instance Runner - Executes a single AI coding instance in isolation.
+
+This module provides the main entry point for running instances. It knows nothing
+about strategies or UI - just takes a prompt and returns a result with a branch name.
+"""
+
+import asyncio
+import logging
+import time
+import uuid
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Callable, Dict, Optional
+
+from . import (
+    ClaudeError,
+    DockerError,
+    GitError,
+    TimeoutError,
+    ValidationError,
+)
+from .docker_manager import DockerManager
+from .git_operations import GitOperations
+from .plugin_interface import RunnerPlugin
+from .plugins import AVAILABLE_PLUGINS
+from ..shared import AuthConfig, ContainerLimits, InstanceResult, RetryConfig
+
+logger = logging.getLogger(__name__)
+
+
+def _is_retryable_error(
+    error_str: str, error_type: str, retry_config: RetryConfig
+) -> bool:
+    """
+    Check if an error is retryable based on pattern matching.
+
+    Args:
+        error_str: The error message string
+        error_type: The type of error (docker, claude, timeout, etc)
+        retry_config: Retry configuration with error patterns
+
+    Returns:
+        True if the error matches a retryable pattern
+    """
+    error_lower = error_str.lower()
+
+    # Always retry timeouts
+    if error_type == "timeout":
+        return True
+
+    # Check Docker patterns
+    if error_type == "docker":
+        for pattern in retry_config.docker_error_patterns:
+            if pattern.lower() in error_lower:
+                return True
+
+    # Check Claude patterns
+    if error_type == "claude":
+        for pattern in retry_config.claude_error_patterns:
+            if pattern.lower() in error_lower:
+                return True
+
+    # Check general patterns for any error type
+    for pattern in retry_config.general_error_patterns:
+        if pattern.lower() in error_lower:
+            return True
+
+    return False
+
+
+async def run_instance(
+    prompt: str,
+    repo_path: Path,
+    base_branch: str = "main",
+    branch_name: Optional[str] = None,
+    run_id: Optional[str] = None,
+    strategy_execution_id: Optional[str] = None,
+    instance_id: Optional[str] = None,
+    container_name: Optional[str] = None,
+    model: str = "sonnet",
+    session_id: Optional[str] = None,
+    event_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
+    timeout_seconds: int = 3600,
+    container_limits: Optional[ContainerLimits] = None,
+    auth_config: Optional[AuthConfig] = None,
+    reuse_container: bool = True,
+    finalize: bool = True,
+    docker_image: Optional[str] = None,
+    retry_config: Optional[RetryConfig] = None,
+    plugin_name: str = "claude-code",
+    system_prompt: Optional[str] = None,
+    append_system_prompt: Optional[str] = None,
+) -> InstanceResult:
+    """
+    Execute a single AI coding instance in Docker.
+
+    This is the main entry point for the Instance Runner component. It follows
+    a 6-phase execution pipeline to reliably run Claude Code in isolation.
+
+    Args:
+        prompt: The instruction for Claude Code
+        repo_path: Path to host repository (not the isolated clone)
+        base_branch: Starting point for the new branch (default: "main")
+        branch_name: Target branch name for import (provided by orchestration)
+        run_id: Run identifier for correlation (provided by orchestration)
+        strategy_execution_id: Strategy execution identifier (provided by orchestration)
+        instance_id: Unique identifier (auto-generated if not provided)
+        container_name: Full container name including run_id (provided by orchestration)
+        model: Claude model to use (default: "sonnet")
+        session_id: Resume a previous Claude Code session
+        event_callback: Function to receive real-time events
+        timeout_seconds: Maximum execution time (default: 3600)
+        container_limits: CPU/memory restrictions
+        auth_config: Authentication configuration (OAuth token or API key)
+        reuse_container: Reuse existing container if name matches (default: True)
+        finalize: Stop container after completion (default: True)
+        docker_image: Docker image override (uses plugin default if None)
+        retry_config: Retry configuration for transient failures
+        plugin_name: Name of the AI tool plugin to use (default: "claude-code")
+
+    Returns:
+        InstanceResult with branch name, metrics, and status
+    """
+    logger.info(f"run_instance called with prompt: {prompt[:50]}...")
+    instance_id = instance_id or str(uuid.uuid4())
+    container_limits = container_limits or ContainerLimits()
+    retry_config = retry_config or RetryConfig()
+    logger.info(f"Instance ID: {instance_id}")
+
+    # Get plugin
+    if plugin_name not in AVAILABLE_PLUGINS:
+        raise ValidationError(
+            f"Unknown plugin: {plugin_name}. Available: {list(AVAILABLE_PLUGINS.keys())}"
+        )
+
+    plugin_class = AVAILABLE_PLUGINS[plugin_name]
+    plugin = plugin_class()
+
+    # Use plugin's default image if not specified
+    if docker_image is None:
+        docker_image = plugin.docker_image
+
+    # Validate plugin environment
+    # Convert AuthConfig to dict for plugin
+    auth_dict = None
+    if auth_config:
+        auth_dict = {
+            "oauth_token": auth_config.oauth_token,
+            "api_key": auth_config.api_key,
+            "base_url": auth_config.base_url,
+        }
+
+    is_valid, error_msg = await plugin.validate_environment(auth_dict)
+    if not is_valid:
+        raise ValidationError(f"Plugin {plugin_name} validation failed: {error_msg}")
+
+    # Retry loop with exponential backoff
+    attempt = 0
+    delay = retry_config.initial_delay_seconds
+    last_result = None
+
+    while attempt < retry_config.max_attempts:
+        attempt += 1
+
+        # Use session from previous attempt if retrying
+        current_session_id = (
+            last_result.session_id
+            if last_result and last_result.session_id
+            else session_id
+        )
+
+        result = await _run_instance_attempt(
+            prompt=prompt,
+            repo_path=repo_path,
+            base_branch=base_branch,
+            branch_name=branch_name,
+            run_id=run_id,
+            strategy_execution_id=strategy_execution_id,
+            instance_id=instance_id,
+            container_name=container_name,
+            model=model,
+            session_id=current_session_id,
+            event_callback=event_callback,
+            timeout_seconds=timeout_seconds,
+            container_limits=container_limits,
+            auth_config=auth_config,
+            reuse_container=reuse_container,
+            finalize=finalize,
+            docker_image=docker_image,
+            plugin=plugin,
+            attempt_number=attempt,
+            total_attempts=retry_config.max_attempts,
+            system_prompt=system_prompt,
+            append_system_prompt=append_system_prompt,
+            retry_config=retry_config,
+        )
+
+        # Success or non-retryable error
+        if result.success:
+            return result
+
+        # Check if error is retryable using pattern matching
+        is_retryable = _is_retryable_error(
+            result.error or "", result.error_type or "", retry_config
+        )
+
+        if not is_retryable:
+            return result
+
+        # Save for potential next attempt
+        last_result = result
+
+        # Don't retry if this was the last attempt
+        if attempt >= retry_config.max_attempts:
+            return result
+
+        # Log retry
+        logger.info(
+            f"Retrying instance {instance_id} after {result.error_type} error (attempt {attempt + 1}/{retry_config.max_attempts})"
+        )
+
+        # Wait with exponential backoff
+        await asyncio.sleep(delay)
+        delay = min(
+            delay * retry_config.exponential_base, retry_config.max_delay_seconds
+        )
+
+    # Should never reach here, but just in case
+    return last_result
+
+
+async def _run_instance_attempt(
+    prompt: str,
+    repo_path: Path,
+    base_branch: str,
+    branch_name: str,
+    run_id: Optional[str],
+    strategy_execution_id: Optional[str],
+    instance_id: str,
+    container_name: str,
+    model: str,
+    session_id: Optional[str],
+    event_callback: Optional[Callable[[Dict[str, Any]], None]],
+    timeout_seconds: int,
+    container_limits: ContainerLimits,
+    auth_config: Optional[AuthConfig],
+    reuse_container: bool,
+    finalize: bool,
+    docker_image: str,
+    plugin: RunnerPlugin,
+    attempt_number: int,
+    total_attempts: int,
+    system_prompt: Optional[str],
+    append_system_prompt: Optional[str],
+    retry_config: RetryConfig,
+) -> InstanceResult:
+    """Single attempt at running an instance (internal helper for retry logic)."""
+    start_time = time.time()
+    started_at = datetime.now(timezone.utc).isoformat()
+    workspace_dir = None
+    container = None
+    claude_session_id = None  # Track session for error recovery
+
+    # Set log path based on run_id and instance_id
+    if run_id and instance_id:
+        log_path = f"./logs/{run_id}/instance_{instance_id}.log"
+    else:
+        log_path = None
+
+    # Helper to emit events
+    def emit_event(event_type: str, data: Dict[str, Any]) -> None:
+        if event_callback:
+            event = {
+                "type": event_type,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "instance_id": instance_id,
+                "data": data,
+            }
+            event_callback(event)
+
+    try:
+        # Phase 1: Validation
+        logger.info(f"Starting instance {instance_id} with prompt: {prompt[:100]}...")
+        emit_event(
+            "instance.started",
+            {
+                "prompt": prompt,
+                "model": model,
+                "attempt": attempt_number,
+                "total_attempts": total_attempts,
+                "is_retry": attempt_number > 1,
+                "session_id": session_id,
+            },
+        )
+
+        # Validate inputs
+        if not repo_path.exists():
+            raise ValidationError(f"Repository path does not exist: {repo_path}")
+
+        if not repo_path.is_dir():
+            raise ValidationError(f"Repository path is not a directory: {repo_path}")
+
+        if not (repo_path / ".git").exists():
+            raise ValidationError(f"Not a git repository: {repo_path}")
+
+        if not container_name:
+            raise ValidationError("Container name must be provided by orchestration")
+
+        if not branch_name:
+            raise ValidationError("Branch name must be provided by orchestration")
+
+        # Initialize components
+        docker_manager = DockerManager()
+        git_ops = GitOperations()
+
+        try:
+            # Initialize Docker manager (performs orphan cleanup)
+            await docker_manager.initialize()
+
+            # Validate Docker daemon
+            logger.info("Validating Docker environment...")
+            if not await docker_manager.validate_environment():
+                raise DockerError("Docker daemon is not accessible")
+            logger.info("Docker validation successful")
+
+            emit_event("instance.phase_completed", {"phase": "validation"})
+
+            # Phase 2: Workspace Preparation (NEW - happens BEFORE container)
+            logger.info(f"Preparing isolated workspace for branch {base_branch}")
+            emit_event("instance.workspace_preparing", {"base_branch": base_branch})
+
+            logger.info("Calling git_ops.prepare_workspace...")
+            workspace_dir = await git_ops.prepare_workspace(
+                repo_path=repo_path,
+                base_branch=base_branch,
+                instance_id=instance_id,
+                run_id=run_id,
+                strategy_execution_id=strategy_execution_id,
+                container_name=container_name,
+            )
+            logger.info(f"Workspace prepared at: {workspace_dir}")
+
+            emit_event(
+                "instance.workspace_prepared", {"workspace_dir": str(workspace_dir)}
+            )
+            emit_event("instance.phase_completed", {"phase": "workspace_preparation"})
+
+            # Phase 3: Container Creation
+            logger.info(f"Creating container {container_name}")
+            emit_event(
+                "instance.container_creating", {"container_name": container_name}
+            )
+
+            # Create base container - plugin will configure in next step
+            container = await docker_manager.create_container(
+                container_name=container_name,
+                workspace_dir=workspace_dir,  # Now using workspace instead of repo
+                cpu_count=container_limits.cpu_count,
+                memory_gb=container_limits.memory_gb,
+                memory_swap_gb=container_limits.memory_swap_gb,
+                run_id=run_id,
+                strategy_execution_id=strategy_execution_id,
+                instance_id=instance_id,
+                session_id=session_id,  # Plugin will handle this
+                image=docker_image,
+                auth_config=auth_config,
+                reuse_container=reuse_container,
+            )
+
+            emit_event(
+                "instance.container_created", {"container_id": container.id[:12]}
+            )
+
+            # Prepare environment using plugin
+            from dataclasses import asdict
+
+            await plugin.prepare_environment(
+                container, asdict(auth_config) if auth_config else None
+            )
+            # Note: Environment variables are already set in container config by prepare_container
+            # This is for future use when we need to set them dynamically
+
+            emit_event("instance.phase_completed", {"phase": "container_creation"})
+
+            # Phase 4: AI Tool Execution
+            logger.info(f"Executing {plugin.name} with model {model}")
+            emit_event(
+                "instance.claude_starting", {"model": model, "session_id": session_id}
+            )
+
+            # Build command using plugin
+            command = await plugin.build_command(
+                prompt=prompt,
+                model=model,
+                session_id=session_id,
+                system_prompt=system_prompt,
+                append_system_prompt=append_system_prompt,
+            )
+
+            # Execute AI tool
+            result_data = await docker_manager.execute_command(
+                container=container,
+                command=command,
+                plugin=plugin,
+                event_callback=lambda event: emit_event(
+                    f"instance.claude_{event['type']}", event
+                ),
+                timeout_seconds=timeout_seconds,
+            )
+
+            claude_session_id = result_data.get("session_id")
+            final_message = result_data.get("final_message", "")
+            metrics = result_data.get("metrics", {})
+
+            emit_event(
+                "instance.claude_completed",
+                {
+                    "session_id": claude_session_id,
+                    "metrics": metrics,
+                },
+            )
+            emit_event("instance.phase_completed", {"phase": "claude_execution"})
+
+            # Phase 5: Result Collection (includes branch import)
+            logger.info("Collecting results and importing branch")
+            emit_event("instance.result_collection_started", {})
+
+            # Import work from workspace to host repository (using orchestration-provided branch name)
+            has_changes = await git_ops.import_branch(
+                repo_path=repo_path,
+                workspace_dir=workspace_dir,
+                branch_name=branch_name,
+            )
+
+            if has_changes:
+                emit_event("instance.branch_imported", {"branch_name": branch_name})
+            else:
+                logger.info(
+                    "No new commits, but branch created pointing to base branch"
+                )
+                emit_event("instance.no_changes", {"branch_name": branch_name})
+
+            emit_event("instance.phase_completed", {"phase": "result_collection"})
+
+            # Phase 6: Cleanup Decision
+            # For successful instances, clean up workspace but keep container
+            logger.info("Instance completed successfully")
+
+            # Calculate duration before any cleanup
+            duration = time.time() - start_time
+
+            # Emit completion event BEFORE cleanup (as per spec)
+            emit_event(
+                "instance.completed",
+                {
+                    "success": True,
+                    "branch_name": branch_name,
+                    "duration_seconds": duration,
+                    "metrics": metrics,
+                    "workspace_dir": (
+                        str(workspace_dir) if workspace_dir else None
+                    ),  # Include workspace path
+                },
+            )
+
+            # Now clean up workspace for successful instances
+            if workspace_dir:
+                await git_ops.cleanup_workspace(workspace_dir)
+                emit_event(
+                    "instance.workspace_cleaned", {"workspace_dir": str(workspace_dir)}
+                )
+
+            # Update container status before stopping
+            if container:
+                await docker_manager.update_container_status(container, "success")
+
+            # Stop container if finalize=True (but keep it for session persistence)
+            if finalize and container:
+                # Stop container in background to avoid blocking result return
+                async def stop_container_background():
+                    try:
+                        await docker_manager.stop_container(container)
+                        emit_event(
+                            "instance.container_stopped",
+                            {"container_name": container_name},
+                        )
+                    except Exception as e:
+                        logger.warning(
+                            f"Failed to stop container {container_name}: {e}"
+                        )
+
+                asyncio.create_task(stop_container_background())
+
+            emit_event("instance.phase_completed", {"phase": "cleanup_decision"})
+
+            completed_at = datetime.now(timezone.utc).isoformat()
+
+            # Get commit statistics if changes were made
+            commit_statistics = None
+            if has_changes:
+                try:
+                    # Get commit stats from the imported branch
+                    stats_cmd = [
+                        "git",
+                        "-C",
+                        str(repo_path),
+                        "diff",
+                        "--stat",
+                        f"{base_branch}..{branch_name}",
+                    ]
+                    _, stats_output = await git_ops._run_command(stats_cmd)
+
+                    # Parse stats to get files changed, insertions, deletions
+                    import re
+
+                    stats_match = re.search(
+                        r"(\d+) files? changed(?:, (\d+) insertions?\(\+\))?(?:, (\d+) deletions?\(\-\))?",
+                        stats_output,
+                    )
+                    if stats_match:
+                        commit_statistics = {
+                            "files_changed": int(stats_match.group(1) or 0),
+                            "insertions": int(stats_match.group(2) or 0),
+                            "deletions": int(stats_match.group(3) or 0),
+                        }
+
+                    # Get commit count
+                    count_cmd = [
+                        "git",
+                        "-C",
+                        str(repo_path),
+                        "rev-list",
+                        "--count",
+                        f"{base_branch}..{branch_name}",
+                    ]
+                    _, count_output = await git_ops._run_command(count_cmd)
+                    if commit_statistics and count_output.strip().isdigit():
+                        commit_statistics["commit_count"] = int(count_output.strip())
+                except (GitError, OSError) as e:
+                    logger.warning(f"Failed to get commit statistics: {e}")
+
+            return InstanceResult(
+                success=True,
+                branch_name=branch_name,
+                has_changes=has_changes,
+                final_message=final_message,
+                session_id=claude_session_id,
+                container_name=container_name,
+                metrics=metrics,
+                duration_seconds=duration,
+                commit_statistics=commit_statistics,
+                started_at=started_at,
+                completed_at=completed_at,
+                retry_attempts=attempt_number - 1,
+                log_path=log_path,
+                workspace_path=(
+                    str(workspace_dir) if workspace_dir and not has_changes else None
+                ),
+                status="success",
+            )
+
+        except TimeoutError as e:
+            logger.error(f"Instance {instance_id} timed out: {e}")
+            emit_event(
+                "instance.failed",
+                {
+                    "error": str(e),
+                    "error_type": "timeout",
+                    "attempt": attempt_number,
+                    "total_attempts": total_attempts,
+                    "will_retry": attempt_number
+                    < total_attempts,  # Timeouts are always retryable
+                },
+            )
+
+            # Keep workspace for debugging on timeout
+            completed_at = datetime.now(timezone.utc).isoformat()
+            return InstanceResult(
+                success=False,
+                error=str(e),
+                error_type="timeout",
+                session_id=claude_session_id,
+                container_name=container_name,
+                duration_seconds=time.time() - start_time,
+                started_at=started_at,
+                completed_at=completed_at,
+                retry_attempts=attempt_number - 1,
+                log_path=log_path,
+                workspace_path=str(workspace_dir) if workspace_dir else None,
+                status="timeout",
+            )
+
+        except (DockerError, GitError, ClaudeError, ValidationError) as e:
+            logger.error(f"Instance {instance_id} failed: {type(e).__name__}: {e}")
+            emit_event(
+                "instance.failed",
+                {
+                    "error": str(e),
+                    "error_type": type(e).__name__.lower().replace("error", ""),
+                    "attempt": attempt_number,
+                    "total_attempts": total_attempts,
+                    "will_retry": attempt_number < total_attempts
+                    and _is_retryable_error(
+                        str(e),
+                        type(e).__name__.lower().replace("error", ""),
+                        retry_config,
+                    ),
+                },
+            )
+
+            # Keep container for debugging and potential resume (per spec)
+            # Update container status to failed
+            if container:
+                await docker_manager.update_container_status(container, "failed")
+
+            completed_at = datetime.now(timezone.utc).isoformat()
+            return InstanceResult(
+                success=False,
+                error=str(e),
+                error_type=type(e).__name__.lower().replace("error", ""),
+                session_id=claude_session_id,
+                container_name=container_name,
+                duration_seconds=time.time() - start_time,
+                started_at=started_at,
+                completed_at=completed_at,
+                retry_attempts=attempt_number - 1,
+                log_path=log_path,
+                workspace_path=str(workspace_dir) if workspace_dir else None,
+                status="failed",
+            )
+
+        except (OSError, IOError, asyncio.CancelledError) as e:
+            logger.exception(f"System error in instance {instance_id}")
+            emit_event(
+                "instance.failed",
+                {
+                    "error": str(e),
+                    "error_type": "system",
+                    "attempt": attempt_number,
+                    "total_attempts": total_attempts,
+                    "will_retry": False,  # Never retry system errors
+                },
+            )
+
+            # Keep container for debugging and potential resume (per spec)
+            # Update container status to failed
+            if container:
+                await docker_manager.update_container_status(container, "failed")
+
+            completed_at = datetime.now(timezone.utc).isoformat()
+            return InstanceResult(
+                success=False,
+                error=f"Unexpected error: {str(e)}",
+                error_type="unexpected",
+                session_id=claude_session_id,
+                container_name=container_name,
+                duration_seconds=time.time() - start_time,
+                started_at=started_at,
+                completed_at=completed_at,
+                retry_attempts=attempt_number - 1,
+                log_path=log_path,
+                workspace_path=str(workspace_dir) if workspace_dir else None,
+                status="failed",
+            )
+
+    finally:
+        # Always close the Docker client to prevent connection leaks
+        docker_manager.close()
