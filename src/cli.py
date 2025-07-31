@@ -880,6 +880,14 @@ Examples:
                                 f"    metadata: {', '.join(metadata_items)}"
                             )
 
+                    # Show final message if present
+                    if result.final_message:
+                        # Truncate very long messages but show enough to be useful
+                        message = result.final_message
+                        if len(message) > 500:
+                            message = message[:497] + "..."
+                        self.console.print(f"    [dim]final_message:[/dim] {message}")
+
                 # Show selected result for best-of-n
                 if selected_branch:
                     self.console.print(f"  → Selected: {selected_branch}")
@@ -904,6 +912,14 @@ Examples:
                 self.console.print(
                     f"{status} {result.branch_name or 'no-branch'}  {duration} • {cost}"
                 )
+
+                # Show final message if present
+                if result.final_message:
+                    # Truncate very long messages but show enough to be useful
+                    message = result.final_message
+                    if len(message) > 500:
+                        message = message[:497] + "..."
+                    self.console.print(f"  [dim]final_message:[/dim] {message}")
 
         # Summary section
         self.console.print("[bold]Summary:[/bold]")
@@ -1252,6 +1268,7 @@ Examples:
                             "has_changes": r.has_changes,
                             "duration_seconds": r.duration_seconds,
                             "metrics": r.metrics,
+                            "final_message": r.final_message,
                         }
                         for r in result
                     ]
@@ -1489,6 +1506,37 @@ Examples:
                                     self.console.print(
                                         f"      {key}: {formatted_value}"
                                     )
+                            # Display final message if present
+                            if r.final_message:
+                                # Truncate very long messages
+                                message = r.final_message
+                                if len(message) > 500:
+                                    message = message[:497] + "..."
+                                self.console.print(f"      [dim]final_message:[/dim] {message}")
+                            
+                            # Display metadata if present
+                            if r.metadata:
+                                # Show specific metadata fields if they exist
+                                metadata_items = []
+                                if "score" in r.metadata:
+                                    metadata_items.append(f"score={r.metadata['score']}")
+                                if "complexity" in r.metadata:
+                                    metadata_items.append(f"complexity={r.metadata['complexity']}")
+                                if "test_coverage" in r.metadata:
+                                    metadata_items.append(f"test_coverage={r.metadata['test_coverage']}%")
+                                if "bug_confirmed" in r.metadata:
+                                    metadata_items.append(f"bug_confirmed={r.metadata['bug_confirmed']}")
+                                if "bug_report_branch" in r.metadata:
+                                    metadata_items.append(f"bug_report_branch={r.metadata['bug_report_branch']}")
+                                    
+                                # Show any other metadata keys not already displayed
+                                displayed_keys = {"score", "complexity", "test_coverage", "bug_confirmed", "bug_report_branch", "strategy_execution_id", "model"}
+                                for key, value in r.metadata.items():
+                                    if key not in displayed_keys:
+                                        metadata_items.append(f"{key}={value}")
+                                
+                                if metadata_items:
+                                    self.console.print(f"      [dim]metadata:[/dim] {', '.join(metadata_items)}")
             else:
                 # Fallback to result-based counting
                 if isinstance(result, list) and result:
