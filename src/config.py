@@ -328,7 +328,7 @@ def load_env_config() -> Dict[str, Any]:
 def get_default_config() -> Dict[str, Any]:
     """Get default configuration values."""
     return {
-        "model": "claude-3-5-sonnet-latest",
+        "model": "sonnet",
         "strategy": "simple",
         "output": "tui",
         "state_dir": Path("./orchestrator_state"),

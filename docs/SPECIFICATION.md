@@ -1228,7 +1228,7 @@ ORCHESTRATOR_TUI__REFRESH_RATE=100
 ORCHESTRATOR_TUI__FORCE_DISPLAY_MODE=detailed
 
 # Model configuration
-ORCHESTRATOR_DEFAULT_MODEL=claude-3-5-sonnet-latest
+ORCHESTRATOR_DEFAULT_MODEL=sonnet
 ```
 
 **Configuration Merging**: Complex deep merge with recursive dictionary merging for nested configurations. Arrays are replaced, not merged.
@@ -1442,8 +1442,7 @@ This uses defaults: SimpleStrategy, main branch, Sonnet model. Perfect for quick
 
 ```bash
 orchestrator "complex task" --model opus
-orchestrator "simple task" --model haiku
-orchestrator "standard task"  # Uses default: claude-3-5-sonnet-latest
+orchestrator "standard task"  # Uses default: sonnet
 ```
 
 **Strategy Selection**: Real power comes from choosing strategies:

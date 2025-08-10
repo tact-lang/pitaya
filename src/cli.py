@@ -112,9 +112,9 @@ Examples:
         # Model options
         parser.add_argument(
             "--model",
-            choices=["claude-3-5-sonnet-latest", "sonnet", "opus", "haiku-2025-01-01"],
-            default="claude-3-5-sonnet-latest",
-            help="Claude model to use (default: claude-3-5-sonnet-latest)",
+            choices=["sonnet", "opus"],
+            default="sonnet",
+            help="Claude model to use (default: sonnet)",
         )
 
         # Repository options
@@ -331,7 +331,7 @@ Examples:
 
         # Add model (CLI overrides config)
         config["model"] = args.model or full_config.get(
-            "model", "claude-3-5-sonnet-latest"
+            "model", "sonnet"
         )
 
         # Add force_import if specified

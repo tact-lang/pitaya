@@ -78,7 +78,7 @@ async def run_instance(
     strategy_execution_id: Optional[str] = None,
     instance_id: Optional[str] = None,
     container_name: Optional[str] = None,
-    model: str = "claude-3-5-sonnet-latest",
+    model: str = "sonnet",
     session_id: Optional[str] = None,
     event_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
     timeout_seconds: int = 3600,
