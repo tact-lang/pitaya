@@ -10,6 +10,7 @@ RUN apt update && apt install -y \
     procps \
     sudo \
     jq \
+    libstdc++6 \
     && rm -rf /var/lib/apt/lists/*
 
 # Create workspace directory with proper permissions for node user
@@ -27,6 +28,10 @@ WORKDIR /workspace
 # Configure npm to use the global directory
 ENV NPM_CONFIG_PREFIX=/home/node/.npm-global
 ENV PATH=$PATH:/home/node/.npm-global/bin
+
+# Configure AppImage to extract and run
+ENV APPIMAGE_EXTRACT_AND_RUN=1
+ENV TMPDIR=/workspace
 
 # Install Claude Code CLI as claude user
 RUN npm install -g @anthropic-ai/claude-code

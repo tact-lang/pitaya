@@ -78,7 +78,7 @@ async def run_instance(
     strategy_execution_id: Optional[str] = None,
     instance_id: Optional[str] = None,
     container_name: Optional[str] = None,
-    model: str = "sonnet",
+    model: str = "claude-3-5-sonnet-latest",
     session_id: Optional[str] = None,
     event_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
     timeout_seconds: int = 3600,
@@ -91,6 +91,7 @@ async def run_instance(
     plugin_name: str = "claude-code",
     system_prompt: Optional[str] = None,
     append_system_prompt: Optional[str] = None,
+    force_import: bool = False,
 ) -> InstanceResult:
     """
     Execute a single AI coding instance in Docker.
@@ -118,6 +119,9 @@ async def run_instance(
         docker_image: Docker image override (uses plugin default if None)
         retry_config: Retry configuration for transient failures
         plugin_name: Name of the AI tool plugin to use (default: "claude-code")
+        system_prompt: System prompt for the AI tool
+        append_system_prompt: Additional system prompt to append
+        force_import: Force overwrite of target branch during import
 
     Returns:
         InstanceResult with branch name, metrics, and status
@@ -194,6 +198,7 @@ async def run_instance(
             system_prompt=system_prompt,
             append_system_prompt=append_system_prompt,
             retry_config=retry_config,
+            force_import=force_import,
         )
 
         # Success or non-retryable error
@@ -254,6 +259,7 @@ async def _run_instance_attempt(
     system_prompt: Optional[str],
     append_system_prompt: Optional[str],
     retry_config: RetryConfig,
+    force_import: bool,
 ) -> InstanceResult:
     """Single attempt at running an instance (internal helper for retry logic)."""
     start_time = time.time()
@@ -310,6 +316,19 @@ async def _run_instance_attempt(
         if not branch_name:
             raise ValidationError("Branch name must be provided by orchestration")
 
+        # Validate disk space (20GB minimum as per spec)
+        try:
+            import shutil
+
+            stat = shutil.disk_usage(str(repo_path))
+            free_gb = stat.free / (1024**3)
+            if free_gb < 20:
+                raise ValidationError(
+                    f"Insufficient disk space: {free_gb:.1f}GB free (20GB required)"
+                )
+        except OSError as e:
+            logger.warning(f"Could not check disk space: {e}")
+
         # Initialize components
         docker_manager = DockerManager()
         git_ops = GitOperations()
@@ -352,7 +371,13 @@ async def _run_instance_attempt(
                 "instance.container_creating", {"container_name": container_name}
             )
 
-            # Create base container - plugin will configure in next step
+            # Prepare auth env before container creation via plugin
+            from dataclasses import asdict
+            env_vars = await plugin.prepare_environment(
+                None, asdict(auth_config) if auth_config else None
+            )
+
+            # Create base container with plugin/environment hooks
             container = await docker_manager.create_container(
                 container_name=container_name,
                 workspace_dir=workspace_dir,  # Now using workspace instead of repo
@@ -366,22 +391,22 @@ async def _run_instance_attempt(
                 image=docker_image,
                 auth_config=auth_config,
                 reuse_container=reuse_container,
+                extra_env=env_vars,
+                plugin=plugin,
             )
 
             emit_event(
                 "instance.container_created", {"container_id": container.id[:12]}
             )
 
-            # Prepare environment using plugin
-            from dataclasses import asdict
-
-            await plugin.prepare_environment(
-                container, asdict(auth_config) if auth_config else None
-            )
-            # Note: Environment variables are already set in container config by prepare_container
-            # This is for future use when we need to set them dynamically
+            # Note: Environment variables were already set pre-creation via plugin
 
             emit_event("instance.phase_completed", {"phase": "container_creation"})
+
+            # Optional tool verification inside container per spec operations
+            # Strict tool verification: fail fast if required tools are missing
+            required = ["git", "claude"]
+            await docker_manager.verify_container_tools(container, required)
 
             # Phase 4: AI Tool Execution
             logger.info(f"Executing {plugin.name} with model {model}")
@@ -389,24 +414,19 @@ async def _run_instance_attempt(
                 "instance.claude_starting", {"model": model, "session_id": session_id}
             )
 
-            # Build command using plugin
-            command = await plugin.build_command(
+            # Execute via plugin interface
+            result_data = await plugin.execute(
+                docker_manager=docker_manager,
+                container=container,
                 prompt=prompt,
                 model=model,
                 session_id=session_id,
-                system_prompt=system_prompt,
-                append_system_prompt=append_system_prompt,
-            )
-
-            # Execute AI tool
-            result_data = await docker_manager.execute_command(
-                container=container,
-                command=command,
-                plugin=plugin,
+                timeout_seconds=timeout_seconds,
                 event_callback=lambda event: emit_event(
                     f"instance.claude_{event['type']}", event
                 ),
-                timeout_seconds=timeout_seconds,
+                system_prompt=system_prompt,
+                append_system_prompt=append_system_prompt,
             )
 
             claude_session_id = result_data.get("session_id")
@@ -431,6 +451,7 @@ async def _run_instance_attempt(
                 repo_path=repo_path,
                 workspace_dir=workspace_dir,
                 branch_name=branch_name,
+                force=force_import,
             )
 
             if has_changes:

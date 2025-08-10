@@ -138,7 +138,9 @@ def get_log_directories_by_age(logs_dir: Path) -> List[tuple[Path, datetime]]:
     return directories
 
 
-async def setup_log_rotation_task(logs_dir: Path, interval_hours: int = 24) -> None:
+async def setup_log_rotation_task(
+    logs_dir: Path, interval_hours: int = 24, max_size_mb: int = 100
+) -> None:
     """
     Set up periodic log rotation task.
 
@@ -160,6 +162,18 @@ async def setup_log_rotation_task(logs_dir: Path, interval_hours: int = 24) -> N
                     logger.info(
                         f"Log cleanup completed: removed {cleanup_count} old directories"
                     )
+
+                # Rotate oversized JSONL logs across run directories
+                try:
+                    for run_dir in logs_dir.glob("run_*"):
+                        if not run_dir.is_dir():
+                            continue
+                        for lf in (
+                            run_dir.glob("*.jsonl")
+                        ):  # orchestration.jsonl, runner.jsonl, tui.jsonl, other.jsonl
+                            rotate_log_file(lf, max_size_mb=max_size_mb)
+                except Exception as e:
+                    logger.warning(f"Error during log rotation: {e}")
 
                 # Sleep until next run
                 await asyncio.sleep(interval_hours * 3600)

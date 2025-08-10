@@ -36,6 +36,9 @@ class ClaudeCodePlugin(RunnerPlugin):
     def capabilities(self) -> PluginCapabilities:
         return PluginCapabilities(
             supports_resume=True,
+            supports_cost=True,
+            supports_streaming_events=True,
+            supports_token_counts=True,
             supports_streaming=True,
             supports_cost_limits=False,  # Removed as per spec
             requires_auth=True,
@@ -207,3 +210,36 @@ class ClaudeCodePlugin(RunnerPlugin):
         else:
             # Generic Claude error
             return "claude", True
+
+    async def execute(
+        self,
+        docker_manager: Any,
+        container: "Container",
+        prompt: str,
+        model: str,
+        session_id: Optional[str] = None,
+        timeout_seconds: int = 3600,
+        event_callback: Optional[Any] = None,
+        **kwargs,
+    ) -> Dict[str, Any]:
+        """Execute Claude Code inside the container and return result data."""
+        # Build command
+        command = await self.build_command(
+            prompt=prompt,
+            model=model,
+            session_id=session_id,
+            **kwargs,
+        )
+
+        # Execute and parse via docker manager
+        result_data = await docker_manager.execute_command(
+            container=container,
+            command=command,
+            plugin=self,
+            event_callback=(
+                (lambda ev: event_callback(ev)) if callable(event_callback) else None
+            ),
+            timeout_seconds=timeout_seconds,
+        )
+
+        return result_data

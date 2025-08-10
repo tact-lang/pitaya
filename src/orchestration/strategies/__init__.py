@@ -7,6 +7,7 @@ from .simple import SimpleStrategy
 from .scoring import ScoringStrategy, ScoringConfig
 from .best_of_n import BestOfNStrategy, BestOfNConfig
 from .iterative import IterativeStrategy, IterativeConfig
+from .bug_finding import BugFindingStrategy, BugFindingConfig
 
 # Registry of available strategies
 AVAILABLE_STRATEGIES = {
@@ -14,6 +15,7 @@ AVAILABLE_STRATEGIES = {
     "scoring": ScoringStrategy,
     "best-of-n": BestOfNStrategy,
     "iterative": IterativeStrategy,
+    "bug-finding": BugFindingStrategy,
 }
 
 __all__ = [
@@ -26,5 +28,7 @@ __all__ = [
     "BestOfNConfig",
     "IterativeStrategy",
     "IterativeConfig",
+    "BugFindingStrategy",
+    "BugFindingConfig",
     "AVAILABLE_STRATEGIES",
 ]

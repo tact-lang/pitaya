@@ -29,7 +29,7 @@ async def run_instance(
     strategy_execution_id: Optional[str] = None,
     instance_id: Optional[str] = None,
     container_name: Optional[str] = None,
-    model: str = "sonnet",
+    model: str = "claude-3-5-sonnet-latest",
     session_id: Optional[str] = None,
     event_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
     timeout_seconds: int = 3600,
@@ -38,6 +38,11 @@ async def run_instance(
     retry_config: Optional[RetryConfig] = None,
     reuse_container: bool = True,
     finalize: bool = True,
+    plugin_name: str = "claude-code",
+    docker_image: Optional[str] = None,
+    system_prompt: Optional[str] = None,
+    append_system_prompt: Optional[str] = None,
+    force_import: bool = False,
 ) -> InstanceResult:
     """
     Execute a single AI coding instance in an isolated environment.
@@ -64,6 +69,11 @@ async def run_instance(
         retry_config: Retry behavior configuration
         reuse_container: Whether to reuse existing container (default: True)
         finalize: Whether to import branch and cleanup (default: True)
+        plugin_name: AI tool plugin name (default: "claude-code")
+        docker_image: Override Docker image to use
+        system_prompt: System prompt to prepend to instructions
+        append_system_prompt: Additional system prompt to append
+        force_import: Force overwrite of target branch during import
 
     Returns:
         InstanceResult containing execution outcome, metrics, and branch information
@@ -93,6 +103,11 @@ async def run_instance(
         retry_config=retry_config,
         reuse_container=reuse_container,
         finalize=finalize,
+        plugin_name=plugin_name,
+        docker_image=docker_image,
+        system_prompt=system_prompt,
+        append_system_prompt=append_system_prompt,
+        force_import=force_import,
     )
 
 

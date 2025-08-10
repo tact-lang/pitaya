@@ -61,6 +61,10 @@ class Orchestrator:
         container_limits: Optional[ContainerLimits] = None,
         retry_config: Optional[RetryConfig] = None,
         auth_config: Optional[AuthConfig] = None,
+        snapshot_interval: int = 30,
+        event_buffer_size: int = 10000,
+        container_retention_failed_hours: int = 24,
+        container_retention_success_hours: int = 2,
     ):
         """
         Initialize orchestrator.
@@ -79,6 +83,10 @@ class Orchestrator:
         self.container_limits = container_limits or ContainerLimits()
         self.retry_config = retry_config or RetryConfig()
         self.auth_config = auth_config
+        self.snapshot_interval = snapshot_interval
+        self.event_buffer_size = event_buffer_size
+        self.container_retention_failed_hours = container_retention_failed_hours
+        self.container_retention_success_hours = container_retention_success_hours
 
         # Log auth config for debugging
         if self.auth_config:
@@ -106,6 +114,8 @@ class Orchestrator:
 
         # HTTP server (optional)
         self.http_server: Optional["OrchestratorHTTPServer"] = None
+        self._initialized: bool = False
+        self._force_import: bool = False  # set per-run from strategy_config
 
     async def initialize(self) -> None:
         """Initialize orchestrator components."""
@@ -118,12 +128,12 @@ class Orchestrator:
 
         # Initialize components
         self.state_manager = StateManager(
-            self.state_dir, event_bus=None
+            self.state_dir, event_bus=None, snapshot_interval=self.snapshot_interval
         )  # Will set event_bus later
 
         # Initialize a default event bus for early subscriptions
         if not self.event_bus:
-            self.event_bus = EventBus()
+            self.event_bus = EventBus(max_events=self.event_buffer_size)
 
         # Clean up orphaned containers from previous runs
         await self.cleanup_orphaned_containers()
@@ -138,14 +148,16 @@ class Orchestrator:
         logger.info(
             f"Orchestrator initialized with {self.max_parallel_instances} max parallel instances and {num_executors} executor tasks"
         )
+        self._initialized = True
 
     async def start_http_server(self, port: int) -> None:
         """Start HTTP server for multi-UI support."""
         from .http_server import OrchestratorHTTPServer
 
         self.http_server = OrchestratorHTTPServer(self, port)
-        await self.http_server.start()
-        logger.info(f"HTTP server started on port {port}")
+        # Run in separate thread to match spec wording
+        self.http_server.start_threaded()
+        logger.info(f"HTTP server started (threaded) on port {port}")
 
     async def shutdown(self) -> None:
         """Shutdown orchestrator cleanly."""
@@ -205,7 +217,10 @@ class Orchestrator:
 
         # Stop HTTP server if running
         if self.http_server:
-            await self.http_server.stop()
+            try:
+                self.http_server.stop_threaded()
+            except Exception:
+                pass
 
         # Close event bus
         if self.event_bus:
@@ -255,7 +270,7 @@ class Orchestrator:
         # Initialize event bus for this run (if not already initialized)
         if not self.event_bus:
             event_log_path = self.logs_dir / run_id / "events.jsonl"
-            self.event_bus = EventBus(persist_path=event_log_path)
+            self.event_bus = EventBus(max_events=self.event_buffer_size, persist_path=event_log_path)
         else:
             # If event bus exists, update persistence path
             event_log_path = self.logs_dir / run_id / "events.jsonl"
@@ -275,6 +290,9 @@ class Orchestrator:
             repo_path=repo_path,
             base_branch=base_branch,
         )
+
+        # Per-run force_import setting from strategy_config
+        self._force_import = bool((strategy_config or {}).get("force_import", False))
 
         # Start periodic snapshots
         await self.state_manager.start_periodic_snapshots()
@@ -348,10 +366,13 @@ class Orchestrator:
                                 ctx=ctx,
                             )
 
-                            # Update strategy state
+                            # Determine strategy state based on results per spec semantics
+                            state_value = "completed"
+                            if res and all((not r.success) for r in res):
+                                state_value = "failed"
                             self.state_manager.update_strategy_state(
                                 strategy_id=strat_id,
-                                state="completed",
+                                state=state_value,
                                 results=res,
                             )
 
@@ -446,10 +467,13 @@ class Orchestrator:
                     ctx=ctx,
                 )
 
-                # Update strategy state
+                # Determine strategy state based on results per spec semantics
+                state_value = "completed"
+                if results and all((not r.success) for r in results):
+                    state_value = "failed"
                 self.state_manager.update_strategy_state(
                     strategy_id=strategy_id,
-                    state="completed",
+                    state=state_value,
                     results=results,
                 )
 
@@ -535,6 +559,13 @@ class Orchestrator:
             f"spawn_instance called: strategy={strategy_name}, prompt={prompt[:30]}..."
         )
 
+        # Check disk space before starting (spec: validate before instances)
+        try:
+            await self._check_disk_space()
+        except Exception:
+            # _check_disk_space already logs validation errors; re-raise to stop spawn
+            raise
+
         # Generate instance ID
         instance_id = str(uuid.uuid4())[:8]  # Short ID for readability
 
@@ -558,11 +589,10 @@ class Orchestrator:
             sidx = 1
 
         # Generate names according to spec
-        timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
         # Extract timestamp from run_id (format: "run_YYYYMMDD_HHMMSS")
         run_timestamp = self.state_manager.current_state.run_id.replace("run_", "")
         container_name = f"orchestrator_{run_timestamp}_s{sidx}_i{instance_index}"
-        branch_name = f"{strategy_name}_{timestamp}_{sidx}_{instance_index}"
+        branch_name = f"{strategy_name}_{run_timestamp}_{sidx}_{instance_index}"
 
         # Register instance
         self.state_manager.register_instance(
@@ -662,8 +692,11 @@ class Orchestrator:
                     finally:
                         self._active_instances.remove(instance_id)
 
-            except (OrchestratorError, asyncio.CancelledError) as e:
+            except OrchestratorError as e:
                 logger.exception(f"Error in instance executor: {e}")
+            except asyncio.CancelledError:
+                # Expected during shutdown or task cancellation; do not log as error
+                break
 
     async def _execute_instance(self, instance_id: str) -> None:
         """Execute a single instance."""
@@ -690,12 +723,18 @@ class Orchestrator:
             instance_id=instance_id,
         )
 
-        # Create event callback
+        # Create event callback (forward and capture session_id for resume)
         def event_callback(event: Dict[str, Any]) -> None:
-            # Forward instance events to our event bus
+            data = event.get("data", {})
+            sid = data.get("session_id")
+            if sid:
+                try:
+                    self.state_manager.update_instance_session_id(instance_id, sid)
+                except Exception:
+                    pass
             self.event_bus.emit(
-                event_type=event["type"],
-                data=event.get("data", {}),
+                event_type=event.get("type", "instance.event"),
+                data=data,
                 instance_id=instance_id,
             )
 
@@ -723,7 +762,18 @@ class Orchestrator:
                 container_limits=self.container_limits,
                 auth_config=self.auth_config,
                 retry_config=self.retry_config,
+                force_import=self._force_import,
             )
+
+            # Populate strategy-specific metadata on the result per spec
+            try:
+                if result and hasattr(result, "metadata"):
+                    result.metadata = result.metadata or {}
+                    result.metadata.update(info.metadata or {})
+                    if strategy_execution_id:
+                        result.metadata["strategy_execution_id"] = strategy_execution_id
+            except Exception:
+                pass
 
             # Update state with result
             self.state_manager.update_instance_state(
@@ -789,6 +839,7 @@ class Orchestrator:
         limit: int = 1000,
         run_id: Optional[str] = None,
         event_types: Optional[Set[str]] = None,
+        timestamp: Optional[datetime] = None,
     ) -> Tuple[List[Dict[str, Any]], int]:
         """
         Get events since a given offset.
@@ -805,8 +856,23 @@ class Orchestrator:
         if not self.event_bus:
             return [], 0
 
+        # If run_id specified, point event bus to that run's events file
+        if run_id:
+            try:
+                event_log_path = self.logs_dir / run_id / "events.jsonl"
+                if self.event_bus.persist_path != event_log_path:
+                    # Close existing file and open new
+                    try:
+                        self.event_bus.close()
+                    except Exception:
+                        pass
+                    self.event_bus.persist_path = event_log_path
+                    self.event_bus._open_persist_file()
+            except Exception:
+                pass
+
         return self.event_bus.get_events_since(
-            offset=offset, limit=limit, event_types=event_types
+            offset=offset, limit=limit, event_types=event_types, timestamp=timestamp
         )
 
     async def cleanup_orphaned_containers(self) -> None:
@@ -817,7 +883,10 @@ class Orchestrator:
             docker_manager = DockerManager()
 
             # Clean up containers with differentiated retention times
-            cleaned = await docker_manager.cleanup_orphaned_containers()
+            cleaned = await docker_manager.cleanup_orphaned_containers(
+                failed_retention_hours=self.container_retention_failed_hours,
+                success_retention_hours=self.container_retention_success_hours,
+            )
 
             if cleaned > 0:
                 logger.info(f"Cleaned up {cleaned} orphaned containers")
@@ -853,193 +922,97 @@ class Orchestrator:
             await self.initialize()
 
         # Load saved state and recover from events
+        # Ensure event bus is configured to this run's events file
+        event_log_path = self.logs_dir / run_id / "events.jsonl"
+        if not self.event_bus:
+            self.event_bus = EventBus(max_events=self.event_buffer_size, persist_path=event_log_path)
+        else:
+            # Repoint persist path to this run
+            self.event_bus.persist_path = event_log_path
+            self.event_bus._open_persist_file()
+        self.state_manager.event_bus = self.event_bus
+
         saved_state = await self.state_manager.load_and_recover_state(run_id)
         if not saved_state:
             raise ValueError(f"No saved state found for run {run_id}")
 
-        # Replay events from saved offset
-        events_file = self.logs_dir / run_id / "events.jsonl"
-        if events_file.exists() and saved_state.last_event_offset > 0:
-            # Fast-forward event bus to saved position
-            self.event_bus._current_offset = saved_state.last_event_offset
-            logger.info(f"Resumed from event offset {saved_state.last_event_offset}")
+        # Build tasks according to resume policy
+        from ..shared import InstanceStatus as _IS
+        from ..instance_runner.plugins import AVAILABLE_PLUGINS
+        plugin = AVAILABLE_PLUGINS["claude-code"]()
+        resume_tasks: list[asyncio.Task] = []
+        cannot_resume_count = 0
 
-        # Check Docker availability
+        # Docker client to check container existence
         from ..instance_runner.docker_manager import DockerManager
-
         docker_manager = DockerManager()
 
-        # Process each instance to determine resume status
-        instances_to_resume = []
-        cannot_resume = []
-
-        for instance_id, instance_info in saved_state.instances.items():
-            if instance_info.state == "running":
-                # This instance was interrupted
+        for iid, info in saved_state.instances.items():
+            if info.state == _IS.RUNNING:
                 if force_fresh:
-                    # With force_fresh, mark all running instances as needing fresh containers
-                    cannot_resume.append((instance_info, "force_fresh"))
-                    logger.info(
-                        f"Instance {instance_id} will be re-run with fresh container (--resume-fresh)"
+                    resume_tasks.append(
+                        asyncio.create_task(self._run_instance_from_saved_state(info))
                     )
                 else:
+                    can_resume = False
                     try:
-                        # Check if container exists
-                        container = await asyncio.get_event_loop().run_in_executor(
-                            None,
-                            lambda: docker_manager.client.containers.get(
-                                instance_info.container_name
+                        if info.session_id and plugin.capabilities.supports_resume:
+                            await asyncio.get_event_loop().run_in_executor(
+                                None,
+                                lambda: docker_manager.client.containers.get(info.container_name),
+                            )
+                            can_resume = True
+                    except Exception:
+                        can_resume = False
+
+                    if can_resume:
+                        async def do_resume(inst) -> InstanceResult:
+                            return await run_instance(
+                                prompt=inst.prompt,
+                                repo_path=saved_state.repo_path,
+                                base_branch=inst.base_branch,
+                                branch_name=inst.branch_name,
+                                run_id=saved_state.run_id,
+                                strategy_execution_id=None,
+                                instance_id=inst.instance_id,
+                                container_name=inst.container_name,
+                                model=inst.metadata.get("model", "sonnet"),
+                                session_id=inst.session_id,
+                                event_callback=lambda e: self.event_bus.emit(e.get("type", "instance.event"), e.get("data", {}), instance_id=inst.instance_id),
+                                timeout_seconds=3600,
+                                container_limits=self.container_limits,
+                                auth_config=self.auth_config,
+                                reuse_container=True,
+                                finalize=True,
+                                force_import=self._force_import,
+                            )
+                        resume_tasks.append(asyncio.create_task(do_resume(info)))
+                    else:
+                        self.state_manager.update_instance_state(
+                            instance_id=info.instance_id,
+                            state=_IS.FAILED,
+                            result=InstanceResult(
+                                success=False,
+                                error="cannot_resume",
+                                error_type="cannot_resume",
+                                branch_name=info.branch_name,
+                                status="failed",
                             ),
                         )
+                        cannot_resume_count += 1
 
-                        # Check plugin resume capability
-                        from ..instance_runner.plugins import get_plugin
+        # Wait for any re-run tasks
+        resumed_results = await asyncio.gather(*resume_tasks, return_exceptions=True) if resume_tasks else []
+        all_results = [r for r in resumed_results if r and not isinstance(r, Exception)]
 
-                        plugin = get_plugin("claude-code")
-
-                        if plugin.capabilities.supports_resume:
-                            instances_to_resume.append((instance_info, container))
-                            logger.info(f"Instance {instance_id} can be resumed")
-                        else:
-                            cannot_resume.append((instance_info, "plugin_no_resume"))
-                            logger.warning(
-                                f"Instance {instance_id} cannot resume - plugin doesn't support it"
-                            )
-
-                    except (DockerError, OSError) as e:
-                        # Container doesn't exist - check if workspace exists
-                        from pathlib import Path
-
-                        # Try to determine workspace path from saved state
-                        workspace_path = None
-                        if (
-                            hasattr(instance_info, "workspace_path")
-                            and instance_info.workspace_path
-                        ):
-                            workspace_path = Path(instance_info.workspace_path)
-
-                        if workspace_path and workspace_path.exists():
-                            # Workspace exists but container missing
-                            cannot_resume.append((instance_info, "container_missing"))
-                            logger.warning(
-                                f"Instance {instance_id} cannot resume - container missing but workspace exists: {e}"
-                            )
-                        else:
-                            # Both container and workspace missing
-                            cannot_resume.append((instance_info, "artifacts_missing"))
-                            logger.warning(
-                                f"Instance {instance_id} cannot resume - both container and workspace missing: {e}"
-                            )
-
-        # Emit resume event
-        self.event_bus.emit(
-            "run.resumed",
-            {
-                "run_id": run_id,
-                "resumable_instances": len(instances_to_resume),
-                "cannot_resume": len(cannot_resume),
-                "total_instances": saved_state.total_instances,
-            },
-        )
-
-        # Resume instances
-        resume_tasks = []
-        for instance_info, container in instances_to_resume:
-            # Update instance state to resuming
-            self.state_manager.update_instance_state(
-                instance_id=instance_info.instance_id, state="resuming"
-            )
-
-            # Create resume task
-            async def resume_instance(info):
-                try:
-                    # Call run_instance with session_id for resume
-                    result = await run_instance(
-                        prompt=info.prompt,
-                        repo_path=Path(saved_state.repo_path),
-                        base_branch=info.base_branch,
-                        branch_name=info.branch_name,
-                        run_id=run_id,
-                        strategy_execution_id=info.metadata.get(
-                            "strategy_execution_id"
-                        ),
-                        instance_id=info.instance_id,
-                        container_name=info.container_name,
-                        model=info.metadata.get("model", "sonnet"),
-                        session_id=info.session_id,  # Resume with saved session
-                        event_callback=lambda e: self._handle_instance_event(
-                            e, info.instance_id
-                        ),
-                        timeout_seconds=self.container_limits.timeout_seconds,
-                        container_limits=self.container_limits,
-                        auth_config=self.auth_config,
-                        reuse_container=True,  # Reuse existing container
-                        finalize=True,
-                    )
-                    return result
-                except (DockerError, GitError, OrchestratorError) as e:
-                    logger.error(f"Failed to resume instance {info.instance_id}: {e}")
-                    return None
-
-            task = asyncio.create_task(resume_instance(instance_info))
-            resume_tasks.append(task)
-
-        # Handle non-resumable instances
-        for instance_info, reason in cannot_resume:
-            if reason == "force_fresh":
-                # Re-run with fresh container
-                logger.info(
-                    f"Re-running instance {instance_info.instance_id} with fresh container"
-                )
-
-                # Create task to re-run the instance
-                task = asyncio.create_task(
-                    self._run_instance_from_saved_state(instance_info)
-                )
-                resume_tasks.append(task)
-            else:
-                # Mark as failed
-                self.state_manager.update_instance_state(
-                    instance_id=instance_info.instance_id,
-                    state="failed",
-                    error=f"Cannot resume: {reason}",
-                )
-
-        # Wait for resumed instances
-        resumed_results = await asyncio.gather(*resume_tasks, return_exceptions=True)
-
-        # Continue any incomplete strategies
-        incomplete_strategies = [
-            (sid, sinfo)
-            for sid, sinfo in saved_state.strategies.items()
-            if sinfo.state == "running"
-        ]
-
-        if incomplete_strategies:
-            logger.info(
-                f"Continuing {len(incomplete_strategies)} incomplete strategies"
-            )
-
-        # Collect all results
-        all_results = []
-        for result in resumed_results:
-            if result and not isinstance(result, Exception):
-                all_results.append(result)
-
-        # Update run completion state
+        # Finalize state and save results
         self.state_manager.current_state.completed_at = datetime.now(timezone.utc)
-        self.state_manager.save_snapshot()
-
-        # Save results to disk
+        await self.state_manager.save_snapshot()
         await self._save_results(run_id, all_results)
 
         self.event_bus.emit(
             "run.completed",
-            {
-                "run_id": run_id,
-                "resumed": True,
-                "total_results": len(all_results),
-            },
+            {"run_id": run_id, "resumed": True, "cannot_resume": cannot_resume_count, "total_results": len(all_results)},
         )
 
         return all_results
@@ -1063,24 +1036,25 @@ class Orchestrator:
         try:
             result = await run_instance(
                 prompt=instance_info.prompt,
-                repo_path=Path(instance_info.repo_path),
+                repo_path=self.state_manager.current_state.repo_path,
                 base_branch=instance_info.base_branch,
                 branch_name=instance_info.branch_name,
                 instance_id=instance_info.instance_id,
-                run_id=instance_info.run_id,
-                strategy_execution_id=instance_info.strategy_exec,
-                event_callback=lambda event_type, data: self.event_bus.emit(
-                    event_type, {**data, "instance_id": instance_info.instance_id}
+                run_id=self.state_manager.current_state.run_id,
+                strategy_execution_id=None,
+                event_callback=lambda e: self.event_bus.emit(
+                    e.get("type", "instance.event"), e.get("data", {}), instance_id=instance_info.instance_id
                 ),
                 container_name=instance_info.container_name,
                 container_limits=self.container_limits,
                 retry_config=self.retry_config,
                 auth_config=self.auth_config,
+                force_import=self._force_import,
             )
 
             # Update state
             self.state_manager.update_instance_state(
-                instance_id=instance_info.instance_id, state="completed", result=result
+                instance_id=instance_info.instance_id, state=_IS.COMPLETED, result=result
             )
 
             return result
@@ -1090,7 +1064,7 @@ class Orchestrator:
 
             # Mark as failed
             self.state_manager.update_instance_state(
-                instance_id=instance_info.instance_id, state="failed", error=str(e)
+                instance_id=instance_info.instance_id, state=_IS.FAILED, result=InstanceResult(success=False, error=str(e), error_type="rerun_failed", branch_name=instance_info.branch_name, status="failed")
             )
 
             # Return a failed result
@@ -1140,7 +1114,8 @@ class Orchestrator:
         Creates:
         - ./results/run_*/summary.json - Machine-readable run summary
         - ./results/run_*/branches.txt - Simple list of branch names
-        - ./results/run_*/metrics.csv - Instance-level metrics
+        - ./results/run_*/metrics.csv - Time-series metrics (per spec)
+        - ./results/run_*/instance_metrics.csv - Instance-level snapshot metrics
         """
         try:
             # Create results directory
@@ -1257,14 +1232,11 @@ class Orchestrator:
                 with open(branches_path, "w") as f:
                     f.write("\n".join(branches) + "\n")
 
-            # Save metrics.csv
-            metrics_path = results_dir / "metrics.csv"
+            # Save per-instance snapshot metrics as instance_metrics.csv
+            metrics_path = results_dir / "instance_metrics.csv"
             with open(metrics_path, "w") as f:
                 # Write header
-                f.write(
-                    "instance_id,branch_name,status,duration_seconds,cost,tokens,input_tokens,output_tokens,"
-                )
-                f.write("commit_count,lines_added,lines_deleted,has_changes\n")
+                f.write("instance_id,branch_name,status,duration_seconds,cost,tokens,input_tokens,output_tokens,commit_count,lines_added,lines_deleted,has_changes\n")
 
                 # Write data rows
                 for result in results:
@@ -1312,6 +1284,50 @@ class Orchestrator:
                     ]
                     f.write(",".join(row) + "\n")
 
+            # Generate time-series metrics.csv per spec from events log
+            try:
+                events_file = self.logs_dir / run_id / "events.jsonl"
+                ts_path = results_dir / "metrics.csv"
+                running: set[str] = set()
+                completed_set: set[str] = set()
+                failed_set: set[str] = set()
+                inst_tokens: Dict[str, int] = {}
+                inst_cost: Dict[str, float] = {}
+                if events_file.exists():
+                    with open(events_file, "r") as ef, open(ts_path, "w") as tf:
+                        tf.write("timestamp,active_instances,completed_instances,failed_instances,total_cost,total_tokens,event_type\n")
+                        for line in ef:
+                            try:
+                                ev = json.loads(line)
+                            except Exception:
+                                continue
+                            et = ev.get("type", "")
+                            iid = ev.get("instance_id")
+                            data = ev.get("data", {})
+                            ts = ev.get("timestamp", "")
+                            if et == "instance.started" and iid:
+                                running.add(iid)
+                            elif et == "instance.completed" and iid:
+                                running.discard(iid)
+                                completed_set.add(iid)
+                            elif et == "instance.failed" and iid:
+                                running.discard(iid)
+                                failed_set.add(iid)
+                            elif et == "instance.claude_turn_complete" and iid:
+                                tm = data.get("turn_metrics", {})
+                                inst_tokens[iid] = inst_tokens.get(iid, 0) + int(tm.get("tokens", 0) or 0)
+                                inst_cost[iid] = inst_cost.get(iid, 0.0) + float(tm.get("cost", 0.0) or 0.0)
+                            elif et == "instance.claude_completed" and iid:
+                                m = data.get("metrics", {})
+                                if m:
+                                    inst_tokens[iid] = int(m.get("total_tokens", inst_tokens.get(iid, 0)))
+                                    inst_cost[iid] = float(m.get("total_cost", inst_cost.get(iid, 0.0)))
+                            total_cost = sum(inst_cost.values())
+                            total_tokens = sum(inst_tokens.values())
+                            tf.write(f"{ts},{len(running)},{len(completed_set)},{len(failed_set)},{total_cost:.4f},{total_tokens},{et}\n")
+            except Exception as e:
+                logger.debug(f"Failed generating time-series metrics: {e}")
+
             # Create strategy output directory
             strategy_dir = results_dir / "strategy_output"
             strategy_dir.mkdir(exist_ok=True)
@@ -1342,6 +1358,70 @@ class Orchestrator:
 
                     with open(strategy_file, "w") as f:
                         json.dump(strategy_data, f, indent=2)
+
+                    # Best-of-N helpers: best_branch.txt and scores.json
+                    try:
+                        if strat_info.strategy_name == "best-of-n" and strat_info.results:
+                            selected_branch = None
+                            scores: Dict[str, float] = {}
+                            for res in strat_info.results:
+                                # res may be InstanceResult or dict depending on context
+                                branch = getattr(res, "branch_name", None) or (
+                                    res.get("branch_name") if isinstance(res, dict) else None
+                                )
+                                metrics = getattr(res, "metrics", None) or (
+                                    res.get("metrics") if isinstance(res, dict) else {}
+                                )
+                                if metrics:
+                                    if metrics.get("selected") and branch:
+                                        selected_branch = branch
+                                    if branch and metrics.get("score") is not None:
+                                        try:
+                                            scores[branch] = float(metrics.get("score"))
+                                        except Exception:
+                                            pass
+                            if selected_branch:
+                                with open(strategy_dir / "best_branch.txt", "w") as bf:
+                                    bf.write(f"{selected_branch}\n")
+                            if scores:
+                                with open(strategy_dir / "scores.json", "w") as sf:
+                                    json.dump(scores, sf, indent=2)
+                    except Exception:
+                        pass
+
+            # Optional Markdown export (summary-focused)
+            try:
+                md_path = results_dir / "summary.md"
+                with open(md_path, "w") as f:
+                    f.write(f"# Orchestrator Run Summary: {run_id}\n\n")
+                    f.write(f"Prompt: {state.prompt}\n\n")
+                    f.write(f"Repository: {state.repo_path}\n\n")
+                    f.write(
+                        f"Total Instances: {state.total_instances} | Completed: {state.completed_instances} | Failed: {state.failed_instances}\n\n"
+                    )
+                    f.write(
+                        f"Total Cost: ${state.total_cost:.2f} | Total Tokens: {state.total_tokens}\n\n"
+                    )
+                    if branches:
+                        f.write("## Branches\n\n")
+                        for b in branches:
+                            f.write(f"- {b}\n")
+                        f.write("\n")
+                    if results:
+                        f.write("## Instances\n\n")
+                        for r in results:
+                            status = "✅" if r.success else "❌"
+                            dur = (
+                                f"{r.duration_seconds:.0f}s" if r.duration_seconds else "-"
+                            )
+                            cost = r.metrics.get("total_cost", 0.0) if r.metrics else 0.0
+                            tokens = r.metrics.get("total_tokens", 0) if r.metrics else 0
+                            f.write(
+                                f"- {status} {r.branch_name or 'no-branch'} • {dur} • ${cost:.2f} • {tokens} tokens\n"
+                            )
+            except (OSError, IOError, ValueError):
+                # Non-fatal if markdown export fails
+                pass
 
             logger.info(f"Saved results to {results_dir}")
 

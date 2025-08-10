@@ -85,6 +85,33 @@ def merge_config(
     return result
 
 
+def _apply_yaml_aliases(config: Dict[str, Any]) -> Dict[str, Any]:
+    """Normalize YAML keys to spec-compatible names.
+
+    Aliases:
+    - container_cpu -> runner.cpu_limit
+    - container_memory -> runner.memory_limit
+    Both at top-level or under a known section are handled.
+    """
+    def set_runner_key(key: str, value: Any):
+        config.setdefault("runner", {})[key] = value
+
+    # Top-level aliases
+    if "container_cpu" in config:
+        set_runner_key("cpu_limit", config.pop("container_cpu"))
+    if "container_memory" in config:
+        set_runner_key("memory_limit", config.pop("container_memory"))
+
+    # Nested aliases under 'runner'
+    runner = config.get("runner", {})
+    if "container_cpu" in runner:
+        set_runner_key("cpu_limit", runner.pop("container_cpu"))
+    if "container_memory" in runner:
+        set_runner_key("memory_limit", runner.pop("container_memory"))
+
+    return config
+
+
 def deep_merge(base: Dict[str, Any], overlay: Dict[str, Any]) -> None:
     """Recursively merge overlay dict into base dict."""
     for key, value in overlay.items():
@@ -203,6 +230,8 @@ def load_env_config() -> Dict[str, Any]:
     env_mappings = {
         # Top-level settings
         "MODEL": "model",
+        # Also support default model name per spec
+        "DEFAULT_MODEL": "model",
         "STRATEGY": "strategy",
         "REPO": "repo",
         "BASE_BRANCH": "base_branch",
@@ -219,6 +248,9 @@ def load_env_config() -> Dict[str, Any]:
         "RUNNER__TIMEOUT": "runner.timeout",
         "RUNNER__CPU_LIMIT": "runner.cpu_limit",
         "RUNNER__MEMORY_LIMIT": "runner.memory_limit",
+        # Spec-friendly resource names
+        "CONTAINER_CPU": "runner.cpu_limit",
+        "CONTAINER_MEMORY": "runner.memory_limit",
         # Orchestration settings
         "ORCHESTRATION__MAX_PARALLEL_INSTANCES": "orchestration.max_parallel_instances",
         "ORCHESTRATION__SNAPSHOT_INTERVAL": "orchestration.snapshot_interval",
@@ -239,6 +271,7 @@ def load_env_config() -> Dict[str, Any]:
         "TUI__REFRESH_RATE": "tui.refresh_rate",
         "TUI__SHOW_TIMESTAMPS": "tui.show_timestamps",
         "TUI__COLOR_SCHEME": "tui.color_scheme",
+        "TUI__FORCE_DISPLAY_MODE": "tui.force_display_mode",
     }
 
     for env_suffix, config_path in env_mappings.items():
@@ -252,6 +285,42 @@ def load_env_config() -> Dict[str, Any]:
                     current[part] = {}
                 current = current[part]
             current[parts[-1]] = value
+
+    # Dynamic strategy parameters: ORCHESTRATOR_STRATEGY__<NAME>__KEY=VALUE
+    def _auto_convert(val: str):
+        low = val.lower()
+        if low in ("true", "yes", "1"):
+            return True
+        if low in ("false", "no", "0"):
+            return False
+        try:
+            return int(val)
+        except ValueError:
+            pass
+        try:
+            return float(val)
+        except ValueError:
+            pass
+        return val
+
+    for key, value in os.environ.items():
+        if not key.startswith("ORCHESTRATOR_STRATEGY__"):
+            continue
+        try:
+            _, _, rest = key.partition("ORCHESTRATOR_STRATEGY__")
+            strat_name, _, param = rest.partition("__")
+            if not strat_name or not param:
+                continue
+            # Normalize
+            strategy = strat_name.lower().replace(" ", "_")
+            param_key = param.lower()
+            # Convert value types
+            converted = _auto_convert(value)
+            # Place into config under strategies
+            strategies = config.setdefault("strategies", {})
+            strategies.setdefault(strategy, {})[param_key] = converted
+        except Exception:
+            continue
 
     return config
 
@@ -416,6 +485,9 @@ def load_config(
         file_config=yaml_config,
         defaults=defaults,
     )
+
+    # Normalize YAML alias keys to match spec naming
+    config = _apply_yaml_aliases(config)
 
     # Validate authentication
     config = validate_auth_config(config)

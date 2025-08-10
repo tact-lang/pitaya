@@ -82,7 +82,8 @@ class OrchestratorClient:
         """
         try:
             # Build query parameters
-            params = {"offset": offset, "limit": limit}
+            # Spec uses 'since' for the starting offset
+            params = {"since": offset, "limit": limit}
             if run_id:
                 params["run_id"] = run_id
             if event_types:

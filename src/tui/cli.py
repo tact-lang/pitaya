@@ -56,7 +56,7 @@ Examples:
         )
 
         # Connection options
-        conn_group = parser.add_mutually_exclusive_group(required=True)
+        conn_group = parser.add_mutually_exclusive_group(required=False)
         conn_group.add_argument(
             "--connect", metavar="HOST:PORT", help="Connect to orchestrator HTTP server"
         )
@@ -119,6 +119,13 @@ Examples:
                 # Connect to orchestrator HTTP server
                 return await self._run_connected(args)
             else:
+                # If events file not provided but run-id is, infer path
+                if not args.events_file and args.run_id:
+                    # Respect ORCHESTRATOR_LOGS_DIR if set
+                    import os
+                    logs_base = os.environ.get("ORCHESTRATOR_LOGS_DIR", "logs")
+                    inferred = Path(logs_base) / args.run_id / "events.jsonl"
+                    args.events_file = inferred
                 # Read from events file
                 return await self._run_offline(args)
         except KeyboardInterrupt:
@@ -163,13 +170,28 @@ Examples:
         # Run appropriate output mode
         if self.output_mode == "tui":
             # Create and run TUI display
+            # Read refresh rate and display mode from env when not provided
+            import os
+            refresh_rate = 0.1
+            try:
+                rr = os.environ.get("ORCHESTRATOR_TUI__REFRESH_RATE")
+                if rr is not None:
+                    refresh_rate = float(rr) / 100.0 if float(rr) > 1 else float(rr)
+            except Exception:
+                pass
+
             display = TUIDisplay(
-                console=self.console, refresh_rate=0.1, state_poll_interval=3.0
+                console=self.console, refresh_rate=refresh_rate, state_poll_interval=3.0
             )
 
             # Override display mode if specified
             if self.display_mode:
                 display.state.current_run.force_detail_level = self.display_mode
+            else:
+                # Try env override
+                dm = os.environ.get("ORCHESTRATOR_TUI__FORCE_DISPLAY_MODE")
+                if dm in {"detailed", "compact", "dense"} and display.state.current_run:
+                    display.state.current_run.force_detail_level = dm
 
             # Run TUI with client
             await display.run_connected(client, args.from_offset)
@@ -208,13 +230,25 @@ Examples:
         # Run appropriate output mode
         if self.output_mode == "tui":
             # Create and run TUI display
+            import os
+            refresh_rate = 0.1
+            try:
+                rr = os.environ.get("ORCHESTRATOR_TUI__REFRESH_RATE")
+                if rr is not None:
+                    refresh_rate = float(rr) / 100.0 if float(rr) > 1 else float(rr)
+            except Exception:
+                pass
             display = TUIDisplay(
-                console=self.console, refresh_rate=0.1, state_poll_interval=3.0
+                console=self.console, refresh_rate=refresh_rate, state_poll_interval=3.0
             )
 
             # Override display mode if specified
             if self.display_mode and display.state.current_run:
                 display.state.current_run.force_detail_level = self.display_mode
+            else:
+                dm = os.environ.get("ORCHESTRATOR_TUI__FORCE_DISPLAY_MODE")
+                if dm in {"detailed", "compact", "dense"} and display.state.current_run:
+                    display.state.current_run.force_detail_level = dm
 
             # Run TUI with file
             await display.run(None, events_file, args.from_offset)

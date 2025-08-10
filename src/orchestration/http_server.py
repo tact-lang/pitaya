@@ -8,6 +8,8 @@ to observe orchestration runs in progress.
 import json
 import logging
 from typing import Optional, TYPE_CHECKING
+import threading
+import asyncio
 from aiohttp import web
 
 if TYPE_CHECKING:
@@ -37,6 +39,9 @@ class OrchestratorHTTPServer:
         self.port = port
         self.app = web.Application()
         self.runner: Optional[web.AppRunner] = None
+        self._thread: Optional[threading.Thread] = None
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
+        self._started_event: Optional[threading.Event] = None
 
         # Setup routes
         self.app.router.add_get("/state", self.handle_get_state)
@@ -56,6 +61,50 @@ class OrchestratorHTTPServer:
         if self.runner:
             await self.runner.cleanup()
             logger.info("HTTP server stopped")
+
+    # Threaded helpers to match spec "separate thread" wording
+    def start_threaded(self) -> None:
+        """Start the HTTP server in a separate thread with its own event loop."""
+        if self._thread and self._thread.is_alive():
+            return
+
+        self._started_event = threading.Event()
+
+        def _run():
+            try:
+                self._loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(self._loop)
+                async def _async_start():
+                    await self.start()
+                self._loop.run_until_complete(_async_start())
+                if self._started_event:
+                    self._started_event.set()
+                self._loop.run_forever()
+            except Exception as e:
+                logger.exception(f"HTTP server thread error: {e}")
+            finally:
+                try:
+                    if self._loop and not self._loop.is_closed():
+                        self._loop.run_until_complete(self.stop())
+                        self._loop.stop()
+                        self._loop.close()
+                except Exception:
+                    pass
+
+        self._thread = threading.Thread(target=_run, name="OrchestratorHTTPServer", daemon=True)
+        self._thread.start()
+        if self._started_event:
+            self._started_event.wait(timeout=5.0)
+
+    def stop_threaded(self) -> None:
+        """Stop the threaded HTTP server and join the thread."""
+        try:
+            if self._loop and self._loop.is_running():
+                self._loop.call_soon_threadsafe(self._loop.stop)
+        except Exception:
+            pass
+        if self._thread and self._thread.is_alive():
+            self._thread.join(timeout=5.0)
 
     async def handle_get_state(self, request: web.Request) -> web.Response:
         """
@@ -91,13 +140,24 @@ class OrchestratorHTTPServer:
             JSON response with events array and next offset
         """
         try:
-            # Parse query parameters
-            since_offset = int(request.query.get("since", "0"))
+            # Parse query parameters; support both 'since' (spec) and 'offset' (client)
+            since_q = request.query.get("since")
+            offset_q = request.query.get("offset")
+            since_offset = int(since_q if since_q is not None else (offset_q or "0"))
             limit = min(int(request.query.get("limit", "1000")), 10000)
+            # Optional timestamp filter (ISO 8601)
+            ts_q = request.query.get("since_ts")
+            ts = None
+            if ts_q:
+                try:
+                    from datetime import datetime
+                    ts = datetime.fromisoformat(ts_q)
+                except Exception:
+                    ts = None
 
             # Get events from orchestrator
             events, next_offset = await self.orchestrator.get_events_since(
-                offset=since_offset, limit=limit
+                offset=since_offset, limit=limit, timestamp=ts
             )
 
             return web.json_response(

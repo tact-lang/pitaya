@@ -7,6 +7,7 @@ Implements the isolation strategy from specification section 3.5:
 """
 
 import asyncio
+import os
 import logging
 import shutil
 from pathlib import Path
@@ -67,6 +68,17 @@ class GitOperations:
             # Fallback for standalone usage
             workspace_dir = temp_base / f"orchestrator/instance_{instance_id}"
 
+        # On Windows, ensure path length remains below typical limits
+        try:
+            import platform
+            if platform.system() == "Windows":
+                # If the final path would be too long, use a shorter form
+                if len(str(workspace_dir)) > 200:
+                    from uuid import uuid4
+                    workspace_dir = temp_base / f"orc/{uuid4().hex[:8]}"
+        except Exception:
+            pass
+
         try:
             # Ensure parent directory exists
             await asyncio.to_thread(
@@ -79,7 +91,46 @@ class GitOperations:
 
             logger.info(f"Creating isolated workspace at {workspace_dir}")
 
-            # Clone with complete isolation
+            use_shared_clone = bool(os.environ.get("ORCHESTRATOR_GIT_SHARED_CLONE"))
+
+            # Prepare optional shared mirror for faster clones
+            reference_arg = []
+            if use_shared_clone:
+                try:
+                    mirror_base = temp_base / "orchestrator/cache"
+                    mirror_base.mkdir(parents=True, exist_ok=True)
+                    # Use a simple hash of repo path for cache key
+                    import hashlib
+                    key = hashlib.sha256(str(repo_path).encode("utf-8")).hexdigest()[:12]
+                    mirror = mirror_base / f"{key}.mirror"
+                    if not mirror.exists():
+                        # Create mirror
+                        init_cmd = [
+                            "git",
+                            "clone",
+                            "--mirror",
+                            str(repo_path),
+                            str(mirror),
+                        ]
+                        result = await self._run_command(init_cmd)
+                        if result[0] != 0:
+                            logger.warning(f"Failed to create mirror: {result[1]}")
+                    else:
+                        # Update mirror
+                        fetch_cmd = [
+                            "git",
+                            "-C",
+                            str(mirror),
+                            "fetch",
+                            "-p",
+                        ]
+                        await self._run_command(fetch_cmd)
+                    if mirror.exists():
+                        reference_arg = ["--reference-if-able", str(mirror)]
+                except Exception as e:
+                    logger.debug(f"Shared clone setup failed: {e}")
+
+            # Clone with complete isolation (optionally using shared reference)
             # --branch: Start from specific branch
             # --single-branch: Only clone that branch, no other refs
             # --no-hardlinks: Force physical copy of all objects
@@ -90,6 +141,7 @@ class GitOperations:
                 base_branch,
                 "--single-branch",
                 "--no-hardlinks",
+                *reference_arg,
                 str(repo_path),
                 str(workspace_dir),
             ]
@@ -232,7 +284,7 @@ class GitOperations:
                     str(repo_path),
                     "fetch",
                     str(workspace_dir),
-                    f"HEAD:{branch_name}",
+                    f"{base_branch}:{branch_name}",
                 ]
 
                 result = await self._run_command(fetch_cmd)

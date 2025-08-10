@@ -11,6 +11,7 @@ from typing import List, TYPE_CHECKING
 
 from ...shared import InstanceResult
 from .base import Strategy, StrategyConfig
+from ...exceptions import StrategyError
 
 if TYPE_CHECKING:
     from ..strategy_context import StrategyContext
@@ -127,19 +128,22 @@ ORIGINAL TASK: {prompt}"""
                     score = int(score_match.group(1))
                 feedback = scoring_result.final_message
 
-        # Attach score to the original result's metadata
-        if generation_result.metrics is None:
-            generation_result.metrics = {}
+        # If scoring failed, fail the strategy per spec
+        if not scoring_result.success:
+            raise StrategyError("Scoring phase failed")
 
-        generation_result.metrics.update(
+        # Attach score/feedback to result metadata per spec (also keep in metrics for convenience)
+        generation_result.metadata = generation_result.metadata or {}
+        generation_result.metadata.update(
             {
                 "score": score,
                 "feedback": feedback,
-                "scorer_branch": (
-                    scoring_result.branch_name if scoring_result.success else None
-                ),
-                "scorer_success": scoring_result.success,
+                "scorer_branch": scoring_result.branch_name,
+                "scorer_success": True,
             }
         )
+        if generation_result.metrics is None:
+            generation_result.metrics = {}
+        generation_result.metrics.update({"score": score, "feedback": feedback})
 
         return [generation_result]

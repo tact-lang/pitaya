@@ -28,7 +28,8 @@ else:
 
 from . import DockerError, TimeoutError
 from .types import AuthConfig
-from ..utils.platform_utils import normalize_path_for_docker
+from ..utils.platform_utils import normalize_path_for_docker, get_temp_dir
+import shutil
 
 # Suppress the urllib3 exception on close that happens with docker-py
 warnings.filterwarnings("ignore", message=".*I/O operation on closed file.*")
@@ -136,6 +137,8 @@ class DockerManager:
         session_id: Optional[str] = None,
         auth_config: Optional[AuthConfig] = None,
         reuse_container: bool = True,
+        extra_env: Optional[Dict[str, str]] = None,
+        plugin: Optional[Any] = None,
     ) -> Container:
         """
         Create a Docker container for instance execution.
@@ -253,11 +256,24 @@ class DockerManager:
                     "GIT_COMMITTER_NAME": "AI Agent",
                     "GIT_COMMITTER_EMAIL": "agent@orchestrator.local",
                 },
-                "cpu_count": cpu_count,
+                # Resource limits will be applied via supported keys below
                 "mem_limit": f"{memory_gb}g",
                 "memswap_limit": f"{memory_swap_gb}g",
                 "auto_remove": False,  # Keep containers for debugging/resume
             }
+
+            # Merge extra env vars (e.g., auth) into environment pre-creation
+            if extra_env:
+                try:
+                    config["environment"].update(extra_env)
+                except Exception:
+                    pass
+
+            # Apply CPU limit using nano_cpus when possible
+            try:
+                config["nano_cpus"] = int(max(1, int(cpu_count)) * 1_000_000_000)
+            except Exception:
+                pass
 
             # Add Claude authentication based on auth_config
             if auth_config:
@@ -283,6 +299,14 @@ class DockerManager:
             # Add session ID for Claude Code resumability (spec section 3.4)
             if session_id:
                 config["environment"]["CLAUDE_CODE_SESSION_ID"] = session_id
+
+            # Allow plugin to adjust container configuration pre-creation
+            try:
+                if plugin is not None and hasattr(plugin, "prepare_container"):
+                    config = await plugin.prepare_container(config, session_id=session_id)
+            except Exception:
+                # Continue with base config if plugin hook fails
+                pass
 
             # Create container
             loop = asyncio.get_event_loop()
@@ -438,6 +462,45 @@ class DockerManager:
         except (docker.errors.APIError, docker.errors.DockerException) as e:
             logger.error(f"Failed to stop container {container.name}: {e}")
 
+    async def verify_container_tools(self, container: Container, tools: list[str]) -> None:
+        """Verify required tools are available in the container.
+
+        Raises DockerError if any tool is missing.
+        """
+        loop = asyncio.get_event_loop()
+        missing = []
+        for tool in tools:
+            found = False
+            # Try invoking the tool directly with --version (fast and reliable)
+            for candidate in (tool, f"/usr/local/bin/{tool}"):
+                try:
+                    exec_id = await loop.run_in_executor(
+                        None,
+                        lambda: container.client.api.exec_create(
+                            container.id,
+                            f"{candidate} --version",
+                            stdout=True,
+                            stderr=True,
+                        ),
+                    )
+                    await loop.run_in_executor(
+                        None,
+                        lambda: container.client.api.exec_start(exec_id["Id"], stream=False),
+                    )
+                    inspect = await loop.run_in_executor(
+                        None,
+                        lambda: container.client.api.exec_inspect(exec_id["Id"]),
+                    )
+                    if inspect.get("ExitCode", 1) == 0:
+                        found = True
+                        break
+                except Exception:
+                    continue
+            if not found:
+                missing.append(tool)
+        if missing:
+            raise DockerError(f"Required tools missing in container: {', '.join(missing)}")
+
     async def cleanup_container(self, container: Container, force: bool = True) -> None:
         """
         Remove a container after stopping it.
@@ -524,13 +587,38 @@ class DockerManager:
                     else:
                         # Default to failed retention for unknown status (safer)
                         max_age = failed_retention_hours
-
+                    
                     if age_hours > max_age:
-                        await self.cleanup_container(container)
-                        removed_count += 1
-                        logger.debug(
-                            f"Removed {status} container {container.name} (age: {age_hours:.1f}h)"
-                        )
+                        # Before removal, compute associated resources
+                        try:
+                            run_id = container.labels.get("run_id", "norun")
+                            sidx = container.labels.get("strategy_exec", "0")
+                            iidx = container.labels.get("instance_index", "0")
+                            volume_name = f"orc_home_{run_id}_s{sidx}_i{iidx}"
+                            # Attempt to remove container
+                            await self.cleanup_container(container)
+                            removed_count += 1
+                            logger.debug(
+                                f"Removed {status} container {container.name} (age: {age_hours:.1f}h)"
+                            )
+                            # Remove named volume
+                            try:
+                                vol = self.client.volumes.get(volume_name)
+                                vol.remove(force=True)
+                                logger.debug(f"Removed volume {volume_name}")
+                            except Exception:
+                                pass
+                            # Remove workspace directory
+                            try:
+                                temp_base = get_temp_dir()
+                                workspace_path = temp_base / f"orchestrator/{run_id}/i_{sidx}_{iidx}"
+                                if workspace_path.exists():
+                                    shutil.rmtree(workspace_path, ignore_errors=True)
+                                    logger.debug(f"Removed workspace {workspace_path}")
+                            except Exception:
+                                pass
+                        except Exception as e:
+                            logger.warning(f"Cleanup side effects failed: {e}")
 
                 except (
                     docker.errors.APIError,
@@ -571,3 +659,10 @@ class DockerManager:
 
         except (OSError, IOError) as e:
             logger.warning(f"Could not record container status: {e}")
+
+    def get_container(self, name: str) -> Optional[Container]:
+        """Return container by name or None if missing."""
+        try:
+            return self.client.containers.get(name)
+        except Exception:
+            return None

@@ -40,6 +40,7 @@ class InstanceInfo:
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     started_at: Optional[datetime] = None
     completed_at: Optional[datetime] = None
+    session_id: Optional[str] = None
 
 
 @dataclass
@@ -274,23 +275,30 @@ class StateManager:
         3. Apply events to reconstruct current state
         """
         snapshot_path = self.state_dir / run_id / "state.json"
+        logs_snapshot_path = None
+        if self.event_bus and getattr(self.event_bus, "persist_path", None):
+            logs_snapshot_path = self.event_bus.persist_path.parent / "state.json"
 
-        # Step 1: Load snapshot if it exists
-        if snapshot_path.exists():
-            try:
-                with open(snapshot_path) as f:
-                    data = json.load(f)
+        # Step 1: Load snapshot if it exists (prefer logs location per spec)
+        candidate_paths = [p for p in [logs_snapshot_path, snapshot_path] if p is not None]
+        loaded = False
+        for path in candidate_paths:
+            if path.exists():
+                try:
+                    with open(path) as f:
+                        data = json.load(f)
+                    self.current_state = RunState.from_dict(data)
+                    last_offset = self.current_state.last_event_offset
+                    logger.info(
+                        f"Loaded state snapshot for run {run_id} from {path} at offset {last_offset}"
+                    )
+                    loaded = True
+                    break
+                except (FileNotFoundError, json.JSONDecodeError, OSError) as e:
+                    logger.error(f"Failed to load state for run {run_id} from {path}: {e}")
+                    return None
 
-                self.current_state = RunState.from_dict(data)
-                last_offset = self.current_state.last_event_offset
-                logger.info(
-                    f"Loaded state snapshot for run {run_id} at offset {last_offset}"
-                )
-
-            except (FileNotFoundError, json.JSONDecodeError, OSError) as e:
-                logger.error(f"Failed to load state for run {run_id}: {e}")
-                return None
-        else:
+        if not loaded:
             logger.warning(
                 f"No snapshot found for run {run_id}, attempting recovery from events only"
             )
@@ -307,25 +315,24 @@ class StateManager:
         if self.event_bus:
             try:
                 # Get events since the last applied offset
-                events = self.event_bus.get_events_since(
+                events, next_offset = self.event_bus.get_events_since(
                     offset=last_offset,
-                    run_id=run_id,
-                    event_types=["state."],  # Only state-related events
+                    event_types=None,
+                    limit=None,
                 )
 
-                if events:
+                # Filter only state.* events
+                state_events = [e for e in events if str(e.get("type", "")).startswith("state.")]
+
+                if state_events:
                     # Apply events to reconstruct state
-                    await self.rebuild_from_events(events)
+                    await self.rebuild_from_events(state_events)
 
-                    # Update last offset to the latest event
-                    if events:
-                        last_event = events[-1]
-                        if "offset" in last_event:
-                            self.current_state.last_event_offset = last_event["offset"]
-
-                    logger.info(f"Applied {len(events)} events to recover state")
+                    # Update last offset to the returned next offset
+                    self.current_state.last_event_offset = next_offset
+                    logger.info(f"Applied {len(state_events)} events to recover state")
                 else:
-                    logger.info("No new events to apply since snapshot")
+                    logger.info("No new state events to apply since snapshot")
 
             except Exception as e:
                 logger.error(f"Failed to recover events for run {run_id}: {e}")
@@ -425,6 +432,9 @@ class StateManager:
         elif state in (InstanceStatus.COMPLETED, InstanceStatus.FAILED):
             info.completed_at = datetime.now(timezone.utc)
             info.result = result
+            # Persist session_id from result when available
+            if result and result.session_id:
+                info.session_id = result.session_id
 
             if state == InstanceStatus.COMPLETED:
                 self.current_state.completed_instances += 1
@@ -461,6 +471,21 @@ class StateManager:
             )
 
         asyncio.create_task(self._maybe_snapshot())
+
+    def update_instance_session_id(self, instance_id: str, session_id: Optional[str]) -> None:
+        """Update the stored session_id for a running instance."""
+        if not self.current_state:
+            return
+        info = self.current_state.instances.get(instance_id)
+        if not info:
+            return
+        info.session_id = session_id
+        if self.event_bus:
+            self.event_bus.emit(
+                "state.instance_updated",
+                {"instance_id": instance_id, "session_id": session_id, "new_state": info.state.value, "old_state": info.state.value},
+                instance_id=instance_id,
+            )
 
     def register_strategy(
         self,
@@ -563,6 +588,16 @@ class StateManager:
                 )
             else:
                 logger.warning(f"Temp file {temp_path} does not exist, skipping rename")
+
+            # Also write a duplicate snapshot under the logs/<run_id>/ directory
+            try:
+                if self.event_bus and getattr(self.event_bus, "persist_path", None):
+                    logs_run_dir = self.event_bus.persist_path.parent
+                    logs_snapshot = logs_run_dir / "state.json"
+                    await asyncio.to_thread(self._write_json, logs_snapshot, state_data)
+            except Exception as e:
+                # Non-fatal duplication failure
+                logger.debug(f"Failed to duplicate state snapshot in logs directory: {e}")
 
         except asyncio.CancelledError:
             # Expected during shutdown

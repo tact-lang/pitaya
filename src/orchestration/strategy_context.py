@@ -115,4 +115,5 @@ class StrategyContext:
             event_type: Type of event to emit
             data: Event data
         """
-        self._orchestrator.emit_event(event_type, data)
+        if getattr(self._orchestrator, "event_bus", None):
+            self._orchestrator.event_bus.emit(event_type, data)

@@ -8,7 +8,7 @@ imports while maintaining type safety and consistency.
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Callable
 
 
 # From instance_runner/types.py
@@ -45,12 +45,14 @@ class RetryConfig:
         "connection refused",
         "no such host",
         "timeout",
+        "daemon",  # broader match per spec
         "Cannot connect to the Docker daemon",
     )
     claude_error_patterns: tuple = (
         "rate limit",
         "API error",
         "connection reset",
+        "overloaded_error",
         "429",  # Rate limit status code
     )
     general_error_patterns: tuple = (
@@ -88,13 +90,23 @@ class InstanceResult:
 
     @property
     def cost(self) -> float:
-        """Get total cost from metrics."""
-        return self.metrics.get("cost", 0.0)
+        """Convenience: total cost from metrics (spec)."""
+        # Metrics use 'total_cost' throughout the codebase
+        return float(self.metrics.get("total_cost", self.metrics.get("cost", 0.0)))
 
     @property
-    def tokens(self) -> Dict[str, int]:
-        """Get token usage from metrics."""
-        return self.metrics.get("tokens", {"input": 0, "output": 0, "total": 0})
+    def tokens(self) -> int:
+        """Convenience: total tokens from metrics (spec)."""
+        return int(self.metrics.get("total_tokens", 0))
+
+    @property
+    def token_breakdown(self) -> Dict[str, int]:
+        """Token breakdown dict: input/output/total."""
+        return {
+            "input": int(self.metrics.get("input_tokens", 0)),
+            "output": int(self.metrics.get("output_tokens", 0)),
+            "total": int(self.metrics.get("total_tokens", 0)),
+        }
 
 
 # From instance_runner/plugin_interface.py
@@ -105,7 +117,10 @@ class PluginCapabilities:
     """Capabilities supported by the plugin."""
 
     supports_resume: bool = False
-    supports_streaming: bool = False
+    supports_cost: bool = False
+    supports_streaming_events: bool = True
+    supports_token_counts: bool = True
+    supports_streaming: bool = True
     supports_cost_limits: bool = False
     requires_auth: bool = True
     auth_methods: Optional[List[str]] = None  # e.g., ["oauth", "api_key"]
@@ -250,6 +265,36 @@ class RunnerPlugin(ABC):
             - session_id: Optional[str]
             - final_message: Optional[str]
             - metrics: Dict[str, Any]
+        """
+        pass
+
+    @abstractmethod
+    async def execute(
+        self,
+        docker_manager: Any,
+        container: Any,
+        prompt: str,
+        model: str,
+        session_id: Optional[str] = None,
+        timeout_seconds: int = 3600,
+        event_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
+        **kwargs,
+    ) -> Dict[str, Any]:
+        """
+        Execute the tool inside the given container and return result data.
+
+        Args:
+            docker_manager: Docker manager helper
+            container: Running container to execute in
+            prompt: Instruction for the tool
+            model: Model selection
+            session_id: Optional resume session id
+            timeout_seconds: Max execution time
+            event_callback: Callback for parsed events
+            **kwargs: Additional plugin-specific args
+
+        Returns:
+            Result dict with session_id, final_message, metrics
         """
         pass
 

@@ -10,6 +10,7 @@ import logging
 from datetime import datetime, timezone
 from typing import Optional, Any
 from pathlib import Path
+import os
 
 from rich.console import Console
 from rich.layout import Layout
@@ -52,6 +53,8 @@ class TUIDisplay:
         self.event_processor = EventProcessor(self.state)
         self.event_stream = AsyncEventStream(self.event_processor)
         self.adaptive_display = AdaptiveDisplay()
+        # Optional env override for display mode
+        self._force_display_mode_env = os.environ.get("ORCHESTRATOR_TUI__FORCE_DISPLAY_MODE")
 
         # Display state
         self._live: Optional[Live] = None
@@ -205,6 +208,15 @@ class TUIDisplay:
 
                     if state:
                         self._reconcile_state(state)
+                        # Apply forced display mode from env if provided
+                        if (
+                            self._force_display_mode_env
+                            and self.state.current_run
+                            and not self.state.current_run.force_detail_level
+                        ):
+                            mode = self._force_display_mode_env.strip().lower()
+                            if mode in ("detailed", "compact", "dense"):
+                                self.state.current_run.force_detail_level = mode
 
                 self.state.last_state_poll = datetime.now()
 
@@ -278,10 +290,46 @@ class TUIDisplay:
                 header_content.append(
                     f"Strategy: {self._get_strategy_summary()}", style="green"
                 )
+                # Model (from first strategy config if available)
+                try:
+                    model = None
+                    if run.strategies:
+                        first = next(iter(run.strategies.values()))
+                        model = first.config.get("model") if hasattr(first, "config") else None
+                    if model:
+                        header_content.append(" | ")
+                        header_content.append(f"Model: {model}", style="magenta")
+                except Exception:
+                    pass
                 header_content.append(" | ")
                 header_content.append(
                     f"Started: {self._format_time(run.started_at)}", style="dim"
                 )
+                # Total runtime inline
+                try:
+                    if run.started_at:
+                        elapsed = datetime.now(timezone.utc) - run.started_at
+                        hours, rem = divmod(int(elapsed.total_seconds()), 3600)
+                        minutes, seconds = divmod(rem, 60)
+                        duration = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+                        header_content.append(" | ")
+                        header_content.append(f"Runtime: {duration}", style="dim")
+                except Exception:
+                    pass
+
+                # Instance counts summary in header for quick glance
+                try:
+                    total = len(run.instances)
+                    running = sum(1 for i in run.instances.values() if i.status == InstanceStatus.RUNNING)
+                    completed = sum(1 for i in run.instances.values() if i.status == InstanceStatus.COMPLETED)
+                    failed = sum(1 for i in run.instances.values() if i.status == InstanceStatus.FAILED)
+                    header_content.append(" | ")
+                    header_content.append(
+                        f"Instances: {total} (R:{running} C:{completed} F:{failed})",
+                        style="cyan",
+                    )
+                except Exception:
+                    pass
 
             # Update layout with simple panel
             self._layout["header"].update(

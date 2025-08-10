@@ -112,9 +112,9 @@ Examples:
         # Model options
         parser.add_argument(
             "--model",
-            choices=["sonnet", "opus", "haiku-2025-01-01"],
-            default="sonnet",
-            help="Claude model to use (default: sonnet)",
+            choices=["claude-3-5-sonnet-latest", "sonnet", "opus", "haiku-2025-01-01"],
+            default="claude-3-5-sonnet-latest",
+            help="Claude model to use (default: claude-3-5-sonnet-latest)",
         )
 
         # Repository options
@@ -197,6 +197,13 @@ Examples:
             "--clean-containers",
             metavar="RUN_ID",
             help="Remove containers and state for a specific run",
+        )
+        # Alias per spec examples
+        parser.add_argument(
+            "--cleanup-run",
+            metavar="RUN_ID",
+            dest="clean_containers",
+            help="Alias for --clean-containers",
         )
         parser.add_argument(
             "--config",
@@ -309,9 +316,18 @@ Examples:
         strategy_name = args.strategy or full_config.get("strategy", "simple")
         config = {}
 
-        # Load strategy-specific defaults from config file
-        if "strategies" in full_config and strategy_name in full_config["strategies"]:
-            config.update(full_config["strategies"][strategy_name])
+        # Load strategy-specific defaults from config file (support hyphen/underscore aliases)
+        if "strategies" in full_config:
+            strat_section = full_config["strategies"]
+            if strategy_name in strat_section:
+                config.update(strat_section[strategy_name])
+            else:
+                alias1 = strategy_name.replace("-", "_")
+                alias2 = strategy_name.replace("_", "-")
+                if alias1 in strat_section:
+                    config.update(strat_section[alias1])
+                elif alias2 in strat_section:
+                    config.update(strat_section[alias2])
 
         # Add model (CLI overrides config)
         config["model"] = args.model or full_config.get(
@@ -604,7 +620,7 @@ Examples:
 
             for run_dir in run_dirs:
                 run_id = run_dir.name
-                snapshot_file = run_dir / "snapshot.json"
+                snapshot_file = run_dir / "state.json"
 
                 if snapshot_file.exists():
                     # Load snapshot data
@@ -675,7 +691,7 @@ Examples:
                 return 1
 
             # Load snapshot
-            snapshot_file = state_dir / "snapshot.json"
+            snapshot_file = state_dir / "state.json"
             if not snapshot_file.exists():
                 self.console.print(f"[red]No snapshot found for run {run_id}[/red]")
                 return 1
@@ -1004,8 +1020,14 @@ Examples:
             if cleanup_count > 0:
                 logger.info(f"Cleaned up {cleanup_count} old log directories")
 
-            # Setup periodic cleanup task (don't await - it runs forever)
-            asyncio.create_task(setup_log_rotation_task(args.logs_dir))
+            # Setup periodic cleanup and size-based rotation for logs
+            # Convert configured byte limit to MB for rotation helper
+            try:
+                max_bytes = full_config.get("logging", {}).get("max_file_size", 10485760)
+                max_mb = int(max_bytes / (1024 * 1024)) if isinstance(max_bytes, (int, float)) else 100
+            except Exception:
+                max_mb = 100
+            asyncio.create_task(setup_log_rotation_task(args.logs_dir, max_size_mb=max_mb))
         except (OSError, PermissionError) as e:
             logger.warning(f"Failed to setup log rotation: {e}")
 
@@ -1161,16 +1183,21 @@ Examples:
             container_limits=container_limits,
             retry_config=retry_config,
             auth_config=auth_config,
+            snapshot_interval=int(full_config.get("orchestration", {}).get("snapshot_interval", 30)),
+            event_buffer_size=int(full_config.get("orchestration", {}).get("event_buffer_size", 10000)),
+            container_retention_failed_hours=int(full_config.get("orchestration", {}).get("container_retention_failed", 86400) // 3600 if isinstance(full_config.get("orchestration", {}).get("container_retention_failed", 86400), int) else 24),
+            container_retention_success_hours=int(full_config.get("orchestration", {}).get("container_retention_success", 7200) // 3600 if isinstance(full_config.get("orchestration", {}).get("container_retention_success", 7200), int) else 2),
         )
 
         # Initialize orchestrator
         await self.orchestrator.initialize()
 
         # Start HTTP server if requested
-        if args.http_port:
-            await self.orchestrator.start_http_server(args.http_port)
+        http_port = args.http_port or full_config.get("http_port")
+        if http_port:
+            await self.orchestrator.start_http_server(http_port)
             self.console.print(
-                f"[blue]HTTP server started on port {args.http_port}[/blue]"
+                f"[blue]HTTP server started on port {http_port}[/blue]"
             )
 
         # Determine run mode

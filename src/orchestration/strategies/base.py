@@ -19,7 +19,7 @@ class StrategyConfig:
     """Base configuration for all strategies."""
 
     # Common configuration all strategies share
-    model: str = "sonnet"
+    model: str = "claude-3-5-sonnet-latest"
     timeout_seconds: int = 3600
     container_limits: Optional[Dict[str, Any]] = None
 
