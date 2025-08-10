@@ -41,6 +41,7 @@ class InstanceInfo:
     started_at: Optional[datetime] = None
     completed_at: Optional[datetime] = None
     session_id: Optional[str] = None
+    interrupted_at: Optional[datetime] = None
 
 
 @dataclass
@@ -109,6 +110,7 @@ class RunState:
                     "base_branch": info.base_branch,
                     "branch_name": info.branch_name,
                     "container_name": info.container_name,
+                    "session_id": info.session_id,
                     "state": info.state.value,
                     "metadata": info.metadata,
                     "created_at": info.created_at.isoformat(),
@@ -117,6 +119,9 @@ class RunState:
                     ),
                     "completed_at": (
                         info.completed_at.isoformat() if info.completed_at else None
+                    ),
+                    "interrupted_at": (
+                        info.interrupted_at.isoformat() if info.interrupted_at else None
                     ),
                 }
                 for id, info in self.instances.items()
@@ -168,6 +173,7 @@ class RunState:
                 base_branch=info_data["base_branch"],
                 branch_name=info_data["branch_name"],
                 container_name=info_data["container_name"],
+                session_id=info_data.get("session_id"),
                 state=InstanceStatus(info_data["state"]),
                 metadata=info_data.get("metadata", {}),
                 created_at=datetime.fromisoformat(info_data["created_at"]),
@@ -180,6 +186,9 @@ class RunState:
                     datetime.fromisoformat(info_data["completed_at"])
                     if info_data["completed_at"]
                     else None
+                ),
+                interrupted_at=(
+                    datetime.fromisoformat(info_data["interrupted_at"]) if info_data.get("interrupted_at") else None
                 ),
             )
 
@@ -295,8 +304,11 @@ class StateManager:
                     loaded = True
                     break
                 except (FileNotFoundError, json.JSONDecodeError, OSError) as e:
-                    logger.error(f"Failed to load state for run {run_id} from {path}: {e}")
-                    return None
+                    # Don't give up immediately; try next candidate path
+                    logger.error(
+                        f"Failed to load state for run {run_id} from {path}: {e}"
+                    )
+                    continue
 
         if not loaded:
             logger.warning(
@@ -429,16 +441,23 @@ class StateManager:
         if state == InstanceStatus.RUNNING and not info.started_at:
             info.started_at = datetime.now(timezone.utc)
 
+        elif state == InstanceStatus.INTERRUPTED:
+            # Mark interruption without completing
+            info.interrupted_at = datetime.now(timezone.utc)
+
         elif state in (InstanceStatus.COMPLETED, InstanceStatus.FAILED):
-            info.completed_at = datetime.now(timezone.utc)
+            # Only set completed_at once
+            if not info.completed_at:
+                info.completed_at = datetime.now(timezone.utc)
             info.result = result
             # Persist session_id from result when available
             if result and result.session_id:
                 info.session_id = result.session_id
 
-            if state == InstanceStatus.COMPLETED:
+            # Idempotent counters: only increment when transitioning from non-terminal
+            if state == InstanceStatus.COMPLETED and old_state != InstanceStatus.COMPLETED:
                 self.current_state.completed_instances += 1
-            else:
+            elif state == InstanceStatus.FAILED and old_state != InstanceStatus.FAILED:
                 self.current_state.failed_instances += 1
 
             # Update metrics
@@ -459,6 +478,10 @@ class StateManager:
 
             if state == InstanceStatus.RUNNING:
                 event_data["started_at"] = info.started_at.isoformat()
+            elif state == InstanceStatus.INTERRUPTED:
+                event_data["interrupted_at"] = (
+                    info.interrupted_at.isoformat() if info.interrupted_at else datetime.now(timezone.utc).isoformat()
+                )
             elif state in (InstanceStatus.COMPLETED, InstanceStatus.FAILED):
                 event_data["completed_at"] = info.completed_at.isoformat()
                 if result:
@@ -569,6 +592,12 @@ class StateManager:
             return
 
         try:
+            # Ensure last_event_offset reflects current event bus position for recovery
+            if self.event_bus and getattr(self.event_bus, "_current_offset", None) is not None:
+                try:
+                    self.current_state.last_event_offset = int(self.event_bus._current_offset)
+                except Exception:
+                    pass
             run_dir = self.state_dir / self.current_state.run_id
             await asyncio.to_thread(run_dir.mkdir, parents=True, exist_ok=True)
 
@@ -594,10 +623,16 @@ class StateManager:
                 if self.event_bus and getattr(self.event_bus, "persist_path", None):
                     logs_run_dir = self.event_bus.persist_path.parent
                     logs_snapshot = logs_run_dir / "state.json"
-                    await asyncio.to_thread(self._write_json, logs_snapshot, state_data)
+                    logs_tmp = logs_snapshot.with_suffix(".tmp")
+                    # Write to temp then atomically rename to avoid partial writes
+                    await asyncio.to_thread(self._write_json, logs_tmp, state_data)
+                    if logs_tmp.exists():
+                        await asyncio.to_thread(logs_tmp.rename, logs_snapshot)
             except Exception as e:
                 # Non-fatal duplication failure
-                logger.debug(f"Failed to duplicate state snapshot in logs directory: {e}")
+                logger.debug(
+                    f"Failed to duplicate state snapshot in logs directory: {e}"
+                )
 
         except asyncio.CancelledError:
             # Expected during shutdown
@@ -700,8 +735,21 @@ class StateManager:
 
                 info.state = new_state
 
+                # Update session_id if provided in event (e.g., during runtime)
+                if "session_id" in data and data.get("session_id"):
+                    info.session_id = data.get("session_id")
+
                 if new_state == InstanceStatus.RUNNING and data.get("started_at"):
                     info.started_at = datetime.fromisoformat(data["started_at"])
+
+                elif new_state == InstanceStatus.INTERRUPTED:
+                    # Record interruption time if provided
+                    ts = data.get("interrupted_at")
+                    if ts:
+                        try:
+                            info.interrupted_at = datetime.fromisoformat(ts)
+                        except Exception:
+                            pass
 
                 elif new_state in (InstanceStatus.COMPLETED, InstanceStatus.FAILED):
                     if data.get("completed_at"):

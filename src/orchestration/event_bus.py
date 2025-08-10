@@ -221,20 +221,21 @@ class EventBus:
         """
         events: List[Dict[str, Any]] = []
 
-        # If offset specified, read from file
+        # If offset specified, read from file (in binary mode to track byte offsets)
         if offset is not None and self.persist_path and self.persist_path.exists():
             try:
-                with open(self.persist_path, "r") as f:
+                # Open in binary mode to ensure tell/seek operate on byte offsets
+                with open(self.persist_path, "rb") as f:
                     # Validate offset is at a line boundary
                     if offset > 0:
                         f.seek(offset - 1)
-                        # Check if previous character is newline
-                        prev_char = f.read(1)
-                        if prev_char != "\n":
-                            # Not at line boundary, scan forward to next line
+                        # Check if previous byte is newline
+                        prev_byte = f.read(1)
+                        if prev_byte != b"\n":
+                            # Not at line boundary, scan forward to next newline
                             while True:
-                                char = f.read(1)
-                                if not char or char == "\n":
+                                b = f.read(1)
+                                if not b or b == b"\n":
                                     break
                             offset = f.tell()
                     else:
@@ -242,21 +243,27 @@ class EventBus:
 
                     # Read lines from validated offset
                     current_offset = offset
-                    for line in f:
+                    while True:
                         if limit and len(events) >= limit:
                             break
+                        line = f.readline()
+                        if not line:
+                            break
                         try:
-                            event = json.loads(line.strip())
-                            # Apply filters
-                            if event_types and event["type"] not in event_types:
-                                continue
-                            events.append(event)
-                            current_offset = f.tell()
+                            event = json.loads(line.decode("utf-8").strip())
                         except json.JSONDecodeError:
                             logger.warning(
                                 f"Skipping malformed event at offset {current_offset}"
                             )
+                            # Advance offset by the line length even if malformed
+                            current_offset += len(line)
                             continue
+
+                        # Apply filters
+                        if not event_types or event.get("type") in event_types:
+                            events.append(event)
+                        # Update offset by bytes read
+                        current_offset += len(line)
 
                     # Return events and the next offset
                     return events, current_offset
@@ -332,21 +339,30 @@ class EventBus:
                 try:
                     # Check if file exists
                     if file_path.exists():
-                        # Read new events from last offset
-                        with open(file_path, "r") as f:
+                        # Read new events from last offset (binary mode for byte-accurate offsets)
+                        with open(file_path, "rb") as f:
                             f.seek(last_offset)
-                            for line in f:
+                            while True:
+                                line = f.readline()
+                                if not line:
+                                    break
                                 try:
-                                    event = json.loads(line.strip())
-                                    # Filter by event type if specified
-                                    if event_type and event.get("type") != event_type:
-                                        continue
-                                    # Call callback
-                                    callback(event)
+                                    event = json.loads(line.decode("utf-8").strip())
                                 except json.JSONDecodeError:
+                                    # Skip malformed lines but still advance offset
+                                    last_offset += len(line)
                                     continue
-                            # Update offset
-                            last_offset = f.tell()
+
+                                # Filter by event type if specified
+                                if not event_type or event.get("type") == event_type:
+                                    try:
+                                        callback(event)
+                                    except Exception as cb_err:
+                                        logger.error(
+                                            f"Error in file watcher callback: {cb_err}"
+                                        )
+                                # Advance offset by bytes read for this line
+                                last_offset += len(line)
 
                     # Sleep before next check
                     await asyncio.sleep(poll_interval)

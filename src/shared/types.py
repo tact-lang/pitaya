@@ -325,6 +325,7 @@ class InstanceStatus(Enum):
 
     QUEUED = "queued"
     RUNNING = "running"
+    INTERRUPTED = "interrupted"
     COMPLETED = "completed"
     FAILED = "failed"
 

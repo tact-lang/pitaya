@@ -651,7 +651,40 @@ async def _run_instance_attempt(
                 status="failed",
             )
 
-        except (OSError, IOError, asyncio.CancelledError) as e:
+        except asyncio.CancelledError:
+            # Treat orchestrator-initiated cancellation as interruption, not failure
+            logger.info(f"Instance {instance_id} canceled; recording interruption")
+            emit_event(
+                "instance.canceled",
+                {
+                    "error": "canceled",
+                    "error_type": "canceled",
+                    "attempt": attempt_number,
+                    "total_attempts": total_attempts,
+                    "will_retry": False,
+                },
+            )
+
+            # Record container as interrupted for cleanup policy
+            if container:
+                await docker_manager.update_container_status(container, "interrupted")
+
+            completed_at = datetime.now(timezone.utc).isoformat()
+            return InstanceResult(
+                success=False,
+                error="canceled",
+                error_type="canceled",
+                session_id=claude_session_id,
+                container_name=container_name,
+                duration_seconds=time.time() - start_time,
+                started_at=started_at,
+                completed_at=completed_at,
+                retry_attempts=attempt_number - 1,
+                log_path=log_path,
+                workspace_path=str(workspace_dir) if workspace_dir else None,
+                status="canceled",
+            )
+        except (OSError, IOError) as e:
             logger.exception(f"System error in instance {instance_id}")
             emit_event(
                 "instance.failed",

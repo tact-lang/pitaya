@@ -140,6 +140,13 @@ Events flow unidirectionally upward:
 
 The event system uses append-only file storage (`events.jsonl`) with monotonic byte offsets for position tracking. Each event is written synchronously with its offset, preventing data loss and enabling reliable event replay. Components can request events from a specific offset for recovery after disconnection.
 
+**Offset Semantics**
+
+- Offsets are byte positions (not line counts). Readers MUST open in binary mode and advance offsets by the exact number of bytes consumed.
+- Readers MUST align to newline boundaries: if an offset lands mid-line, scan forward to the next `\n` before parsing.
+- Readers MUST tolerate a truncated final line (e.g., during a crash) by skipping it until a terminating newline appears.
+- Writers SHOULD emit UTF-8 JSON per line and flush synchronously to maintain monotonicity.
+
 Components follow a strict communication pattern: downward direct calls (Orchestration → Runner) are allowed for control flow, while upward communication (Runner → Orchestration, any → TUI) happens primarily through events, with periodic state polling for reconciliation. The `subscribe()` function sets up file watching on `events.jsonl`, enabling capabilities like multiple processes monitoring the same run by tailing the event file or replaying events for debugging.
 
 ## 2.3 Data Flow
@@ -781,7 +788,7 @@ State tracking serves two purposes: enabling UI displays and crash recovery:
 **State Persistence Implementation**: State is persisted through two mechanisms:
 
 - `events.jsonl`: Append-only log containing every state change with monotonic byte offsets. Each event is written synchronously with flush to ensure durability
-- `state.json`: Periodic snapshot (every 30 seconds) containing full state and the last applied event offset. Written atomically using temp file + rename
+- `state.json`: Periodic snapshot (every 30 seconds) containing full state and the last applied event offset. Snapshots MUST persist, per instance: `state`, `started_at`, `completed_at`, `interrupted_at`, `branch_name`, `container_name`, and `session_id` to enable resumability. Written atomically using temp file + rename
 
 Recovery process:
 
@@ -800,6 +807,14 @@ Recovery process:
 **Atomic Snapshots**: The `get_current_state()` function returns consistent snapshots. No partial updates or race conditions. UI can poll this API for smooth updates without event subscription complexity.
 
 This approach balances simplicity with reliability. Memory is fast for normal operation, while file-based persistence enables recovery when needed. The combination of event log and periodic snapshots ensures quick recovery without replaying the entire event history.
+
+**Idempotent Recovery**
+
+- `state.json` MUST include `last_event_offset` (byte position of the last applied event).
+- Recovery MUST replay only events after `last_event_offset`.
+- Event application MUST be idempotent: re-applying a transition already reflected in the snapshot MUST NOT double count aggregate metrics (e.g., completed/failed counters).
+- Aggregate counters MUST be derived from guarded state transitions (increment only when moving from a non-terminal to a terminal state).
+- `state.instance_updated` events MAY include `session_id`. Applying such events MUST update the instance's `session_id` in memory for subsequent snapshots and resume logic.
 
 ## 4.7 Git Synchronization
 
@@ -1545,6 +1560,12 @@ This approach handles the reality of AI coding: API timeouts, rate limits, tempo
 
 The Instance Runner reports failure type, but doesn't interpret it. That's the strategy's job.
 
+**Cancellation vs Failure**
+
+- Async cancellations caused by orchestrator-initiated shutdown (e.g., Ctrl+C) are treated as interruption, not failure.
+- On graceful shutdown, instances SHOULD be recorded as `INTERRUPTED` (or equivalently flagged as interrupted) rather than `FAILED`.
+- Strategies MUST NOT treat shutdown-induced interruptions as semantic task failures.
+
 **Strategy-Level Handling**: Strategies receive failed results and decide responses:
 
 - BestOfNStrategy: Continues with successful instances, ignores failures
@@ -1597,6 +1618,17 @@ The key insight: stopping containers preserves their state. When resumed, instan
 
 This balance ensures quick shutdown while maximizing resumability.
 
+**Interrupted State Representation**
+
+- The system MUST persist which instances were interrupted. Two equivalent approaches are permitted:
+  - Add `INTERRUPTED` to the instance state model, or
+  - Persist an `interrupted_at` timestamp and/or an explicit list of interrupted instance IDs in `state.json` while leaving instance state as `RUNNING`.
+- In both approaches, graceful shutdown MUST NOT mark instances `FAILED` solely due to cancellation.
+
+**Crash vs Graceful Interruption**
+
+- In a hard crash or power loss, interruption markers may not be written. On resume, any instance that is `RUNNING` in `state.json` and has no terminal state event at or after `last_event_offset` MUST be treated as "interrupted by crash" and handled under the Interrupted rules.
+
 **Explicit Resume**: Recovery requires deliberate action:
 
 ```bash
@@ -1611,16 +1643,21 @@ No automatic detection of previous runs. No "found interrupted run, continue?" p
 
 - **Failed instances**: No action, remain failed
 
-- Interrupted instances
-
-  :
-
+- **Interrupted instances** (including those inferred after a crash):
   - If container exists AND plugin supports resume: Resume from saved session
   - If container exists BUT plugin doesn't support resume: Mark as `cannot_resume`
   - If container missing BUT workspace exists: Mark as `container_missing`
   - If both container and workspace missing: Mark as `artifacts_missing`
 
 - **Queued instances**: Start normally
+
+**Immediate Finalization on Resume**
+
+- If after restoration and verification there are no runnable instances (all are terminal or cannot be resumed), the orchestrator SHOULD immediately finalize the run, emit `run.completed` with a summary (`resumed`, counts for `cannot_resume`, etc.), and exit.
+
+Notes on Sessions:
+
+- Each instance's `session_id` MUST be persisted in `state.json`. Resume MUST rely on this persisted `session_id` rather than event replay to determine resumability. If event replay does occur and includes newer `session_id` updates, those MUST overwrite the in-memory value before any resume checks.
 
 Special cases:
 
@@ -1649,6 +1686,15 @@ orchestrator --cleanup-run <run-id>   # Remove containers and state
 These commands provide visibility without magic. Users control their runs explicitly.
 
 The philosophy: preserve work through session continuity, but require explicit decisions about recovery. No surprising automatic behaviors.
+
+## 7.8 Snapshot Atomicity
+
+All snapshots MUST be written atomically using a temp-file-then-rename pattern to avoid partial/corrupt files:
+
+- Primary snapshot: `orchestrator_state/<run_id>/state.json`
+- Duplicate snapshot (for convenience and multi-UI): `logs/<run_id>/state.json`
+
+Both MUST be written via a temporary file (e.g., `state.json.tmp`) and then `rename()`d to the final path so readers never observe partial JSON. Readers SHOULD prefer the primary snapshot but MAY fall back to the duplicate if the primary is missing.
 
 ## 7.5 Results and Reporting
 

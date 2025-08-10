@@ -166,6 +166,18 @@ class Orchestrator:
         # Signal shutdown
         self._shutdown = True
 
+        # Mark any running instances as interrupted before cancelling tasks
+        if self.state_manager and self.state_manager.current_state:
+            try:
+                for instance in list(self.state_manager.current_state.instances.values()):
+                    if instance.state == InstanceStatus.RUNNING:
+                        self.state_manager.update_instance_state(
+                            instance_id=instance.instance_id,
+                            state=InstanceStatus.INTERRUPTED,
+                        )
+            except Exception as e:
+                logger.warning(f"Failed to mark running instances as interrupted: {e}")
+
         # Cancel all executor tasks
         for task in self._executor_tasks:
             task.cancel()
@@ -179,7 +191,7 @@ class Orchestrator:
             running_instances = [
                 instance
                 for instance in self.state_manager.current_state.instances.values()
-                if instance.state == InstanceStatus.RUNNING
+                if instance.state in (InstanceStatus.RUNNING, InstanceStatus.INTERRUPTED)
             ]
 
             if running_instances:
@@ -775,21 +787,40 @@ class Orchestrator:
             except Exception:
                 pass
 
-            # Update state with result
+            # Update state with result (treat canceled as interrupted)
+            if result.success:
+                new_state = InstanceStatus.COMPLETED
+            else:
+                if getattr(result, "status", None) == "canceled" or getattr(result, "error_type", None) == "canceled":
+                    new_state = InstanceStatus.INTERRUPTED
+                else:
+                    new_state = InstanceStatus.FAILED
+
             self.state_manager.update_instance_state(
                 instance_id=instance_id,
-                state=(
-                    InstanceStatus.COMPLETED
-                    if result.success
-                    else InstanceStatus.FAILED
-                ),
+                state=new_state,
                 result=result,
             )
 
             # Resolve future
             self._instance_futures[instance_id].set_result(result)
 
-        except (DockerError, GitError, OrchestratorError, asyncio.CancelledError) as e:
+        except asyncio.CancelledError:
+            # Treat orchestrator-initiated cancellation as interruption, not failure
+            logger.info(f"Instance {instance_id} canceled by shutdown; marking interrupted")
+            interrupt_result = InstanceResult(
+                success=False,
+                error="canceled",
+                error_type="canceled",
+                status="canceled",
+            )
+            self.state_manager.update_instance_state(
+                instance_id=instance_id,
+                state=InstanceStatus.INTERRUPTED,
+                result=interrupt_result,
+            )
+            self._instance_futures[instance_id].set_result(interrupt_result)
+        except (DockerError, GitError, OrchestratorError) as e:
             logger.exception(f"Instance {instance_id} execution failed: {e}")
 
             # Create error result
@@ -948,7 +979,7 @@ class Orchestrator:
         docker_manager = DockerManager()
 
         for iid, info in saved_state.instances.items():
-            if info.state == _IS.RUNNING:
+            if info.state in (_IS.RUNNING, _IS.INTERRUPTED):
                 if force_fresh:
                     resume_tasks.append(
                         asyncio.create_task(self._run_instance_from_saved_state(info))

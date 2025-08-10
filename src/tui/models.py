@@ -16,6 +16,7 @@ class InstanceStatus(Enum):
 
     QUEUED = "queued"
     RUNNING = "running"
+    INTERRUPTED = "interrupted"
     COMPLETED = "completed"
     FAILED = "failed"
 
@@ -25,6 +26,7 @@ class InstanceStatus(Enum):
         emoji_map = {
             InstanceStatus.QUEUED: "⏳",
             InstanceStatus.RUNNING: "🔄",
+            InstanceStatus.INTERRUPTED: "⏸️",
             InstanceStatus.COMPLETED: "✅",
             InstanceStatus.FAILED: "❌",
         }
@@ -36,6 +38,7 @@ class InstanceStatus(Enum):
         color_map = {
             InstanceStatus.QUEUED: "dim",
             InstanceStatus.RUNNING: "yellow",
+            InstanceStatus.INTERRUPTED: "magenta",
             InstanceStatus.COMPLETED: "green",
             InstanceStatus.FAILED: "red",
         }
