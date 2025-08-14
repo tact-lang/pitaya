@@ -5,6 +5,7 @@ Handles container lifecycle, resource limits, volume mounts, and cleanup.
 """
 
 import asyncio
+import time
 import json
 import logging
 import warnings
@@ -13,6 +14,8 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, TYPE_CHECKING
 
 import docker
+from docker.errors import ImageNotFound
+from docker.types import Mount
 
 if TYPE_CHECKING:
     from docker.errors import DockerException, NotFound
@@ -59,10 +62,15 @@ logger = logging.getLogger(__name__)
 class DockerManager:
     """Manages Docker containers for instance execution."""
 
-    def __init__(self):
-        """Initialize Docker client."""
+    def __init__(self, api_timeout: int = 20):
+        """Initialize Docker client.
+
+        Args:
+            api_timeout: Per-request timeout (seconds) for Docker SDK calls.
+        """
         try:
-            self.client = docker.from_env()
+            # Use a bounded API timeout so SDK calls can't hang indefinitely
+            self.client = docker.from_env(timeout=int(api_timeout))
         except DockerException as e:
             raise DockerError(f"Failed to connect to Docker daemon: {e}")
 
@@ -99,18 +107,9 @@ class DockerManager:
         """
         Initialize Docker manager with startup tasks.
 
-        Per spec section 3.2, this performs orphan cleanup on startup.
+        Per spec, orphan cleanup is owned by orchestration. Runner does not perform global cleanup.
         """
-        if not self._cleanup_performed:
-            try:
-                logger.info("Performing orphan container cleanup on startup")
-                cleaned_count = await self.cleanup_orphaned_containers()
-                if cleaned_count > 0:
-                    logger.info(f"Cleaned up {cleaned_count} orphaned containers")
-                self._cleanup_performed = True
-            except (DockerError, docker.errors.APIError) as e:
-                logger.warning(f"Failed to cleanup orphaned containers on startup: {e}")
-                # Don't fail initialization if cleanup fails
+        self._cleanup_performed = True
 
     async def validate_environment(self) -> bool:
         """Validate Docker daemon is accessible and working."""
@@ -139,6 +138,10 @@ class DockerManager:
         reuse_container: bool = True,
         extra_env: Optional[Dict[str, str]] = None,
         plugin: Optional[Any] = None,
+        session_group_key: Optional[str] = None,
+        import_policy: str = "auto",
+        network_egress: str = "online",
+        event_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
     ) -> Container:
         """
         Create a Docker container for instance execution.
@@ -161,28 +164,91 @@ class DockerManager:
             Created or reused container instance
         """
         try:
+            phase_start = time.monotonic()
+            logger.info(
+                f"create_container entry: name={container_name}, image={image}, reuse={reuse_container}, ws={workspace_dir}"
+            )
+            if event_callback:
+                event_callback({
+                    "type": "instance.container_create_entry",
+                    "data": {
+                        "container_name": container_name,
+                        "workspace_dir": str(workspace_dir),
+                        "image": image,
+                        "reuse": bool(reuse_container),
+                    },
+                })
+
+            # Ensure required image exists locally; fail fast with clear message
+            loop = asyncio.get_event_loop()
+            try:
+                img_check_start = time.monotonic()
+                logger.info(f"Checking Docker image exists: {image}")
+                if event_callback:
+                    event_callback({
+                        "type": "instance.container_image_check",
+                        "data": {"image": image},
+                    })
+                # Bound the image-inspect call with a timeout to avoid hangs
+                img_future = loop.run_in_executor(
+                    None, lambda: self.client.images.get(image)
+                )
+                await asyncio.wait_for(img_future, timeout=10)
+                logger.info(
+                    f"Docker image found: {image} (%.2fs)",
+                    time.monotonic() - img_check_start,
+                )
+            except asyncio.TimeoutError:
+                if event_callback:
+                    event_callback({
+                        "type": "instance.container_image_check_timeout",
+                        "data": {"image": image, "timeout_s": 10},
+                    })
+                raise DockerError(
+                    "Docker image check timed out after 10s. Docker daemon may be unresponsive; try restarting Docker Desktop."
+                )
+            except ImageNotFound:
+                raise DockerError(
+                    f"Docker image '{image}' not found locally. Build it with: docker build -t {image} ."
+                )
+            except (docker.errors.APIError, docker.errors.DockerException) as e:
+                raise DockerError(f"Failed to inspect Docker image '{image}': {e}")
+
             # Check for existing container if reuse_container=True
             if reuse_container:
                 try:
-                    loop = asyncio.get_event_loop()
-                    existing = await loop.run_in_executor(
+                    exist_check_start = time.monotonic()
+                    logger.info(f"Checking for existing container: {container_name}")
+                    get_future = loop.run_in_executor(
                         None, lambda: self.client.containers.get(container_name)
                     )
+                    existing = await asyncio.wait_for(get_future, timeout=10)
 
                     # Reload to get current status
-                    await loop.run_in_executor(None, existing.reload)
+                    await asyncio.wait_for(
+                        loop.run_in_executor(None, existing.reload), timeout=10
+                    )
+                    logger.info(
+                        f"Found existing container {container_name} with status {existing.status} (%.2fs)",
+                        time.monotonic() - exist_check_start,
+                    )
 
                     if existing.status == "running":
                         logger.info(f"Reusing running container {container_name}")
                         return existing
                     elif existing.status in ["exited", "created"]:
                         logger.info(f"Starting existing container {container_name}")
-                        await loop.run_in_executor(None, existing.start)
+                        await asyncio.wait_for(
+                            loop.run_in_executor(None, existing.start), timeout=20
+                        )
                         # Wait for it to be running
                         for _ in range(10):
                             await asyncio.sleep(0.5)
                             await loop.run_in_executor(None, existing.reload)
                             if existing.status == "running":
+                                logger.info(
+                                    f"Existing container {container_name} is running"
+                                )
                                 return existing
                         raise DockerError(
                             f"Failed to start existing container {container_name}"
@@ -191,6 +257,10 @@ class DockerManager:
                         logger.info(
                             f"Container {container_name} in unexpected state {existing.status}, creating new"
                         )
+                except asyncio.TimeoutError:
+                    logger.warning(
+                        "Timeout while checking/starting existing container; proceeding to create new"
+                    )
                 except NotFound:
                     logger.debug(f"Container {container_name} not found, creating new")
                 except (docker.errors.APIError, docker.errors.DockerException) as e:
@@ -211,9 +281,12 @@ class DockerManager:
                 sidx = "0"
                 iidx = "0"
 
-            # Named volume for Claude home as per spec
-            # Even without run_id, maintain the naming pattern
-            volume_name = f"orc_home_{run_id or 'norun'}_s{sidx}_i{iidx}"
+            # Named volume for Claude home as per spec (GHASH over session_group_key)
+            import hashlib
+            group_basis = (session_group_key or (instance_id or container_name or "")).encode("utf-8", errors="ignore")
+            ghash = hashlib.sha256(group_basis).hexdigest()[:8]
+            # Scope by run unless configured global (handled by caller via session_group_key contents)
+            volume_name = f"orc_home_{(run_id or 'norun')}_g{ghash}"
 
             # Platform detection for SELinux flag
             import platform
@@ -222,6 +295,40 @@ class DockerManager:
             selinux_mode = ""
             if platform.system() == "Linux" and os.path.exists("/sys/fs/selinux"):
                 selinux_mode = "z"
+
+            # Review workspace RO mode setting via env (default rw)
+            review_mode = os.environ.get("ORCHESTRATOR_RUNNER__REVIEW_WORKSPACE_MODE", "rw").lower()
+
+
+            # Build mounts explicitly to avoid SDK ambiguity with volumes
+            mounts = [
+                # Bind mount for workspace
+                Mount(
+                    target="/workspace",
+                    source=normalize_path_for_docker(workspace_dir),
+                    type="bind",
+                    read_only=(import_policy == "never" and review_mode == "ro"),
+                ),
+                # Named volume for node home (session persistence)
+                Mount(target="/home/node", source=volume_name, type="volume"),
+            ]
+            if selinux_mode:
+                logger.debug("SELinux detected; docker-py Mount API does not support ':z' directly. Documenting limitation.")
+            try:
+                logger.info(
+                    f"Mounts prepared: workspace={mounts[0].source} -> /workspace (ro={mounts[0].read_only}), home=volume:{volume_name} -> /home/node"
+                )
+                if event_callback:
+                    event_callback({
+                        "type": "instance.container_mounts_prepared",
+                        "data": {
+                            "workspace_source": mounts[0].source,
+                            "workspace_read_only": bool(mounts[0].read_only),
+                            "home_volume": volume_name,
+                        },
+                    })
+            except Exception:
+                pass
 
             # Container configuration following spec section 3.4
             config: Dict[str, Any] = {
@@ -233,17 +340,15 @@ class DockerManager:
                     "orchestrator": "true",
                     "created_at": datetime.now(timezone.utc).isoformat(),
                     "run_id": run_id or "",
-                    "strategy_exec": sidx,
-                    "instance_index": iidx,
-                    "instance_status": "running",  # Will be updated on completion
+                    "strategy_execution_id": strategy_execution_id or "",
+                    "strategy_index": sidx,
+                    "task_key": session_group_key or "",
+                    "session_group_key": session_group_key or "",
+                    "orchestrator.last_active_ts": datetime.now(timezone.utc).isoformat(),
+                    "instance_id": instance_id or "",
                 },
-                "volumes": [
-                    # Workspace mount with conditional SELinux flag
-                    # Normalize path for Docker on Windows
-                    f"{normalize_path_for_docker(workspace_dir)}:/workspace{':' + selinux_mode if selinux_mode else ''}",
-                    # Named volume for /home/node
-                    f"{volume_name}:/home/node",
-                ],
+                # Use explicit Mounts; avoid old volumes/binds ambiguity
+                "mounts": mounts,
                 # tmpfs mount for /tmp
                 "tmpfs": {"/tmp": "rw,size=256m"},
                 "working_dir": "/workspace",
@@ -262,12 +367,29 @@ class DockerManager:
                 "auto_remove": False,  # Keep containers for debugging/resume
             }
 
+            # Enforce network egress policy
+            try:
+                if str(network_egress).lower() == "offline":
+                    # Disable networking for the container
+                    config["network_disabled"] = True
+            except Exception:
+                pass
+
             # Merge extra env vars (e.g., auth) into environment pre-creation
             if extra_env:
                 try:
                     config["environment"].update(extra_env)
                 except Exception:
                     pass
+            # Proxy egress support: pass host proxy envs when requested
+            try:
+                if str(network_egress).lower() == "proxy":
+                    import os as _os
+                    for k in ("HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "no_proxy"):
+                        if k in _os.environ:
+                            config["environment"][k] = _os.environ[k]
+            except Exception:
+                pass
 
             # Apply CPU limit using nano_cpus when possible
             try:
@@ -308,25 +430,117 @@ class DockerManager:
                 # Continue with base config if plugin hook fails
                 pass
 
-            # Create container
-            loop = asyncio.get_event_loop()
-            container = await loop.run_in_executor(
+            # Summarize environment without leaking secrets
+            try:
+                env = config.get("environment", {}) or {}
+                redacted = {
+                    "CLAUDE_CODE_OAUTH_TOKEN": "***" if "CLAUDE_CODE_OAUTH_TOKEN" in env else None,
+                    "ANTHROPIC_API_KEY": "***" if "ANTHROPIC_API_KEY" in env else None,
+                    "ANTHROPIC_BASE_URL": env.get("ANTHROPIC_BASE_URL"),
+                }
+                logger.debug(
+                    "Container config ready: env_keys=%d, cpu=%.2f, mem=%s, swap=%s",
+                    len(env),
+                    (config.get("nano_cpus", 0) or 0) / 1_000_000_000,
+                    config.get("mem_limit"),
+                    config.get("memswap_limit"),
+                )
+                if event_callback:
+                    event_callback(
+                        {
+                            "type": "instance.container_config_ready",
+                            "data": {
+                                "env_keys": len(env),
+                                "has_oauth": bool(env.get("CLAUDE_CODE_OAUTH_TOKEN")),
+                                "has_api_key": bool(env.get("ANTHROPIC_API_KEY")),
+                                "base_url_set": bool(env.get("ANTHROPIC_BASE_URL")),
+                            },
+                        }
+                    )
+            except Exception:
+                pass
+
+            # Create container with a bounded timeout to avoid hangs
+            logger.info(f"Creating Docker container via API: name={container_name}, image={image}")
+            if event_callback:
+                event_callback({
+                    "type": "instance.container_create_attempt",
+                    "data": {"container_name": container_name, "image": image},
+                })
+            create_start = time.monotonic()
+            create_future = loop.run_in_executor(
                 None, lambda: self.client.containers.create(**config)
             )
+            try:
+                container = await asyncio.wait_for(create_future, timeout=20)
+                logger.info(
+                    "Docker create returned id=%s (%.2fs)",
+                    container.id[:12] if container else "unknown",
+                    time.monotonic() - create_start,
+                )
+            except asyncio.TimeoutError:
+                if event_callback:
+                    event_callback({
+                        "type": "instance.container_create_timeout",
+                        "data": {"container_name": container_name, "timeout_s": 20},
+                    })
+                raise DockerError(
+                    f"Docker create timed out after 20s for {container_name}. Check Docker Desktop and volume sharing."
+                )
+            except (docker.errors.APIError, docker.errors.DockerException) as e:
+                if event_callback:
+                    event_callback({
+                        "type": "instance.container_create_failed",
+                        "data": {"container_name": container_name, "error": str(e)},
+                    })
+                raise DockerError(f"Docker create failed for {container_name}: {e}")
 
-            # Start container
-            await loop.run_in_executor(None, container.start)
+            # Start container (bounded timeout)
+            start_start = time.monotonic()
+            start_future = loop.run_in_executor(None, container.start)
+            try:
+                await asyncio.wait_for(start_future, timeout=15)
+                logger.info(
+                    "Docker start completed for %s (%.2fs)",
+                    container.name,
+                    time.monotonic() - start_start,
+                )
+            except asyncio.TimeoutError:
+                if event_callback:
+                    event_callback({
+                        "type": "instance.container_start_timeout",
+                        "data": {"container_name": container_name, "timeout_s": 15},
+                    })
+                raise DockerError(
+                    f"Docker start timed out after 15s for {container_name}."
+                )
+            except (docker.errors.APIError, docker.errors.DockerException) as e:
+                if event_callback:
+                    event_callback({
+                        "type": "instance.container_start_failed",
+                        "data": {"container_name": container_name, "error": str(e)},
+                    })
+                raise DockerError(f"Docker start failed for {container_name}: {e}")
 
             # Wait for container to be running
-            for _ in range(10):
+            for i in range(20):
                 await asyncio.sleep(0.5)
                 await loop.run_in_executor(None, container.reload)
+                logger.debug(f"Container status check {i}: {container.status}")
                 if container.status == "running":
                     break
             else:
-                raise DockerError(f"Container {container_name} failed to start")
+                raise DockerError(f"Container {container_name} failed to reach running state")
 
-            logger.info(f"Created container {container_name} (ID: {container.id[:12]})")
+            logger.info(
+                f"Created container {container_name} (ID: {container.id[:12]}) in %.2fs",
+                time.monotonic() - phase_start,
+            )
+            if event_callback:
+                event_callback({
+                    "type": "instance.container_created",
+                    "data": {"container_name": container_name, "container_id": container.id[:12]},
+                })
             return container
 
         except DockerException as e:
@@ -339,6 +553,7 @@ class DockerManager:
         plugin: Any,  # RunnerPlugin
         event_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
         timeout_seconds: int = 3600,
+        max_turns: Optional[int] = None,
     ) -> Dict[str, Any]:
         """
         Execute AI tool command in container and parse output.
@@ -386,6 +601,7 @@ class DockerManager:
 
             async def parse_stream():
                 # Wrap blocking iterator to make it async
+                turns_seen = 0
                 async for chunk in self._async_iter(output_stream):
                     # Check timeout
                     if asyncio.get_event_loop().time() - start_time > timeout_seconds:
@@ -412,6 +628,17 @@ class DockerManager:
 
                                 # Allow other tasks to run
                                 await asyncio.sleep(0)
+
+                                # Enforce max_turns if configured
+                                if max_turns is not None and isinstance(max_turns, int):
+                                    try:
+                                        if str(parsed.get("type", "")).lower() == "turn_complete":
+                                            turns_seen += 1
+                                            if turns_seen >= max_turns:
+                                                # Stop parsing further events
+                                                return
+                                    except Exception:
+                                        pass
 
                         except json.JSONDecodeError:
                             # Some lines might not be JSON (e.g., error messages)
@@ -587,25 +814,50 @@ class DockerManager:
                     else:
                         # Default to failed retention for unknown status (safer)
                         max_age = failed_retention_hours
-                    
+                    # Prefer last-active file mtime if present
+                    try:
+                        active_file = Path(f"/tmp/orchestrator_status/{container.id[:12]}.active")
+                        if active_file.exists():
+                            atime = datetime.fromtimestamp(active_file.stat().st_mtime, tz=timezone.utc)
+                            age_hours = (current_time - atime).total_seconds() / 3600
+                    except Exception:
+                        pass
                     if age_hours > max_age:
                         # Before removal, compute associated resources
                         try:
                             run_id = container.labels.get("run_id", "norun")
-                            sidx = container.labels.get("strategy_exec", "0")
+                            sidx = container.labels.get("strategy_index") or container.labels.get("strategy_exec", "0")
                             iidx = container.labels.get("instance_index", "0")
-                            volume_name = f"orc_home_{run_id}_s{sidx}_i{iidx}"
+                            # Try both legacy (s/i) and new (gHASH) naming
+                            try:
+                                group = container.labels.get("session_group_key") or container.labels.get("task_key") or ""
+                                import hashlib
+                                ghash = hashlib.sha256(group.encode("utf-8")).hexdigest()[:8] if group else "unknown"
+                                volume_name = f"orc_home_{run_id}_g{ghash}"
+                            except Exception:
+                                volume_name = f"orc_home_{run_id}_s{sidx}_i{iidx}"
                             # Attempt to remove container
                             await self.cleanup_container(container)
                             removed_count += 1
                             logger.debug(
                                 f"Removed {status} container {container.name} (age: {age_hours:.1f}h)"
                             )
-                            # Remove named volume
+                            # Remove named volume (run in executor to avoid blocking event loop)
                             try:
-                                vol = self.client.volumes.get(volume_name)
-                                vol.remove(force=True)
-                                logger.debug(f"Removed volume {volume_name}")
+                                get_vol = loop.run_in_executor(
+                                    None, lambda: self.client.volumes.get(volume_name)
+                                )
+                                try:
+                                    vol = await asyncio.wait_for(get_vol, timeout=10)
+                                    rm_vol = loop.run_in_executor(
+                                        None, lambda: vol.remove(force=True)
+                                    )
+                                    await asyncio.wait_for(rm_vol, timeout=15)
+                                    logger.debug(f"Removed volume {volume_name}")
+                                except asyncio.TimeoutError:
+                                    logger.debug(
+                                        f"Timed out removing volume {volume_name}; skipping"
+                                    )
                             except Exception:
                                 pass
                             # Remove workspace directory

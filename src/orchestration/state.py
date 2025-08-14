@@ -85,6 +85,9 @@ class RunState:
     # Event tracking
     last_event_offset: int = 0
 
+    # Durable task registry: key -> {fingerprint:str}
+    tasks: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+
     def to_dict(self) -> Dict[str, Any]:
         """Convert state to dictionary for serialization."""
         return {
@@ -140,6 +143,7 @@ class RunState:
                 }
                 for id, strat in self.strategies.items()
             },
+            "tasks": self.tasks,
         }
 
     @classmethod
@@ -209,6 +213,7 @@ class RunState:
             )
 
         return state
+
 
 
 class StateManager:
@@ -327,14 +332,14 @@ class StateManager:
         if self.event_bus:
             try:
                 # Get events since the last applied offset
-                events, next_offset = self.event_bus.get_events_since(
+                all_events, next_offset = self.event_bus.get_events_since(
                     offset=last_offset,
                     event_types=None,
                     limit=None,
                 )
 
                 # Filter only state.* events
-                state_events = [e for e in events if str(e.get("type", "")).startswith("state.")]
+                state_events = [e for e in all_events if str(e.get("type", "")).startswith("state.")]
 
                 if state_events:
                     # Apply events to reconstruct state
@@ -349,6 +354,41 @@ class StateManager:
             except Exception as e:
                 logger.error(f"Failed to recover events for run {run_id}: {e}")
                 # Continue with snapshot state if event recovery fails
+
+        # Crash inference: mark RUNNING without terminal events as INTERRUPTED
+        if self.current_state:
+            try:
+                # Determine which instances have terminal events since last_offset
+                terminal_iids: set[str] = set()
+                for ev in (all_events or []):
+                    et = str(ev.get("type", ""))
+                    iid = ev.get("instance_id")
+                    if not iid:
+                        continue
+                    if et in ("instance.completed", "instance.failed"):
+                        terminal_iids.add(iid)
+                    if et == "state.instance_updated":
+                        data = ev.get("data", {})
+                        if data.get("new_state") in (InstanceStatus.COMPLETED.value, InstanceStatus.FAILED.value):
+                            terminal_iids.add(iid)
+
+                for iid, info in list(self.current_state.instances.items()):
+                    if info.state == InstanceStatus.RUNNING and iid not in terminal_iids:
+                        info.state = InstanceStatus.INTERRUPTED
+                        info.interrupted_at = datetime.now(timezone.utc)
+                        if self.event_bus:
+                            self.event_bus.emit(
+                                "state.instance_updated",
+                                {
+                                    "instance_id": iid,
+                                    "old_state": InstanceStatus.RUNNING.value,
+                                    "new_state": InstanceStatus.INTERRUPTED.value,
+                                    "interrupted_at": info.interrupted_at.isoformat(),
+                                },
+                                instance_id=iid,
+                            )
+            except Exception as e:
+                logger.debug(f"Crash inference check failed: {e}")
 
         return self.current_state
 
@@ -419,6 +459,26 @@ class StateManager:
             )
 
         asyncio.create_task(self._maybe_snapshot())
+
+    def register_task(self, key: str, fingerprint: str, canonical_input: Optional[str] = None) -> None:
+        """Register a durable task fingerprint, enforcing no conflicts.
+
+        Stores fingerprint and the normalized input representation when provided.
+        """
+        if not self.current_state:
+            raise RuntimeError("No active run state")
+        existing = self.current_state.tasks.get(key)
+        if existing and existing.get("fingerprint") != fingerprint:
+            raise ValueError(f"KeyConflictDifferentFingerprint for key {key}")
+        entry = {"fingerprint": fingerprint}
+        if canonical_input is not None:
+            entry["input"] = canonical_input
+        self.current_state.tasks[key] = entry
+        if self.event_bus:
+            self.event_bus.emit(
+                "state.task_registered",
+                {"key": key, "fingerprint": fingerprint},
+            )
 
     def update_instance_state(
         self,

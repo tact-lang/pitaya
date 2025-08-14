@@ -87,11 +87,14 @@ class BestOfNStrategy(Strategy):
                 "timeout_seconds": config.timeout_seconds,
                 "container_limits": config.container_limits,
                 "scorer_prompt": config.scorer_prompt,
+                # Ensure unique durable keys per candidate
+                "key_prefix": f"cand{index}",
             }
 
             scoring_strategy.set_config_overrides(overrides)
 
             # Add metadata to track which instance this is
+            # Tag keys for durable scheduling inside composed strategy
             results = await scoring_strategy.execute(prompt, base_branch, ctx)
             if results and len(results) > 0:
                 if results[0].metrics is None:

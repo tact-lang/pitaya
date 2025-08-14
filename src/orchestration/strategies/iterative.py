@@ -85,19 +85,10 @@ class IterativeStrategy(Strategy):
                     f"Previous feedback:\n{feedback}"
                 )
 
-            # Spawn instance (continuing session if not first iteration)
-            handle = await ctx.spawn_instance(
-                prompt=iteration_prompt,
-                base_branch=current_branch,
-                metadata={
-                    "strategy": self.name,
-                    "iteration": iteration + 1,
-                    "total_iterations": config.iterations,
-                    "session_id": session_id,
-                },
-            )
-
-            result = await handle.result()
+            # Durable run with key and continuation
+            task = {"prompt": iteration_prompt, "base_branch": current_branch}
+            handle = await ctx.run(task, key=ctx.key("iter", iteration + 1))
+            result = await ctx.wait(handle)
 
             # If any iteration fails, stop and return what we have
             if not result.success:
@@ -113,18 +104,9 @@ class IterativeStrategy(Strategy):
             # Get feedback for next iteration (if not last)
             if iteration < config.iterations - 1:
                 # Spawn a reviewer instance
-                review_handle = await ctx.spawn_instance(
-                    prompt=config.reviewer_prompt,
-                    base_branch=current_branch,
-                    metadata={
-                        "strategy": self.name,
-                        "phase": "review",
-                        "iteration": iteration + 1,
-                        "reviewing_branch": current_branch,
-                    },
-                )
-
-                review_result = await review_handle.result()
+                review_task = {"prompt": config.reviewer_prompt, "base_branch": current_branch}
+                review_handle = await ctx.run(review_task, key=ctx.key("review", iteration + 1))
+                review_result = await ctx.wait(review_handle)
 
                 if review_result.success and review_result.final_message:
                     feedback = review_result.final_message

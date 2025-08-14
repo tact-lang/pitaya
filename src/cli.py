@@ -112,9 +112,9 @@ Examples:
         # Model options
         parser.add_argument(
             "--model",
-            choices=["sonnet", "opus"],
-            default="sonnet",
-            help="Claude model to use (default: sonnet)",
+            choices=["sonnet", "opus", "haiku"],
+            default=os.environ.get("ORCHESTRATOR_DEFAULT_MODEL", "sonnet"),
+            help="Claude model to use (default: env ORCHESTRATOR_DEFAULT_MODEL or 'sonnet')",
         )
 
         # Repository options
@@ -198,6 +198,8 @@ Examples:
             metavar="RUN_ID",
             help="Remove containers and state for a specific run",
         )
+        parser.add_argument("--dry-run", action="store_true", help="List cleanup targets without deleting (with --clean-containers)")
+        parser.add_argument("--force", action="store_true", help="Bypass prompts for cleanup")
         # Alias per spec examples
         parser.add_argument(
             "--cleanup-run",
@@ -223,10 +225,21 @@ Examples:
             help="Logs directory (default: ./logs)",
         )
         parser.add_argument("--debug", action="store_true", help="Enable debug logging")
+        # Convenience alias: --json implies --no-tui --output json
+        parser.add_argument("--json", action="store_true", help="Output JSON events (implies --no-tui)")
+        # Allow-dirty working tree for preflight
+        parser.add_argument("--allow-dirty", action="store_true", help="Allow running with a dirty working tree")
         parser.add_argument(
             "--http-port",
             type=int,
             help="Enable HTTP server on specified port for multi-UI support",
+        )
+
+        # Diagnostics
+        parser.add_argument(
+            "--docker-smoke",
+            action="store_true",
+            help="Run a Docker create/start smoke test and exit (no auth required)",
         )
 
         return parser
@@ -441,6 +454,18 @@ Examples:
             self.console.print(f"[red]Error checking git repository: {e}[/red]")
             return False
 
+        # 3b. Check working tree is clean unless --allow-dirty
+        try:
+            import subprocess
+            dirty_cmd = ["git", "-C", str(repo_path), "status", "--porcelain"]
+            result = subprocess.run(dirty_cmd, capture_output=True, text=True)
+            if result.returncode == 0 and result.stdout.strip() and not getattr(args, "allow_dirty", False):
+                self.console.print("[red]Working tree has uncommitted changes. Commit/stash or use --allow-dirty.[/red]")
+                return False
+        except (subprocess.SubprocessError, OSError) as e:
+            self.console.print(f"[red]Error checking working tree: {e}[/red]")
+            return False
+
         # 4. Check disk space (20GB minimum as per spec)
         try:
             stat = shutil.disk_usage(str(repo_path))
@@ -538,11 +563,14 @@ Examples:
                     labels = container.labels
                     if labels.get("orchestrator.run_id") == run_id:
                         try:
-                            if container.status == "running":
-                                await asyncio.to_thread(container.stop)
-                            await asyncio.to_thread(container.remove)
-                            cleaned += 1
-                            self.console.print(f"  Removed container: {container.name}")
+                            if args.dry_run:
+                                self.console.print(f"  Would remove container: {container.name}")
+                            else:
+                                if container.status == "running":
+                                    await asyncio.to_thread(container.stop)
+                                await asyncio.to_thread(container.remove)
+                                cleaned += 1
+                                self.console.print(f"  Removed container: {container.name}")
                         except Exception as e:
                             self.console.print(
                                 f"  [red]Failed to remove {container.name}: {e}[/red]"
@@ -572,9 +600,14 @@ Examples:
                 shutil.rmtree(results_dir)
                 self.console.print(f"  Removed results directory: {results_dir.name}")
 
-            self.console.print(
-                f"[green]Cleaned up run {run_id} ({cleaned} containers)[/green]"
-            )
+            if args.dry_run:
+                self.console.print(
+                    f"[yellow]Dry run complete for {run_id}[/yellow]"
+                )
+            else:
+                self.console.print(
+                    f"[green]Cleaned up run {run_id} ({cleaned} containers)[/green]"
+                )
             return 0
 
         except (DockerError, OrchestratorError) as e:
@@ -833,11 +866,19 @@ Examples:
                 selected_branch = None
                 if strat_info.strategy_name == "best-of-n" and strat_info.results:
                     # The first result is typically the selected one
-                    selected_branch = (
-                        strat_info.results[0].get("branch_name")
-                        if strat_info.results
-                        else None
-                    )
+                    try:
+                        selected_branch = (
+                            strat_info.results[0].branch_name
+                            if strat_info.results
+                            else None
+                        )
+                    except AttributeError:
+                        # Fallback if results are dicts (e.g., from snapshot)
+                        selected_branch = (
+                            strat_info.results[0].get("branch_name")
+                            if strat_info.results
+                            else None
+                        )
 
                 # Display each instance
                 for result in strat_results:
@@ -1037,11 +1078,20 @@ Examples:
             get_platform_recommendations,
         )
 
+        # Apply --json convenience alias
+        if getattr(args, "json", False):
+            args.no_tui = True
+            args.output = "json"
+
         # Validate Docker setup
         docker_valid, docker_error = validate_docker_setup()
         if not docker_valid:
             self.console.print(f"[red]Docker Setup Error:[/red] {docker_error}")
             return 1
+
+        # Fast path: diagnostics smoke test
+        if getattr(args, "docker_smoke", False):
+            return await self._run_docker_smoke(args)
 
         # Show platform recommendations if any
         recommendations = get_platform_recommendations()
@@ -1208,6 +1258,94 @@ Examples:
             # TUI mode
             return await self._run_with_tui(args, run_id, full_config)
 
+    async def _run_docker_smoke(self, args: argparse.Namespace) -> int:
+        """Run a minimal Docker create/start test mirroring runner settings."""
+        import os
+        import asyncio
+        from docker import from_env
+        from docker.errors import ImageNotFound, DockerException
+        from docker.types import Mount
+
+        # Choose workspace path: use repo or a smoke dir under ORCHESTRATOR_WORKSPACE_BASE
+        base = os.path.expanduser(os.environ.get("ORCHESTRATOR_WORKSPACE_BASE", "~/.orchestrator/workspaces"))
+        ws = os.path.join(base, "smoke")
+        os.makedirs(ws, exist_ok=True)
+
+        image = "claude-code:latest"
+        name = "orchestrator_smoke_test"
+        self.console.print(f"[blue]Docker smoke:[/blue] image={image} workspace={ws}")
+
+        try:
+            client = from_env(timeout=20)
+            # Ensure image exists (local only)
+            try:
+                client.images.get(image)
+            except ImageNotFound:
+                self.console.print(f"[red]Image not found:[/red] {image}. Build with: docker build -t {image} .")
+                return 1
+
+            # Clean any stale container
+            try:
+                client.containers.get(name).remove(force=True)
+            except Exception:
+                pass
+
+            mounts = [
+                Mount(target="/workspace", source=ws, type="bind", read_only=False),
+                Mount(target="/home/node", source="orc_home_smoke_cli", type="volume"),
+            ]
+
+            self.console.print("[dim]Creating container...[/dim]")
+            c = client.containers.create(
+                image=image,
+                name=name,
+                command="sleep infinity",
+                detach=True,
+                labels={"orchestrator": "true"},
+                mounts=mounts,
+                tmpfs={"/tmp": "rw,size=256m"},
+                working_dir="/workspace",
+                read_only=True,
+                user="node",
+                environment={"PYTHONUNBUFFERED": "1"},
+                mem_limit="4g",
+                memswap_limit="4g",
+                nano_cpus=2_000_000_000,
+                auto_remove=False,
+            )
+
+            self.console.print("[dim]Starting container...[/dim]")
+            c.start()
+            await asyncio.sleep(0.5)
+            c.reload()
+            if c.status != "running":
+                self.console.print(f"[red]Container not running:[/red] status={c.status}")
+                try:
+                    logs = c.logs(tail=50).decode("utf-8", errors="replace")
+                    if logs:
+                        self.console.print("[dim]Container logs:[/dim]\n" + logs)
+                except Exception:
+                    pass
+                return 1
+
+            # Quick exec sanity: list workspace
+            exec_id = client.api.exec_create(c.id, "sh -lc 'echo smoke && ls -la'", stdout=True, stderr=True)
+            out = client.api.exec_start(exec_id["Id"], stream=False)
+            self.console.print("[green]Smoke success:[/green] container running; exec output:\n" + out.decode("utf-8", errors="replace"))
+            return 0
+        except DockerException as e:
+            self.console.print(f"[red]Docker error during smoke:[/red] {e}")
+            return 1
+        finally:
+            try:
+                client = from_env(timeout=10)
+                try:
+                    client.containers.get(name).remove(force=True)
+                except Exception:
+                    pass
+            except Exception:
+                pass
+
     async def _run_headless(
         self, args: argparse.Namespace, full_config: Dict[str, Any]
     ) -> int:
@@ -1216,37 +1354,91 @@ Examples:
 
         # Set up event subscriptions for output
         if output_mode == "streaming":
-            # Subscribe to key events for console output
+            # Maintain mapping from instance_id -> k<8> for canonical prefixes
+            import hashlib as _hashlib
+            _inst_to_k8: dict[str, str] = {}
+
+            def _record_task_event(event):
+                et = event.get("type", "")
+                if et not in ("task.scheduled", "task.started"):
+                    return
+                data = event.get("data", {})
+                key = data.get("key")
+                iid = data.get("instance_id")
+                if key and iid:
+                    k8 = _hashlib.sha256(key.encode("utf-8")).hexdigest()[:8]
+                    _inst_to_k8[iid] = k8
+
+            # Subscribe to canonical task events to build mapping
+            self.orchestrator.subscribe("task.scheduled", _record_task_event)
+            self.orchestrator.subscribe("task.started", _record_task_event)
+
+            # Subscribe to key events for console output with canonical prefix
             def print_event(event):
                 event_type = event.get("type", "unknown")
                 data = event.get("data", {})
+                iid = event.get("instance_id") or data.get("instance_id") or ""
+                inst5 = (iid[:5] if iid else "?????")
+                k8 = _inst_to_k8.get(iid, "????????")
+                prefix = f"k{k8}/inst-{inst5}: "
 
                 # Format event based on type
                 if event_type == "instance.started":
-                    self.console.print(
-                        f"[blue]Starting instance:[/blue] {data.get('prompt', '')[:80]}..."
-                    )
+                    self.console.print(f"{prefix}[blue]Starting[/blue] {data.get('prompt', '')[:80]}...")
                 elif event_type == "instance.completed":
                     success = data.get("success", False)
                     branch = data.get("branch_name", "unknown")
                     duration = data.get("duration_seconds", 0)
                     if success:
-                        self.console.print(
-                            f"[green]✓ Instance completed:[/green] {branch} ({duration:.1f}s)"
-                        )
+                        self.console.print(f"{prefix}[green]✓ Completed:[/green] {branch} ({duration:.1f}s)")
                     else:
-                        self.console.print("[red]✗ Instance failed[/red]")
+                        self.console.print(f"{prefix}[red]✗ Failed[/red]")
                 elif event_type == "instance.failed":
                     error = data.get("error", "Unknown error")
-                    self.console.print(f"[red]Instance failed:[/red] {error}")
+                    self.console.print(f"{prefix}[red]Failed:[/red] {error}")
                 elif event_type == "strategy.completed":
-                    self.console.print("[green]Strategy completed[/green]")
+                    self.console.print(f"{prefix}[green]Strategy completed[/green]")
+                # Container lifecycle visibility (helpful for diagnosing stalls)
+                elif event_type == "instance.container_create_entry":
+                    self.console.print(f"{prefix}[dim]docker:[/dim] preparing {data.get('container_name')} (image={data.get('image', '-')})")
+                elif event_type == "instance.container_image_check":
+                    self.console.print(f"{prefix}[dim]docker:[/dim] checking image {data.get('image')}")
+                elif event_type == "instance.container_image_check_timeout":
+                    self.console.print(f"{prefix}[red]docker:[/red] image check timed out after {data.get('timeout_s')}s")
+                elif event_type == "instance.container_create_attempt":
+                    self.console.print(f"{prefix}[dim]docker:[/dim] creating {data.get('container_name')}")
+                elif event_type == "instance.container_created":
+                    self.console.print(f"{prefix}[green]docker:[/green] created id={data.get('container_id')}")
+                elif event_type == "instance.container_create_timeout":
+                    self.console.print(f"{prefix}[red]docker:[/red] create timed out after {data.get('timeout_s')}s")
+                elif event_type == "instance.container_create_failed":
+                    self.console.print(f"{prefix}[red]docker:[/red] create failed: {data.get('error')}")
+                elif event_type == "instance.container_start_timeout":
+                    self.console.print(f"{prefix}[red]docker:[/red] start timed out after {data.get('timeout_s')}s")
+                elif event_type == "instance.container_start_failed":
+                    self.console.print(f"{prefix}[red]docker:[/red] start failed: {data.get('error')}")
 
             # Subscribe to events
             self.orchestrator.subscribe("instance.started", print_event)
             self.orchestrator.subscribe("instance.completed", print_event)
             self.orchestrator.subscribe("instance.failed", print_event)
             self.orchestrator.subscribe("strategy.completed", print_event)
+            # Container lifecycle events
+            for et in [
+                "instance.container_create_entry",
+                "instance.container_env_preparing",
+                "instance.container_env_prepared",
+                "instance.container_create_call",
+                "instance.container_image_check",
+                "instance.container_image_check_timeout",
+                "instance.container_create_attempt",
+                "instance.container_created",
+                "instance.container_create_timeout",
+                "instance.container_create_failed",
+                "instance.container_start_timeout",
+                "instance.container_start_failed",
+            ]:
+                self.orchestrator.subscribe(et, print_event)
 
         try:
             if args.resume:

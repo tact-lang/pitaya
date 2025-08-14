@@ -240,6 +240,7 @@ class ClaudeCodePlugin(RunnerPlugin):
                 (lambda ev: event_callback(ev)) if callable(event_callback) else None
             ),
             timeout_seconds=timeout_seconds,
+            max_turns=kwargs.get("max_turns"),
         )
 
         return result_data

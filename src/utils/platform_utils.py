@@ -68,7 +68,11 @@ def normalize_path_for_docker(
     Returns:
         Normalized path string suitable for Docker
     """
-    path = Path(path).absolute()
+    # Resolve symlinks to avoid macOS /tmp -> /private/tmp issues
+    try:
+        path = Path(os.path.realpath(str(path))).absolute()
+    except Exception:
+        path = Path(path).absolute()
 
     # Auto-detect if not specified
     if is_windows_docker is None:
@@ -86,7 +90,14 @@ def normalize_path_for_docker(
         return path_str
     else:
         # Unix-like systems (including WSL) use normal paths
-        return str(path)
+        # On macOS, prefer /private/tmp over /tmp for Docker Desktop file sharing
+        pstr = str(path)
+        try:
+            if platform.system() == "Darwin" and pstr.startswith("/tmp/"):
+                pstr = pstr.replace("/tmp/", "/private/tmp/", 1)
+        except Exception:
+            pass
+        return pstr
 
 
 def get_docker_socket_path() -> str:

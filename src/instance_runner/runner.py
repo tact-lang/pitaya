@@ -77,9 +77,11 @@ async def run_instance(
     run_id: Optional[str] = None,
     strategy_execution_id: Optional[str] = None,
     instance_id: Optional[str] = None,
+    task_key: Optional[str] = None,
     container_name: Optional[str] = None,
     model: str = "sonnet",
     session_id: Optional[str] = None,
+    session_group_key: Optional[str] = None,
     event_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
     timeout_seconds: int = 3600,
     container_limits: Optional[ContainerLimits] = None,
@@ -91,7 +93,12 @@ async def run_instance(
     plugin_name: str = "claude-code",
     system_prompt: Optional[str] = None,
     append_system_prompt: Optional[str] = None,
-    force_import: bool = False,
+    # Import controls per spec
+    import_policy: str = "auto",  # auto|never|always
+    import_conflict_policy: str = "fail",  # fail|overwrite|suffix
+    skip_empty_import: bool = True,
+    network_egress: Optional[str] = None,
+    max_turns: Optional[int] = None,
 ) -> InstanceResult:
     """
     Execute a single AI coding instance in Docker.
@@ -121,7 +128,9 @@ async def run_instance(
         plugin_name: Name of the AI tool plugin to use (default: "claude-code")
         system_prompt: System prompt for the AI tool
         append_system_prompt: Additional system prompt to append
-        force_import: Force overwrite of target branch during import
+        import_policy: "auto|never|always"
+        import_conflict_policy: "fail|overwrite|suffix"
+        skip_empty_import: Whether to skip import when no changes
 
     Returns:
         InstanceResult with branch name, metrics, and status
@@ -131,6 +140,8 @@ async def run_instance(
     container_limits = container_limits or ContainerLimits()
     retry_config = retry_config or RetryConfig()
     logger.info(f"Instance ID: {instance_id}")
+    if not session_group_key:
+        session_group_key = task_key or instance_id
 
     # Get plugin
     if plugin_name not in AVAILABLE_PLUGINS:
@@ -144,6 +155,10 @@ async def run_instance(
     # Use plugin's default image if not specified
     if docker_image is None:
         docker_image = plugin.docker_image
+    # Defensive model validation (also validated by orchestration)
+    allowed_models = {"sonnet", "opus", "haiku"}
+    if model not in allowed_models:
+        raise ValidationError(f"Unknown model: {model}. Allowed: {sorted(allowed_models)}")
 
     # Validate plugin environment
     # Convert AuthConfig to dict for plugin
@@ -163,6 +178,8 @@ async def run_instance(
     attempt = 0
     delay = retry_config.initial_delay_seconds
     last_result = None
+    # Ensure optional force_import flag defaults to False (used in internal attempt API)
+    force_import = False
 
     while attempt < retry_config.max_attempts:
         attempt += 1
@@ -185,6 +202,7 @@ async def run_instance(
             container_name=container_name,
             model=model,
             session_id=current_session_id,
+            session_group_key=session_group_key,
             event_callback=event_callback,
             timeout_seconds=timeout_seconds,
             container_limits=container_limits,
@@ -199,6 +217,11 @@ async def run_instance(
             append_system_prompt=append_system_prompt,
             retry_config=retry_config,
             force_import=force_import,
+            import_policy=import_policy,
+            import_conflict_policy=import_conflict_policy,
+            skip_empty_import=skip_empty_import,
+            network_egress=network_egress,
+            max_turns=max_turns,
         )
 
         # Success or non-retryable error
@@ -246,6 +269,7 @@ async def _run_instance_attempt(
     container_name: str,
     model: str,
     session_id: Optional[str],
+    session_group_key: Optional[str],
     event_callback: Optional[Callable[[Dict[str, Any]], None]],
     timeout_seconds: int,
     container_limits: ContainerLimits,
@@ -260,6 +284,11 @@ async def _run_instance_attempt(
     append_system_prompt: Optional[str],
     retry_config: RetryConfig,
     force_import: bool,
+    import_policy: str,
+    import_conflict_policy: str,
+    skip_empty_import: bool,
+    network_egress: Optional[str] = None,
+    max_turns: Optional[int] = None,
 ) -> InstanceResult:
     """Single attempt at running an instance (internal helper for retry logic)."""
     start_time = time.time()
@@ -368,32 +397,94 @@ async def _run_instance_attempt(
             # Phase 3: Container Creation
             logger.info(f"Creating container {container_name}")
             emit_event(
-                "instance.container_creating", {"container_name": container_name}
+                "instance.container_creating",
+                {
+                    "container_name": container_name,
+                    "workspace_dir": str(workspace_dir),
+                    "image": docker_image,
+                },
             )
 
             # Prepare auth env before container creation via plugin
+            emit_event("instance.container_env_preparing", {"container_name": container_name})
             from dataclasses import asdict
             env_vars = await plugin.prepare_environment(
                 None, asdict(auth_config) if auth_config else None
             )
+            try:
+                emit_event(
+                    "instance.container_env_prepared",
+                    {"env_vars_count": len(env_vars or {}), "container_name": container_name},
+                )
+            except Exception:
+                emit_event(
+                    "instance.container_env_prepared",
+                    {"env_vars_count": 0, "container_name": container_name},
+                )
 
-            # Create base container with plugin/environment hooks
-            container = await docker_manager.create_container(
-                container_name=container_name,
-                workspace_dir=workspace_dir,  # Now using workspace instead of repo
-                cpu_count=container_limits.cpu_count,
-                memory_gb=container_limits.memory_gb,
-                memory_swap_gb=container_limits.memory_swap_gb,
-                run_id=run_id,
-                strategy_execution_id=strategy_execution_id,
-                instance_id=instance_id,
-                session_id=session_id,  # Plugin will handle this
-                image=docker_image,
-                auth_config=auth_config,
-                reuse_container=reuse_container,
-                extra_env=env_vars,
-                plugin=plugin,
-            )
+            # Create base container with plugin/environment hooks, with a hard timeout guard
+            try:
+                # Record timing for create_container to diagnose stalls
+                _cc_start = time.time()
+                emit_event(
+                    "instance.container_create_call",
+                    {"container_name": container_name, "image": docker_image},
+                )
+                logger.debug(
+                    "Awaiting DockerManager.create_container (image=%s, cpus=%s, mem_gb=%s, swap_gb=%s, reuse=%s, ws=%s)",
+                    docker_image,
+                    container_limits.cpu_count,
+                    container_limits.memory_gb,
+                    container_limits.memory_swap_gb,
+                    reuse_container,
+                    str(workspace_dir),
+                )
+                container = await asyncio.wait_for(
+                    docker_manager.create_container(
+                        container_name=container_name,
+                        workspace_dir=workspace_dir,  # Now using workspace instead of repo
+                        cpu_count=container_limits.cpu_count,
+                        memory_gb=container_limits.memory_gb,
+                        memory_swap_gb=container_limits.memory_swap_gb,
+                        run_id=run_id,
+                        strategy_execution_id=strategy_execution_id,
+                        instance_id=instance_id,
+                        session_id=session_id,  # Plugin will handle this
+                        session_group_key=session_group_key,
+                        import_policy=import_policy,
+                        image=docker_image,
+                        auth_config=auth_config,
+                        reuse_container=reuse_container,
+                        extra_env=env_vars,
+                        plugin=plugin,
+                        network_egress=(network_egress or "online"),
+                        event_callback=event_callback,
+                    ),
+                    timeout=60,
+                )
+                logger.info(
+                    "Container created: name=%s id=%s (%.2fs)",
+                    container_name,
+                    getattr(container, "id", "unknown")[:12] if container else "unknown",
+                    time.time() - _cc_start,
+                )
+            except asyncio.TimeoutError:
+                emit_event(
+                    "instance.container_create_timeout",
+                    {"container_name": container_name, "timeout_s": 60},
+                )
+                raise DockerError(
+                    "Container creation phase exceeded 60s. Docker may be unresponsive; try restarting Docker Desktop."
+                )
+            finally:
+                try:
+                    if '_cc_start' in locals():
+                        logger.debug(
+                            "create_container finished in %.2fs (including error path)",
+                            time.time() - _cc_start,
+                        )
+                except Exception:
+                    pass
 
             emit_event(
                 "instance.container_created", {"container_id": container.id[:12]}
@@ -427,6 +518,7 @@ async def _run_instance_attempt(
                 ),
                 system_prompt=system_prompt,
                 append_system_prompt=append_system_prompt,
+                max_turns=max_turns,
             )
 
             claude_session_id = result_data.get("session_id")
@@ -446,12 +538,14 @@ async def _run_instance_attempt(
             logger.info("Collecting results and importing branch")
             emit_event("instance.result_collection_started", {})
 
-            # Import work from workspace to host repository (using orchestration-provided branch name)
+            # Import work from workspace to host repository according to policy
             has_changes = await git_ops.import_branch(
                 repo_path=repo_path,
                 workspace_dir=workspace_dir,
                 branch_name=branch_name,
-                force=force_import,
+                import_policy=import_policy,
+                import_conflict_policy=import_conflict_policy,
+                skip_empty_import=skip_empty_import,
             )
 
             if has_changes:
@@ -472,6 +566,7 @@ async def _run_instance_attempt(
             duration = time.time() - start_time
 
             # Emit completion event BEFORE cleanup (as per spec)
+            # Note: Do not include host workspace paths in public events
             emit_event(
                 "instance.completed",
                 {
@@ -479,11 +574,34 @@ async def _run_instance_attempt(
                     "branch_name": branch_name,
                     "duration_seconds": duration,
                     "metrics": metrics,
-                    "workspace_dir": (
-                        str(workspace_dir) if workspace_dir else None
-                    ),  # Include workspace path
                 },
             )
+
+            # Write runner-local completion record including workspace path
+            try:
+                if log_path:
+                    from pathlib import Path as _P
+                    _p = _P(log_path)
+                    _p.parent.mkdir(parents=True, exist_ok=True)
+                    with open(_p, "a", encoding="utf-8") as fh:
+                        import json as _json
+                        fh.write(
+                            _json.dumps(
+                                {
+                                    "type": "runner.instance.completed",
+                                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                                    "instance_id": instance_id,
+                                    "workspace_path": str(workspace_dir) if workspace_dir else None,
+                                    "branch_name": branch_name,
+                                    "duration_seconds": duration,
+                                },
+                                ensure_ascii=False,
+                            )
+                            + "\n"
+                        )
+            except Exception:
+                # Best-effort; do not fail the run if logging fails
+                pass
 
             # Now clean up workspace for successful instances
             if workspace_dir:

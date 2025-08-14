@@ -17,7 +17,10 @@ RUN apt update && apt install -y \
 RUN mkdir -p /workspace && \
     chown -R node:node /workspace
 
-# Set up npm global directory for node user (already exists but ensure permissions)
+# Install Claude Code CLI globally as root so it survives /home/node volume mounts
+RUN npm install -g @anthropic-ai/claude-code
+
+# Set up npm global directory for node user (runtime installs, if any)
 RUN mkdir -p /home/node/.npm-global && \
     chown -R node:node /home/node/.npm-global
 
@@ -25,16 +28,13 @@ RUN mkdir -p /home/node/.npm-global && \
 USER node
 WORKDIR /workspace
 
-# Configure npm to use the global directory
+# Configure npm to use the user global directory (not used for preinstalled CLI)
 ENV NPM_CONFIG_PREFIX=/home/node/.npm-global
 ENV PATH=$PATH:/home/node/.npm-global/bin
 
 # Configure AppImage to extract and run
 ENV APPIMAGE_EXTRACT_AND_RUN=1
 ENV TMPDIR=/workspace
-
-# Install Claude Code CLI as claude user
-RUN npm install -g @anthropic-ai/claude-code
 
 # Default command
 CMD ["claude", "--help"]

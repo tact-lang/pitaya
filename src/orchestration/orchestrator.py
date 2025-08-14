@@ -111,6 +111,8 @@ class Orchestrator:
 
         # Background tasks
         self._executor_tasks: List[asyncio.Task] = []
+        # Map instance_id -> container_id[:12] for last-active tracking
+        self._inst_container_id: Dict[str, str] = {}
 
         # HTTP server (optional)
         self.http_server: Optional["OrchestratorHTTPServer"] = None
@@ -137,6 +139,19 @@ class Orchestrator:
 
         # Clean up orphaned containers from previous runs
         await self.cleanup_orphaned_containers()
+
+        # Adjust parallelism adaptively if beneficial
+        try:
+            import os
+            host_cpu = max(1, os.cpu_count() or 1)
+            per_container = max(1, int(self.container_limits.cpu_count))
+            adaptive = max(2, min(20, host_cpu // per_container))
+            if self.max_parallel_instances == 20 and adaptive != 20:
+                logger.info(f"Adaptive parallelism: host_cpu={host_cpu}, per_container={per_container} -> setting max_parallel_instances={adaptive}")
+                self.max_parallel_instances = adaptive
+                self._resource_pool = asyncio.Semaphore(self.max_parallel_instances)
+        except Exception as e:
+            logger.debug(f"Adaptive parallelism calc failed: {e}")
 
         # Start multiple background executors for true parallel execution
         # Start a reasonable number of executors (min of max_parallel and 10)
@@ -282,7 +297,7 @@ class Orchestrator:
         # Initialize event bus for this run (if not already initialized)
         if not self.event_bus:
             event_log_path = self.logs_dir / run_id / "events.jsonl"
-            self.event_bus = EventBus(max_events=self.event_buffer_size, persist_path=event_log_path)
+            self.event_bus = EventBus(max_events=self.event_buffer_size, persist_path=event_log_path, run_id=run_id)
         else:
             # If event bus exists, update persistence path
             event_log_path = self.logs_dir / run_id / "events.jsonl"
@@ -310,16 +325,7 @@ class Orchestrator:
         await self.state_manager.start_periodic_snapshots()
 
         # Emit run started event
-        self.event_bus.emit(
-            "run.started",
-            {
-                "run_id": run_id,
-                "strategy": strategy_name,
-                "prompt": prompt,
-                "repo_path": str(repo_path),
-                "base_branch": base_branch,
-            },
-        )
+        self.event_bus.emit("run.started", {"run_id": run_id, "strategy": strategy_name, "prompt": prompt, "repo_path": str(repo_path), "base_branch": base_branch})
 
         try:
             # Get strategy class
@@ -349,15 +355,13 @@ class Orchestrator:
                     )
 
                     # Execute strategy
-                    self.event_bus.emit(
-                        "strategy.started",
-                        {
-                            "strategy_id": strategy_id,
-                            "strategy_name": strategy_name,
-                            "config": strategy_config,
-                            "run_index": run_idx + 1,
-                            "total_runs": runs,
-                        },
+                    self.event_bus.emit("strategy.started", {"strategy_id": strategy_id, "strategy_name": strategy_name, "config": strategy_config, "run_index": run_idx + 1, "total_runs": runs})
+                    # Canonical
+                    self.event_bus.emit_canonical(
+                        type="strategy.started",
+                        run_id=run_id,
+                        strategy_execution_id=strategy_id,
+                        payload={"name": strategy_name, "params": strategy_config or {}},
                     )
 
                     # Create async task for this strategy execution
@@ -388,15 +392,12 @@ class Orchestrator:
                                 results=res,
                             )
 
-                            self.event_bus.emit(
-                                "strategy.completed",
-                                {
-                                    "strategy_id": strat_id,
-                                    "result_count": len(res),
-                                    "branch_names": [
-                                        r.branch_name for r in res if r.branch_name
-                                    ],
-                                },
+                            self.event_bus.emit("strategy.completed", {"strategy_id": strat_id, "result_count": len(res), "branch_names": [r.branch_name for r in res if r.branch_name]})
+                            self.event_bus.emit_canonical(
+                                type="strategy.completed",
+                                run_id=run_id,
+                                strategy_execution_id=strat_id,
+                                payload={"status": "success"},
                             )
 
                             return res
@@ -454,13 +455,12 @@ class Orchestrator:
 
                 # Execute strategy
                 logger.info(f"Emitting strategy.started event for {strategy_id}")
-                self.event_bus.emit(
-                    "strategy.started",
-                    {
-                        "strategy_id": strategy_id,
-                        "strategy_name": strategy_name,
-                        "config": strategy_config,
-                    },
+                self.event_bus.emit("strategy.started", {"strategy_id": strategy_id, "strategy_name": strategy_name, "config": strategy_config})
+                self.event_bus.emit_canonical(
+                    type="strategy.started",
+                    run_id=run_id,
+                    strategy_execution_id=strategy_id,
+                    payload={"name": strategy_name, "params": strategy_config or {}},
                 )
 
                 logger.info(f"Calling strategy.execute for {strategy_name}")
@@ -489,15 +489,12 @@ class Orchestrator:
                     results=results,
                 )
 
-                self.event_bus.emit(
-                    "strategy.completed",
-                    {
-                        "strategy_id": strategy_id,
-                        "result_count": len(results),
-                        "branch_names": [
-                            r.branch_name for r in results if r.branch_name
-                        ],
-                    },
+                self.event_bus.emit("strategy.completed", {"strategy_id": strategy_id, "result_count": len(results), "branch_names": [r.branch_name for r in results if r.branch_name]})
+                self.event_bus.emit_canonical(
+                    type="strategy.completed",
+                    run_id=run_id,
+                    strategy_execution_id=strategy_id,
+                    payload={"status": "success"},
                 )
 
                 # Save results to disk
@@ -541,6 +538,7 @@ class Orchestrator:
 
     async def spawn_instance(
         self,
+        *,
         prompt: str,
         repo_path: Path,
         base_branch: str,
@@ -548,6 +546,7 @@ class Orchestrator:
         strategy_execution_id: str,
         instance_index: int,
         metadata: Optional[Dict[str, Any]] = None,
+        key: Optional[str] = None,
     ) -> str:
         """
         Spawn a new instance (called by strategies).
@@ -579,7 +578,11 @@ class Orchestrator:
             raise
 
         # Generate instance ID
-        instance_id = str(uuid.uuid4())[:8]  # Short ID for readability
+        if key:
+            import hashlib
+            instance_id = hashlib.sha256(f"{self.state_manager.current_state.run_id}|{strategy_execution_id}|{key}".encode("utf-8")).hexdigest()[:8]
+        else:
+            instance_id = str(uuid.uuid4())[:8]
 
         # Get strategy execution index from state
         strategy_exec = self.state_manager.current_state.strategies.get(
@@ -603,46 +606,44 @@ class Orchestrator:
         # Generate names according to spec
         # Extract timestamp from run_id (format: "run_YYYYMMDD_HHMMSS")
         run_timestamp = self.state_manager.current_state.run_id.replace("run_", "")
-        container_name = f"orchestrator_{run_timestamp}_s{sidx}_i{instance_index}"
-        branch_name = f"{strategy_name}_{run_timestamp}_{sidx}_{instance_index}"
+        if key:
+            import hashlib
+            khash = hashlib.sha256(key.encode("utf-8")).hexdigest()[:8]
+            container_name = f"orchestrator_{run_timestamp}_s{sidx}_k{khash}"
+            branch_name = f"{strategy_name}_{run_timestamp}_k{khash}"
+        else:
+            container_name = f"orchestrator_{run_timestamp}_s{sidx}_i{instance_index}"
+            branch_name = f"{strategy_name}_{run_timestamp}_{sidx}_{instance_index}"
 
-        # Register instance
-        self.state_manager.register_instance(
-            instance_id=instance_id,
-            strategy_name=strategy_name,
-            prompt=prompt,
-            base_branch=base_branch,
-            branch_name=branch_name,
-            container_name=container_name,
-            metadata=metadata,
-        )
+        # Register instance only if this durable key wasn't seen before
+        if instance_id not in self.state_manager.current_state.instances:
+            self.state_manager.register_instance(
+                instance_id=instance_id,
+                strategy_name=strategy_name,
+                prompt=prompt,
+                base_branch=base_branch,
+                branch_name=branch_name,
+                container_name=container_name,
+                metadata=metadata,
+            )
 
         # Add instance to strategy
         if (
             strategy_execution_id
             and strategy_execution_id in self.state_manager.current_state.strategies
         ):
-            self.state_manager.current_state.strategies[
-                strategy_execution_id
-            ].instance_ids.append(instance_id)
+            inst_list = self.state_manager.current_state.strategies[strategy_execution_id].instance_ids
+            if instance_id not in inst_list:
+                inst_list.append(instance_id)
 
-        # Create future for result
-        future = asyncio.Future()
-        self._instance_futures[instance_id] = future
-
-        # Queue for execution
-        logger.info(f"Queueing instance {instance_id} for execution")
-        await self._instance_queue.put(instance_id)
-
-        self.event_bus.emit(
-            "instance.queued",
-            {
-                "instance_id": instance_id,
-                "strategy": strategy_name,
-                "branch_name": branch_name,
-            },
-            instance_id=instance_id,
-        )
+        # Only enqueue if not already enqueued/known
+        if instance_id not in self._instance_futures:
+            future = asyncio.Future()
+            self._instance_futures[instance_id] = future
+            logger.info(f"Queueing instance {instance_id} for execution")
+            await self._instance_queue.put(instance_id)
+            self.event_bus.emit("instance.queued", {"instance_id": instance_id, "strategy": strategy_name, "branch_name": branch_name}, instance_id=instance_id)
+            # Canonical task.scheduled already emitted in StrategyContext.run; no-op for spawn_instance without key
 
         logger.info(f"Instance {instance_id} queued successfully")
         return instance_id
@@ -723,17 +724,17 @@ class Orchestrator:
             state=InstanceStatus.RUNNING,
         )
 
-        # Emit instance.started event for TUI
-        self.event_bus.emit(
-            "instance.started",
-            {
-                "strategy": info.strategy_name,
-                "prompt": info.prompt,
-                "model": info.metadata.get("model", "sonnet"),
-                "branch_name": info.branch_name,
-            },
-            instance_id=instance_id,
-        )
+        # Emit instance.started event for TUI and canonical mapping when key available
+        self.event_bus.emit("instance.started", {"strategy": info.strategy_name, "prompt": info.prompt, "model": info.metadata.get("model", "sonnet"), "branch_name": info.branch_name}, instance_id=instance_id)
+        task_key = (info.metadata or {}).get("key")
+        if task_key:
+            self.event_bus.emit_canonical(
+                type="task.started",
+                run_id=self.state_manager.current_state.run_id,
+                strategy_execution_id=next((sid for sid, strat in self.state_manager.current_state.strategies.items() if instance_id in strat.instance_ids), None),
+                key=task_key,
+                payload={"key": task_key, "instance_id": instance_id, "container_name": info.container_name, "model": info.metadata.get("model", "sonnet")},
+            )
 
         # Create event callback (forward and capture session_id for resume)
         def event_callback(event: Dict[str, Any]) -> None:
@@ -744,13 +745,37 @@ class Orchestrator:
                     self.state_manager.update_instance_session_id(instance_id, sid)
                 except Exception:
                     pass
+            # Track container id for last-active updates
+            try:
+                if event.get("type") == "instance.container_created":
+                    cid = data.get("container_id")
+                    if cid:
+                        self._inst_container_id[instance_id] = str(cid)
+            except Exception:
+                pass
+            # Update last-active file for cleanup logic
+            try:
+                cid = self._inst_container_id.get(instance_id)
+                if cid:
+                    from pathlib import Path as _P
+                    p = _P(f"/tmp/orchestrator_status/{cid}.active")
+                    p.parent.mkdir(parents=True, exist_ok=True)
+                    p.write_text(datetime.now(timezone.utc).isoformat())
+            except Exception:
+                pass
+            # Forward runner-level events; persist for real-time UI until canonical task.* stream is used
             self.event_bus.emit(
                 event_type=event.get("type", "instance.event"),
                 data=data,
                 instance_id=instance_id,
+                persist=True,
             )
 
+        # Start a lightweight heartbeat that reports recent activity for this instance
+        heartbeat_task: Optional[asyncio.Task] = None
         try:
+            if self.event_bus:
+                heartbeat_task = asyncio.create_task(self._heartbeat_monitor(instance_id))
             # Extract strategy execution ID from instance metadata
             strategy_execution_id = None
             for sid, strat in self.state_manager.current_state.strategies.items():
@@ -767,14 +792,20 @@ class Orchestrator:
                 run_id=self.state_manager.current_state.run_id,
                 strategy_execution_id=strategy_execution_id,
                 instance_id=instance_id,
+                task_key=task_key,
                 container_name=info.container_name,
                 model=info.metadata.get("model", "sonnet"),
+                session_id=(info.session_id or (info.metadata or {}).get("resume_session_id")),
                 event_callback=event_callback,
                 timeout_seconds=3600,  # Default 1 hour, could be made configurable
                 container_limits=self.container_limits,
                 auth_config=self.auth_config,
                 retry_config=self.retry_config,
-                force_import=self._force_import,
+                import_policy=(info.metadata or {}).get("import_policy", "auto"),
+                import_conflict_policy=(info.metadata or {}).get("import_conflict_policy", "fail"),
+                skip_empty_import=bool((info.metadata or {}).get("skip_empty_import", True)),
+                network_egress=(info.metadata or {}).get("network_egress"),
+                max_turns=(info.metadata or {}).get("max_turns"),
             )
 
             # Populate strategy-specific metadata on the result per spec
@@ -801,6 +832,40 @@ class Orchestrator:
                 state=new_state,
                 result=result,
             )
+
+            # Emit canonical terminal events when key is present
+            if task_key:
+                if result.success:
+                    artifact = {
+                        "type": "branch",
+                        "branch_planned": info.branch_name,
+                        "branch_final": result.branch_name,
+                        "base": info.base_branch,
+                        "has_changes": result.has_changes,
+                    }
+                    self.event_bus.emit_canonical(
+                        type="task.completed",
+                        run_id=self.state_manager.current_state.run_id,
+                        strategy_execution_id=strategy_execution_id,
+                        key=task_key,
+                        payload={"key": task_key, "instance_id": instance_id, "artifact": artifact, "metrics": result.metrics or {}, "final_message": result.final_message or ""},
+                    )
+                elif new_state == InstanceStatus.INTERRUPTED:
+                    self.event_bus.emit_canonical(
+                        type="task.interrupted",
+                        run_id=self.state_manager.current_state.run_id,
+                        strategy_execution_id=strategy_execution_id,
+                        key=task_key,
+                        payload={"key": task_key, "instance_id": instance_id},
+                    )
+                else:
+                    self.event_bus.emit_canonical(
+                        type="task.failed",
+                        run_id=self.state_manager.current_state.run_id,
+                        strategy_execution_id=strategy_execution_id,
+                        key=task_key,
+                        payload={"key": task_key, "instance_id": instance_id, "error_type": result.error_type or "unknown", "message": result.error or ""},
+                    )
 
             # Resolve future
             self._instance_futures[instance_id].set_result(result)
@@ -839,6 +904,60 @@ class Orchestrator:
 
             # Resolve future with error
             self._instance_futures[instance_id].set_result(error_result)
+        except Exception as e:
+            # Catch-all to ensure the system does not hang on unexpected errors
+            logger.exception(f"Instance {instance_id} crashed with unexpected error: {e}")
+
+            error_result = InstanceResult(
+                success=False,
+                error=str(e),
+                error_type="unexpected",
+            )
+
+            # Update state
+            self.state_manager.update_instance_state(
+                instance_id=instance_id,
+                state=InstanceStatus.FAILED,
+                result=error_result,
+            )
+
+            # Resolve future with error
+            self._instance_futures[instance_id].set_result(error_result)
+        finally:
+            # Stop heartbeat
+            if heartbeat_task:
+                heartbeat_task.cancel()
+
+    async def _heartbeat_monitor(self, instance_id: str, interval: float = 2.0) -> None:
+        """Emit periodic debug heartbeats with the last event type/time for the instance.
+
+        Helps identify stalls by showing how long since the last event was observed.
+        """
+        try:
+            while True:
+                last_type = None
+                last_ts = None
+                if self.event_bus:
+                    try:
+                        # Scan recent events in reverse for this instance
+                        for ev in reversed(self.event_bus.events):
+                            if ev.get("instance_id") == instance_id:
+                                last_type = ev.get("type")
+                                last_ts = ev.get("timestamp")
+                                break
+                    except Exception:
+                        pass
+
+                if last_type and last_ts:
+                    logger.debug(
+                        f"Heartbeat: instance {instance_id} last_event={last_type} at {last_ts}"
+                    )
+                else:
+                    logger.debug(f"Heartbeat: instance {instance_id} awaiting first event")
+
+                await asyncio.sleep(interval)
+        except asyncio.CancelledError:
+            return
 
     def subscribe(
         self,
@@ -1015,7 +1134,9 @@ class Orchestrator:
                                 auth_config=self.auth_config,
                                 reuse_container=True,
                                 finalize=True,
-                                force_import=self._force_import,
+                                import_policy=(inst.metadata or {}).get("import_policy", "auto"),
+                                import_conflict_policy=(inst.metadata or {}).get("import_conflict_policy", "fail"),
+                                skip_empty_import=bool((inst.metadata or {}).get("skip_empty_import", True)),
                             )
                         resume_tasks.append(asyncio.create_task(do_resume(info)))
                     else:
@@ -1080,7 +1201,9 @@ class Orchestrator:
                 container_limits=self.container_limits,
                 retry_config=self.retry_config,
                 auth_config=self.auth_config,
-                force_import=self._force_import,
+                import_policy=(instance_info.metadata or {}).get("import_policy", "auto"),
+                import_conflict_policy=(instance_info.metadata or {}).get("import_conflict_policy", "fail"),
+                skip_empty_import=bool((instance_info.metadata or {}).get("skip_empty_import", True)),
             )
 
             # Update state
@@ -1238,6 +1361,16 @@ class Orchestrator:
                         result.metrics.get("input_tokens", 0) if result.metrics else 0
                     ),
                     "output_tokens": (
+                        result.metrics.get("output_tokens", 0) if result.metrics else 0
+                    ),
+                    # Compatibility keys per spec naming
+                    "cost_usd": (
+                        result.metrics.get("total_cost", 0.0) if result.metrics else 0.0
+                    ),
+                    "tokens_in": (
+                        result.metrics.get("input_tokens", 0) if result.metrics else 0
+                    ),
+                    "tokens_out": (
                         result.metrics.get("output_tokens", 0) if result.metrics else 0
                     ),
                     "commit_count": commit_stats.get("commit_count", 0),

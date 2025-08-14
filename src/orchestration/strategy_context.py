@@ -5,7 +5,10 @@ This module provides the StrategyContext that strategies use to spawn instances
 and coordinate execution, isolating them from orchestrator implementation details.
 """
 
-from typing import Any, Dict, List, Optional, TYPE_CHECKING
+from typing import Any, Dict, List, Optional, TYPE_CHECKING, Tuple
+import hashlib
+import json
+import time
 
 from ..shared import InstanceResult
 
@@ -31,6 +34,17 @@ class InstanceHandle:
         return results[self.instance_id]
 
 
+class Handle:
+    """Durable task handle."""
+
+    def __init__(self, key: str, instance_id: str, scheduled_at: float):
+        self.key = key
+        self.instance_id = instance_id
+        self.scheduled_at = scheduled_at
+
+    # Not awaitable directly; use context.wait(handle)
+
+
 class StrategyContext:
     """
     Context object providing strategy execution capabilities.
@@ -49,6 +63,20 @@ class StrategyContext:
         self._strategy_name = strategy_name
         self._strategy_execution_id = strategy_execution_id
         self._instance_counter = 0
+        self._rng_seq: List[int] = []
+
+    # Deterministic utilities per spec
+    def key(self, *parts: Any) -> str:
+        return "/".join(str(p) for p in parts)
+
+    def now(self) -> float:
+        return time.time()
+
+    def rand(self) -> int:
+        # Record a simple deterministic sequence value (placeholder)
+        v = int(time.time_ns() & 0xFFFFFFFF)
+        self._rng_seq.append(v)
+        return v
 
     async def spawn_instance(
         self,
@@ -87,6 +115,119 @@ class StrategyContext:
         )
 
         return InstanceHandle(instance_id, self._orchestrator)
+
+    # Durable task API
+    async def run(
+        self,
+        task: Dict[str, Any],
+        *,
+        key: str,
+        policy: Optional[Dict[str, Any]] = None,
+    ) -> Handle:
+        """Schedule a durable task and return a handle."""
+        # Compute canonical fingerprint (JCS-like sorted JSON)
+        canonical = {
+            "schema_version": "1",
+            "prompt": task.get("prompt", ""),
+            "base_branch": task.get("base_branch", "main"),
+            "model": task.get("model", "sonnet"),
+            "import_policy": task.get("import_policy", "auto"),
+            "import_conflict_policy": task.get("import_conflict_policy", "fail"),
+            "skip_empty_import": bool(task.get("skip_empty_import", True)),
+            "session_group_key": task.get("session_group_key"),
+            "resume_session_id": task.get("resume_session_id"),
+            "plugin_name": task.get("plugin_name", "claude-code"),
+            "system_prompt": task.get("system_prompt"),
+            "append_system_prompt": task.get("append_system_prompt"),
+            "runner": {
+                "container_limits": {
+                    "cpus": task.get("container_limits", {}).get("cpu_count", 2),
+                    "memory": f"{task.get('container_limits', {}).get('memory_gb', 4)}g",
+                },
+                "network_egress": task.get("network_egress", "online"),
+                "max_turns": task.get("max_turns"),
+            },
+        }
+        encoded = json.dumps(canonical, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+        fingerprint = hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+        # Register task fingerprint
+        try:
+            self._orchestrator.state_manager.register_task(key, fingerprint, encoded)
+        except ValueError as e:
+            # KeyConflictDifferentFingerprint
+            raise
+
+        # Derive model and prompt
+        prompt = task.get("prompt", "")
+        base_branch = task.get("base_branch", "main")
+        model = task.get("model", "sonnet")
+        session_group_key = task.get("session_group_key") or key
+
+        # Global force_import compatibility: treat as overwrite conflict policy
+        try:
+            if getattr(self._orchestrator, "_force_import", False):
+                task.setdefault("import_conflict_policy", "overwrite")
+        except Exception:
+            pass
+
+        # Spawn instance with durable key metadata
+        self._instance_counter += 1
+        instance_id = await self._orchestrator.spawn_instance(
+            prompt=prompt,
+            repo_path=self._orchestrator.repo_path,
+            base_branch=base_branch,
+            strategy_name=self._strategy_name,
+            strategy_execution_id=self._strategy_execution_id,
+            instance_index=self._instance_counter,
+            metadata={
+                "model": model,
+                "key": key,
+                "fingerprint": fingerprint,
+                "session_group_key": session_group_key,
+                "import_policy": task.get("import_policy", "auto"),
+                "import_conflict_policy": task.get("import_conflict_policy", "fail"),
+                "skip_empty_import": bool(task.get("skip_empty_import", True)),
+                "resume_session_id": task.get("resume_session_id"),
+                "network_egress": task.get("network_egress", "online"),
+                "max_turns": task.get("max_turns"),
+            },
+            key=key,
+        )
+
+        # Emit canonical scheduled event
+        if getattr(self._orchestrator, "event_bus", None):
+            self._orchestrator.event_bus.emit_canonical(
+                type="task.scheduled",
+                run_id=self._orchestrator.state_manager.current_state.run_id,
+                strategy_execution_id=self._strategy_execution_id,
+                key=key,
+                payload={
+                    "key": key,
+                    "instance_id": instance_id,
+                    "container_name": self._orchestrator.state_manager.current_state.instances[instance_id].container_name,
+                    "model": model,
+                    "task_fingerprint_hash": fingerprint,
+                },
+            )
+
+        return Handle(key=key, instance_id=instance_id, scheduled_at=time.monotonic())
+
+    async def wait(self, handle: Handle) -> InstanceResult:
+        results = await self._orchestrator.wait_for_instances([handle.instance_id])
+        return results[handle.instance_id]
+
+    async def wait_all(self, handles: List[Handle], tolerate_failures: bool = False) -> Any:
+        ids = [h.instance_id for h in handles]
+        gathered = await self._orchestrator.wait_for_instances(ids)
+        out = [gathered[i] for i in ids]
+        if tolerate_failures:
+            successes = [r for r in out if getattr(r, "success", False)]
+            failures = [r for r in out if not getattr(r, "success", False)]
+            return successes, failures
+        if any(not getattr(r, "success", False) for r in out):
+            raise RuntimeError("AggregateTaskFailed")
+        return out
 
     async def parallel(self, handles: List[InstanceHandle]) -> List[InstanceResult]:
         """

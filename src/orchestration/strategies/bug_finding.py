@@ -114,17 +114,9 @@ class BugFindingStrategy(Strategy):
         # ctx.emit_event not available in current context
         logger.info(f"Bug finding phase: discovery for {config.target_area}")
         
-        discovery_handle = await ctx.spawn_instance(
-            prompt=discovery_prompt,
-            base_branch=base_branch,
-            model=config.model,
-            metadata={
-                "phase": "discovery",
-                "target_area": config.target_area
-            }
-        )
-        
-        discovery_result = await discovery_handle.result()
+        discovery_task = {"prompt": discovery_prompt, "base_branch": base_branch, "model": config.model}
+        discovery_handle = await ctx.run(discovery_task, key=ctx.key("discovery", config.target_area))
+        discovery_result = await ctx.wait(discovery_handle)
         
         # Check if discovery was successful
         if not discovery_result.success:
@@ -145,17 +137,9 @@ class BugFindingStrategy(Strategy):
         
         # Validation starts from the base branch, not discovery branch
         # This ensures independent reproduction
-        validation_handle = await ctx.spawn_instance(
-            prompt=validation_prompt,
-            base_branch=base_branch,
-            model=config.model,
-            metadata={
-                "phase": "validation",
-                "discovery_branch": discovery_result.branch_name
-            }
-        )
-        
-        validation_result = await validation_handle.result()
+        validation_task = {"prompt": validation_prompt, "base_branch": base_branch, "model": config.model}
+        validation_handle = await ctx.run(validation_task, key=ctx.key("validation", config.target_area))
+        validation_result = await ctx.wait(validation_handle)
         
         # Determine final status based on validation
         if validation_result.success:

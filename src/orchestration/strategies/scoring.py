@@ -24,6 +24,8 @@ class ScoringConfig(StrategyConfig):
     scorer_prompt: str = (
         "Review this code implementation and provide a score from 1-10 based on quality, completeness, and correctness. Return the score as a JSON object with 'score' and 'feedback' fields."
     )
+    # Optional key prefix for durable task keys when composed by other strategies
+    key_prefix: str = ""
 
     def validate(self) -> None:
         """Validate scoring configuration."""
@@ -68,16 +70,12 @@ class ScoringStrategy(Strategy):
         config = self.create_config()
 
         # Phase 1: Generate solution
-        generation_handle = await ctx.spawn_instance(
-            prompt=prompt,
-            base_branch=base_branch,
-            metadata={
-                "strategy": self.name,
-                "phase": "generation",
-            },
-        )
+        cfg = self.create_config()
+        prefix = [cfg.key_prefix] if cfg.key_prefix else []
 
-        generation_result = await generation_handle.result()
+        gen_task = {"prompt": prompt, "base_branch": base_branch, "model": cfg.model}
+        generation_handle = await ctx.run(gen_task, key=ctx.key(*prefix, "gen"))
+        generation_result = await ctx.wait(generation_handle)
 
         # If generation failed, the strategy fails
         if not generation_result.success:
@@ -90,17 +88,9 @@ class ScoringStrategy(Strategy):
 
 ORIGINAL TASK: {prompt}"""
 
-        scoring_handle = await ctx.spawn_instance(
-            prompt=review_prompt,
-            base_branch=generation_result.branch_name,  # Review the generated code
-            metadata={
-                "strategy": self.name,
-                "phase": "scoring",
-                "reviewing_instance": generation_handle.instance_id,
-            },
-        )
-
-        scoring_result = await scoring_handle.result()
+        scoring_task = {"prompt": review_prompt, "base_branch": generation_result.branch_name}
+        scoring_handle = await ctx.run(scoring_task, key=ctx.key(*prefix, "score", generation_handle.instance_id, "attempt-1"))
+        scoring_result = await ctx.wait(scoring_handle)
 
         # Extract score from the reviewer's output
         score = None

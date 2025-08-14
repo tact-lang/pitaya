@@ -52,18 +52,14 @@ class SimpleStrategy(Strategy):
         """
         logger.info(f"SimpleStrategy.execute called with prompt: {prompt[:50]}...")
 
-        # Spawn exactly one instance
-        logger.info("Spawning instance...")
-        handle = await ctx.spawn_instance(
-            prompt=prompt,
-            base_branch=base_branch,
-            metadata={
-                "strategy": self.name,
-            },
-        )
-
-        # Wait for it to complete
-        result = await handle.result()
+        # Durable run with key
+        t = {
+            "prompt": prompt,
+            "base_branch": base_branch,
+            "model": self.create_config().model,
+        }
+        handle = await ctx.run(t, key=ctx.key("gen"))
+        result = await ctx.wait(handle)
 
         # Return as list (even though it's just one)
         return [result]

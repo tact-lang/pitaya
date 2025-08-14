@@ -334,10 +334,18 @@ def get_default_config() -> Dict[str, Any]:
         "state_dir": Path("./orchestrator_state"),
         "logs_dir": Path("./logs"),
         "debug": False,
+        # Normative defaults per spec §6.1.1 (subset applied where supported)
+        "import_policy": "auto",  # auto|never|always
+        "import_conflict_policy": "fail",  # fail|overwrite|suffix
+        "skip_empty_import": True,
         "runner": {
             "timeout": 3600,  # 1 hour
             "cpu_limit": 2.0,
             "memory_limit": "4g",
+            # Session volume scope: run|global
+            "session_volume_scope": "run",
+            # review workspace mode: rw|ro (ro enforces RO when import_policy=never)
+            "review_workspace_mode": "rw",
         },
         "orchestration": {
             "max_parallel_instances": 20,

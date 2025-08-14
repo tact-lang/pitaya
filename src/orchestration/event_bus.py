@@ -9,6 +9,8 @@ buffer to prevent memory issues with long-running orchestrations.
 import asyncio
 import json
 import logging
+import os
+import uuid
 from collections import defaultdict, deque
 from datetime import datetime, timezone
 from pathlib import Path
@@ -32,6 +34,7 @@ class EventBus:
         self,
         max_events: int = 10000,
         persist_path: Optional[Path] = None,
+        run_id: Optional[str] = None,
     ):
         """
         Initialize event bus.
@@ -58,6 +61,8 @@ class EventBus:
         # Persistence file handle and offset tracking
         self._persist_file: Optional[TextIO] = None
         self._current_offset = 0
+        self._lock_file: Optional[TextIO] = None
+        self._run_id = run_id
         if persist_path:
             self._open_persist_file()
 
@@ -71,15 +76,34 @@ class EventBus:
             # Check if file exists to get current offset
             if self.persist_path.exists():
                 self._current_offset = self.persist_path.stat().st_size
-            self._persist_file = open(
-                self.persist_path, "a", buffering=1
-            )  # Line buffered
+            # Acquire single-writer lock for duration of run
+            try:
+                lock_path = self.persist_path.with_suffix(self.persist_path.suffix + ".lock")
+                self._lock_file = open(lock_path, "a+")
+                # Cross-platform best-effort lock
+                try:
+                    if os.name == "nt":
+                        import msvcrt
+                        msvcrt.locking(self._lock_file.fileno(), msvcrt.LK_NBLCK, 1)
+                    else:
+                        import fcntl
+                        fcntl.flock(self._lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except Exception:
+                    # If lock cannot be acquired, proceed but log
+                    logger.warning("Could not acquire events.jsonl lock; proceeding best-effort")
+            except Exception as e:
+                logger.warning(f"Failed to open lock file: {e}")
+
+            # Open file in binary append mode to track byte offsets precisely
+            self._persist_file = open(self.persist_path, "ab", buffering=0)
 
     def emit(
         self,
         event_type: str,
         data: Dict[str, Any],
         instance_id: Optional[str] = None,
+        *,
+        persist: bool = True,
     ) -> None:
         """
         Emit an event to all subscribers.
@@ -105,25 +129,73 @@ class EventBus:
         # Update statistics
         self.event_counts[event_type] += 1
 
-        # Persist if configured (synchronous to ensure data integrity)
-        if self._persist_file:
-            event_json = json.dumps(event) + "\n"
+        # Persist legacy event if configured (for backward-compatible consumers)
+        if persist and self._persist_file:
+            line = (json.dumps(event, separators=(",", ":")) + "\n").encode("utf-8")
             try:
-                # Synchronous write to prevent data loss
-                self._persist_file.write(event_json)
+                start_offset = self._current_offset
+                self._persist_file.write(line)
                 self._persist_file.flush()
-                # Add offset AFTER successful write
-                event["offset"] = self._current_offset
-                # Update offset for next event
-                self._current_offset += len(event_json.encode("utf-8"))
+                os.fsync(self._persist_file.fileno())
+                self._current_offset += len(line)
+                event["offset"] = start_offset
             except (OSError, IOError) as e:
                 logger.error(f"Failed to persist event: {e}")
-                # Don't add offset if write failed
 
         # Notify subscribers
         self._notify_subscribers(event)
 
-        logger.debug(f"Emitted event: {event_type}")
+        # Enrich debug logging with brief context to aid troubleshooting
+        try:
+            keys = ",".join(sorted(list(data.keys()))) if isinstance(data, dict) else "-"
+            iid = instance_id or event.get("instance_id") or "-"
+            logger.debug(f"Emitted event: {event_type} (iid={iid}, keys={keys})")
+        except Exception:
+            # Fallback to original single-line message if anything goes wrong
+            logger.debug(f"Emitted event: {event_type}")
+
+    def emit_canonical(
+        self,
+        *,
+        type: str,
+        run_id: str,
+        strategy_execution_id: Optional[str] = None,
+        key: Optional[str] = None,
+        payload: Dict[str, Any],
+    ) -> None:
+        """Emit a canonical event line into events.jsonl with strict envelope.
+
+        Fields: {id, type, ts, run_id, strategy_execution_id, key?, start_offset, payload}
+        """
+        ts = datetime.now(timezone.utc).isoformat()
+        record = {
+            "id": str(uuid.uuid4()),
+            "type": type,
+            "ts": ts,
+            "run_id": run_id,
+            "strategy_execution_id": strategy_execution_id,
+            **({"key": key} if key else {}),
+            # start_offset added after write
+        }
+        if self._persist_file:
+            try:
+                start_offset = self._current_offset
+                record_with_payload = {**record, "start_offset": start_offset, "payload": payload}
+                line = (json.dumps(record_with_payload, separators=(",", ":")) + "\n").encode("utf-8")
+                self._persist_file.write(line)
+                self._persist_file.flush()
+                os.fsync(self._persist_file.fileno())
+                self._current_offset += len(line)
+            except Exception as e:
+                logger.error(f"Failed to persist canonical event: {e}")
+        # Also push an in-memory mirror for UI (map to legacy fields)
+        mirror = {
+            "type": type,
+            "timestamp": ts,
+            "data": payload,
+        }
+        self.events.append(mirror)
+        self._notify_subscribers(mirror)
 
     def _notify_subscribers(self, event: Dict[str, Any]) -> None:
         """Notify all relevant subscribers of an event."""

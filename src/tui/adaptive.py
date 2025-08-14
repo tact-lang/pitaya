@@ -57,11 +57,14 @@ class AdaptiveDisplay:
 
         # Group instances by strategy
         for strategy in run.strategies.values():
-            strategy_instances = [
-                run.instances[iid]
-                for iid in strategy.instance_ids
-                if iid in run.instances
-            ]
+            # Deduplicate instance IDs to avoid duplicate cards
+            seen: set[str] = set()
+            ordered_ids = []
+            for iid in strategy.instance_ids:
+                if iid in run.instances and iid not in seen:
+                    seen.add(iid)
+                    ordered_ids.append(iid)
+            strategy_instances = [run.instances[iid] for iid in ordered_ids]
 
             if not strategy_instances:
                 continue

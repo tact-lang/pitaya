@@ -55,6 +55,12 @@ class EventProcessor:
             "strategy.started": self._handle_strategy_started,
             "strategy.completed": self._handle_strategy_completed,
             "strategy.failed": self._handle_strategy_failed,
+            # Canonical task events (map to minimal UI updates)
+            "task.scheduled": self._handle_task_scheduled,
+            "task.started": self._handle_task_started,
+            "task.completed": self._handle_task_completed,
+            "task.failed": self._handle_task_failed,
+            "task.interrupted": self._handle_task_interrupted,
             # Instance-level events
             "instance.queued": self._handle_instance_queued,
             "instance.started": self._handle_instance_started,
@@ -81,7 +87,19 @@ class EventProcessor:
         Args:
             event: Event dictionary with type, timestamp, data
         """
+        # Support canonical events with 'payload' envelope by mapping to legacy shape
         event_type = event.get("type")
+        if "payload" in event and isinstance(event["payload"], dict):
+            payload = event["payload"]
+            # Normalize to legacy fields expected by handlers
+            event = {
+                "type": event_type,
+                "timestamp": event.get("ts") or event.get("timestamp"),
+                "data": payload,
+                # instance_id may be in payload
+                **({"instance_id": payload.get("instance_id")} if payload.get("instance_id") else {}),
+            }
+            event_type = event.get("type")
         if not event_type:
             return
 
@@ -104,7 +122,68 @@ class EventProcessor:
                 logger.error(f"Error processing event {event_type}: {e}")
                 self.state.add_error(f"Event processing error: {e}")
         else:
+            # Accept canonical strategy/task events as pass-through for now
             logger.debug(f"No handler for event type: {event_type}")
+
+    # Canonical task.* helpers for offline mode (maps minimal state)
+    def _ensure_current_run(self) -> None:
+        if not self.state.current_run:
+            self.state.current_run = RunDisplay(run_id="unknown")
+
+    def _handle_task_scheduled(self, event: Dict[str, Any]) -> None:
+        self._ensure_current_run()
+        data = event.get("data", {})
+        iid = data.get("instance_id")
+        if not iid:
+            return
+        inst = InstanceDisplay(instance_id=iid, strategy_name="unknown", status=InstanceStatus.QUEUED, branch_name="")
+        self.state.current_run.instances[iid] = inst
+        self.state.current_run.total_instances += 1
+
+    def _handle_task_started(self, event: Dict[str, Any]) -> None:
+        self._ensure_current_run()
+        data = event.get("data", {})
+        iid = data.get("instance_id")
+        if not iid:
+            return
+        inst = self.state.current_run.instances.get(iid)
+        if inst:
+            inst.status = InstanceStatus.RUNNING
+
+    def _handle_task_completed(self, event: Dict[str, Any]) -> None:
+        self._ensure_current_run()
+        data = event.get("data", {})
+        iid = data.get("instance_id")
+        if not iid:
+            return
+        inst = self.state.current_run.instances.get(iid)
+        if inst:
+            inst.status = InstanceStatus.COMPLETED
+            art = data.get("artifact", {})
+            if art.get("branch_final"):
+                inst.branch_name = art.get("branch_final")
+
+    def _handle_task_failed(self, event: Dict[str, Any]) -> None:
+        self._ensure_current_run()
+        data = event.get("data", {})
+        iid = data.get("instance_id")
+        if not iid:
+            return
+        inst = self.state.current_run.instances.get(iid)
+        if inst:
+            inst.status = InstanceStatus.FAILED
+            inst.error = data.get("message")
+
+    def _handle_task_interrupted(self, event: Dict[str, Any]) -> None:
+        self._ensure_current_run()
+        data = event.get("data", {})
+        iid = data.get("instance_id")
+        if not iid:
+            return
+        inst = self.state.current_run.instances.get(iid)
+        if inst:
+            # Represent as queued/paused
+            inst.status = InstanceStatus.QUEUED
 
     # Run-level event handlers
 
@@ -279,6 +358,8 @@ class EventProcessor:
             instance.started_at = self._parse_timestamp(event.get("timestamp"))
             instance.prompt = data.get("prompt")
             instance.model = data.get("model", "sonnet")
+            # Ensure we show a meaningful activity line
+            instance.current_activity = instance.current_activity or "Starting..."
             instance.last_updated = datetime.now()
 
             if was_queued:
