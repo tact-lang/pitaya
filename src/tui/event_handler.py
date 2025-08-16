@@ -10,15 +10,27 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, Any, Optional, Callable, TYPE_CHECKING
 import asyncio
-from watchdog.events import FileSystemEventHandler, FileModifiedEvent
+
+# Watchdog is optional; fall back to pure polling when unavailable
+WATCHDOG_AVAILABLE = True
+try:  # pragma: no cover - import-time environment dependent
+    from watchdog.events import FileSystemEventHandler, FileModifiedEvent
+except Exception:  # ImportError or other
+    WATCHDOG_AVAILABLE = False
+
+    class FileSystemEventHandler:  # type: ignore
+        pass
+
+    class FileModifiedEvent:  # type: ignore
+        pass
 
 if TYPE_CHECKING:
-    from watchdog.observers import Observer
+    from watchdog.observers import Observer  # type: ignore
 else:
     try:
-        from watchdog.observers import Observer
-    except ImportError:
-        Observer = Any
+        from watchdog.observers import Observer  # type: ignore
+    except Exception:
+        Observer = None  # type: ignore
 
 from .models import (
     TUIState,
@@ -55,9 +67,12 @@ class EventProcessor:
             "strategy.started": self._handle_strategy_started,
             "strategy.completed": self._handle_strategy_completed,
             "strategy.failed": self._handle_strategy_failed,
+            # State snapshots
+            "state.instance_registered": self._handle_state_instance_registered,
             # Canonical task events (map to minimal UI updates)
             "task.scheduled": self._handle_task_scheduled,
             "task.started": self._handle_task_started,
+            "task.progress": self._handle_task_progress,
             "task.completed": self._handle_task_completed,
             "task.failed": self._handle_task_failed,
             "task.interrupted": self._handle_task_interrupted,
@@ -70,6 +85,14 @@ class EventProcessor:
             # Instance phase events
             "instance.workspace_preparing": self._handle_instance_workspace_preparing,
             "instance.container_creating": self._handle_instance_container_creating,
+            "instance.container_env_preparing": self._handle_instance_container_env_preparing,
+            "instance.container_env_prepared": self._handle_instance_container_env_prepared,
+            "instance.container_create_call": self._handle_instance_container_creating,
+            "instance.container_create_entry": self._handle_instance_container_creating,
+            "instance.container_image_check": self._handle_instance_container_creating,
+            "instance.container_config_ready": self._handle_instance_container_creating,
+            "instance.container_create_attempt": self._handle_instance_container_creating,
+            "instance.container_created": self._handle_instance_container_created,
             "instance.claude_starting": self._handle_instance_claude_starting,
             "instance.result_collection_started": self._handle_instance_result_collection,
             # Claude-specific events
@@ -78,6 +101,9 @@ class EventProcessor:
             "instance.claude_tool_use": self._handle_claude_tool_use,
             "instance.claude_tool_result": self._handle_claude_tool_result,
             "instance.claude_result": self._handle_claude_result,
+            # Cancellation / lifecycle
+            "instance.canceled": self._handle_instance_canceled,
+            "state.instance_updated": self._handle_state_instance_updated,
         }
 
     def process_event(self, event: Dict[str, Any]) -> None:
@@ -89,22 +115,34 @@ class EventProcessor:
         """
         # Support canonical events with 'payload' envelope by mapping to legacy shape
         event_type = event.get("type")
+        # Canonical normalization: copy envelope fields + payload to a stable shape
         if "payload" in event and isinstance(event["payload"], dict):
             payload = event["payload"]
-            # Normalize to legacy fields expected by handlers
-            event = {
+            norm: Dict[str, Any] = {
                 "type": event_type,
                 "timestamp": event.get("ts") or event.get("timestamp"),
                 "data": payload,
-                # instance_id may be in payload
-                **({"instance_id": payload.get("instance_id")} if payload.get("instance_id") else {}),
             }
-            event_type = event.get("type")
+            # carry important envelope fields
+            for k in ("run_id", "strategy_execution_id", "key"):
+                if event.get(k) is not None:
+                    norm[k] = event[k]
+            if payload.get("instance_id"):
+                norm["instance_id"] = payload.get("instance_id")
+            event = norm
+            event_type = norm.get("type")
         if not event_type:
             return
 
         # Update event tracking
         self.state.events_processed += 1
+
+        # Initialize current run if missing using envelope run_id when available
+        try:
+            if not self.state.current_run and event.get("run_id"):
+                self.state.current_run = RunDisplay(run_id=str(event.get("run_id")))
+        except Exception:
+            pass
 
         # Debug logging - more detailed for instance events
         if event_type.startswith("instance."):
@@ -116,8 +154,14 @@ class EventProcessor:
         handler = self._event_handlers.get(event_type)
         if handler:
             try:
+                import time
+                t0 = time.perf_counter()
                 handler(event)
-                logger.debug(f"Successfully processed event: {event_type}")
+                t1 = time.perf_counter()
+                iid = event.get("instance_id") or event.get("data", {}).get("instance_id")
+                logger.debug(
+                    f"event_processed type={event_type} iid={iid or '-'} dur_ms={(t1 - t0)*1000:.2f}"
+                )
             except (AttributeError, TypeError, ValueError, KeyError) as e:
                 logger.error(f"Error processing event {event_type}: {e}")
                 self.state.add_error(f"Event processing error: {e}")
@@ -128,7 +172,13 @@ class EventProcessor:
     # Canonical task.* helpers for offline mode (maps minimal state)
     def _ensure_current_run(self) -> None:
         if not self.state.current_run:
-            self.state.current_run = RunDisplay(run_id="unknown")
+            # Create a placeholder RunDisplay so task/strategy events can attach
+            self.state.current_run = RunDisplay(
+                run_id="unknown",
+                prompt="",
+                repo_path="",
+                base_branch="main",
+            )
 
     def _handle_task_scheduled(self, event: Dict[str, Any]) -> None:
         self._ensure_current_run()
@@ -136,9 +186,32 @@ class EventProcessor:
         iid = data.get("instance_id")
         if not iid:
             return
-        inst = InstanceDisplay(instance_id=iid, strategy_name="unknown", status=InstanceStatus.QUEUED, branch_name="")
+        # Derive strategy from envelope when available
+        sid = event.get("strategy_execution_id")
+        strategy_name = "unknown"
+        if sid and self.state.current_run and sid in self.state.current_run.strategies:
+            strategy_name = self.state.current_run.strategies[sid].strategy_name
+        inst = InstanceDisplay(
+            instance_id=iid,
+            strategy_name=strategy_name,
+            status=InstanceStatus.QUEUED,
+            branch_name=data.get("branch_name", ""),
+        )
         self.state.current_run.instances[iid] = inst
         self.state.current_run.total_instances += 1
+        # Best-effort grouping by strategy name when available
+        if sid and self.state.current_run and sid in self.state.current_run.strategies:
+            strat = self.state.current_run.strategies[sid]
+            if iid not in strat.instance_ids:
+                strat.instance_ids.append(iid)
+                strat.total_instances += 1
+        # Fallback: prime run started_at on first canonical event if not set
+        try:
+            if self.state.current_run and not self.state.current_run.started_at:
+                ts = event.get("timestamp")
+                self.state.current_run.started_at = self._parse_timestamp(ts)
+        except Exception:
+            pass
 
     def _handle_task_started(self, event: Dict[str, Any]) -> None:
         self._ensure_current_run()
@@ -149,6 +222,28 @@ class EventProcessor:
         inst = self.state.current_run.instances.get(iid)
         if inst:
             inst.status = InstanceStatus.RUNNING
+            # Set start time from canonical envelope timestamp
+            try:
+                ts = event.get("timestamp") or event.get("ts")
+                inst.started_at = self._parse_timestamp(ts)
+            except Exception:
+                pass
+            # Ensure global run started_at is set ASAP
+            try:
+                if self.state.current_run and not self.state.current_run.started_at:
+                    self.state.current_run.started_at = inst.started_at or self._parse_timestamp(event.get("timestamp"))
+            except Exception:
+                pass
+            # Backfill strategy name when available
+            sid = event.get("strategy_execution_id")
+            if sid and self.state.current_run and sid in self.state.current_run.strategies:
+                sname = self.state.current_run.strategies[sid].strategy_name
+                if sname and (not inst.strategy_name or inst.strategy_name == "unknown"):
+                    inst.strategy_name = sname
+                strat = self.state.current_run.strategies[sid]
+                if iid not in strat.instance_ids:
+                    strat.instance_ids.append(iid)
+                    strat.total_instances += 1
 
     def _handle_task_completed(self, event: Dict[str, Any]) -> None:
         self._ensure_current_run()
@@ -162,6 +257,45 @@ class EventProcessor:
             art = data.get("artifact", {})
             if art.get("branch_final"):
                 inst.branch_name = art.get("branch_final")
+
+    def _handle_task_progress(self, event: Dict[str, Any]) -> None:
+        self._ensure_current_run()
+        data = event.get("data", {})
+        iid = data.get("instance_id")
+        if not iid:
+            return
+        inst = self.state.current_run.instances.get(iid)
+        if not inst:
+            # Create a placeholder if we somehow missed scheduled/started
+            inst = InstanceDisplay(instance_id=iid, strategy_name="")
+            self.state.current_run.instances[iid] = inst
+        # Update current activity based on canonical payload
+        phase = data.get("phase")
+        activity = data.get("activity")
+        tool = data.get("tool")
+        if tool:
+            inst.last_tool_use = tool
+        if activity:
+            inst.current_activity = activity
+        elif phase:
+            friendly = {
+                "workspace_preparing": "Preparing workspace...",
+                "container_creating": "Creating container...",
+                "container_env_preparing": "Preparing container env...",
+                "container_env_prepared": "Container env ready",
+                "container_created": "Container created",
+                "claude_starting": "Starting Claude...",
+                "result_collection": "Collecting results...",
+                "branch_imported": "Branch imported",
+                "no_changes": "No changes",
+                "cleanup": "Cleaning up...",
+                "assistant": "Claude is thinking...",
+                "system": "Claude connected",
+                "tool_use": f"Using {tool}" if tool else "Tool use",
+            }.get(phase)
+            if friendly:
+                inst.current_activity = friendly
+        inst.last_updated = datetime.now()
 
     def _handle_task_failed(self, event: Dict[str, Any]) -> None:
         self._ensure_current_run()
@@ -182,8 +316,13 @@ class EventProcessor:
             return
         inst = self.state.current_run.instances.get(iid)
         if inst:
-            # Represent as queued/paused
-            inst.status = InstanceStatus.QUEUED
+            # Terminal interrupted state
+            inst.status = InstanceStatus.INTERRUPTED
+            inst.last_updated = datetime.now()
+            # Adjust aggregates
+            self.state.current_run.active_instances = max(
+                0, self.state.current_run.active_instances - 1
+            )
 
     # Run-level event handlers
 
@@ -229,18 +368,25 @@ class EventProcessor:
             return
 
         data = event.get("data", {})
-        strategy_id = data.get("strategy_id")
+        # Canonical envelope carries the strategy execution id
+        strategy_id = event.get("strategy_execution_id") or data.get("strategy_id")
         if not strategy_id:
             return
 
         strategy = StrategyDisplay(
             strategy_id=strategy_id,
-            strategy_name=data.get("strategy_name", "unknown"),
-            config=data.get("config", {}),
+            strategy_name=data.get("name", data.get("strategy_name", "unknown")),
+            config=data.get("params", data.get("config", {})),
             started_at=self._parse_timestamp(event.get("timestamp")),
         )
 
         self.state.current_run.strategies[strategy_id] = strategy
+        # Prime run start time on first strategy start
+        try:
+            if not self.state.current_run.started_at:
+                self.state.current_run.started_at = strategy.started_at
+        except Exception:
+            pass
         logger.info(
             f"Created strategy {strategy_id} ({data.get('strategy_name', 'unknown')})"
         )
@@ -251,7 +397,7 @@ class EventProcessor:
             return
 
         data = event.get("data", {})
-        strategy_id = data.get("strategy_id")
+        strategy_id = event.get("strategy_execution_id") or data.get("strategy_id")
         if not strategy_id or strategy_id not in self.state.current_run.strategies:
             return
 
@@ -358,6 +504,9 @@ class EventProcessor:
             instance.started_at = self._parse_timestamp(event.get("timestamp"))
             instance.prompt = data.get("prompt")
             instance.model = data.get("model", "sonnet")
+            # Backfill strategy name if available
+            if instance.strategy_name == "unknown" and data.get("strategy"):
+                instance.strategy_name = data.get("strategy")
             # Ensure we show a meaningful activity line
             instance.current_activity = instance.current_activity or "Starting..."
             instance.last_updated = datetime.now()
@@ -468,6 +617,43 @@ class EventProcessor:
         instance.current_activity = data.get("activity")
         instance.last_updated = datetime.now()
 
+    def _handle_state_instance_registered(self, event: Dict[str, Any]) -> None:
+        """Handle state.instance_registered snapshot to populate strategy name early."""
+        if not self.state.current_run:
+            return
+
+        data = event.get("data", {})
+        instance_id = event.get("instance_id") or data.get("instance_id")
+        if not instance_id:
+            return
+
+        # Ensure instance exists
+        inst = self.state.current_run.instances.get(instance_id)
+        if not inst:
+            inst = InstanceDisplay(
+                instance_id=instance_id,
+                strategy_name=data.get("strategy_name", "unknown"),
+                status=InstanceStatus.QUEUED,
+                branch_name=data.get("branch_name"),
+            )
+            self.state.current_run.instances[instance_id] = inst
+            self.state.current_run.total_instances += 1
+        else:
+            # Update strategy name/branch if missing
+            if inst.strategy_name == "unknown" and data.get("strategy_name"):
+                inst.strategy_name = data.get("strategy_name")
+            if not inst.branch_name and data.get("branch_name"):
+                inst.branch_name = data.get("branch_name")
+
+        # Add to strategy grouping if possible
+        strategy_name = data.get("strategy_name")
+        if strategy_name:
+            for strategy in self.state.current_run.strategies.values():
+                if strategy.strategy_name == strategy_name and instance_id not in strategy.instance_ids:
+                    strategy.instance_ids.append(instance_id)
+                    strategy.total_instances += 1
+                    break
+
     # Claude-specific event handlers
 
     def _handle_claude_system(self, event: Dict[str, Any]) -> None:
@@ -554,6 +740,40 @@ class EventProcessor:
                 instance.input_tokens = metrics.get("input_tokens", 0)
                 instance.output_tokens = metrics.get("output_tokens", 0)
 
+    def _handle_instance_canceled(self, event: Dict[str, Any]) -> None:
+        """Handle instance canceled (treated as interrupted)."""
+        if not self.state.current_run:
+            return
+        instance_id = event.get("instance_id")
+        if not instance_id or instance_id not in self.state.current_run.instances:
+            return
+        data = event.get("data", {})
+        instance = self.state.current_run.instances[instance_id]
+        instance.status = InstanceStatus.INTERRUPTED
+        instance.error = data.get("error") or "canceled"
+        instance.error_type = data.get("error_type") or "canceled"
+        instance.last_updated = datetime.now()
+        self.state.current_run.active_instances = max(
+            0, self.state.current_run.active_instances - 1
+        )
+
+    def _handle_state_instance_updated(self, event: Dict[str, Any]) -> None:
+        """Handle state.instance_updated snapshots for terminal transitions."""
+        if not self.state.current_run:
+            return
+        data = event.get("data", {})
+        instance_id = event.get("instance_id") or data.get("instance_id")
+        if not instance_id or instance_id not in self.state.current_run.instances:
+            return
+        new_state = data.get("new_state")
+        instance = self.state.current_run.instances[instance_id]
+        if new_state == "interrupted":
+            instance.status = InstanceStatus.INTERRUPTED
+            instance.last_updated = datetime.now()
+            self.state.current_run.active_instances = max(
+                0, self.state.current_run.active_instances - 1
+            )
+
     # Instance phase event handlers
 
     def _handle_instance_workspace_preparing(self, event: Dict[str, Any]) -> None:
@@ -584,6 +804,39 @@ class EventProcessor:
 
         instance = self.state.current_run.instances[instance_id]
         instance.current_activity = "Creating container..."
+        instance.last_updated = datetime.now()
+
+    def _handle_instance_container_env_preparing(self, event: Dict[str, Any]) -> None:
+        """Handle container env preparing event."""
+        if not self.state.current_run:
+            return
+        instance_id = event.get("instance_id")
+        if not instance_id or instance_id not in self.state.current_run.instances:
+            return
+        instance = self.state.current_run.instances[instance_id]
+        instance.current_activity = "Preparing container env..."
+        instance.last_updated = datetime.now()
+
+    def _handle_instance_container_env_prepared(self, event: Dict[str, Any]) -> None:
+        """Handle container env prepared event."""
+        if not self.state.current_run:
+            return
+        instance_id = event.get("instance_id")
+        if not instance_id or instance_id not in self.state.current_run.instances:
+            return
+        instance = self.state.current_run.instances[instance_id]
+        instance.current_activity = "Container env ready"
+        instance.last_updated = datetime.now()
+
+    def _handle_instance_container_created(self, event: Dict[str, Any]) -> None:
+        """Handle container created event."""
+        if not self.state.current_run:
+            return
+        instance_id = event.get("instance_id")
+        if not instance_id or instance_id not in self.state.current_run.instances:
+            return
+        instance = self.state.current_run.instances[instance_id]
+        instance.current_activity = "Container created"
         instance.last_updated = datetime.now()
 
     def _handle_instance_claude_starting(self, event: Dict[str, Any]) -> None:
@@ -630,6 +883,9 @@ class EventFileWatcher(FileSystemEventHandler):
         file_path: Path,
         callback: Callable[[str], None],
         initial_position: int = 0,
+        *,
+        get_position: Optional[Callable[[], int]] = None,
+        set_position: Optional[Callable[[int], None]] = None,
     ):
         """
         Initialize file watcher.
@@ -641,28 +897,44 @@ class EventFileWatcher(FileSystemEventHandler):
         """
         self.file_path = file_path
         self.callback = callback
+        # Share position with owner if provided to avoid duplicate reads
+        self._get_position = get_position
+        self._set_position = set_position
         self._last_position = initial_position
 
     def on_modified(self, event):
         """Handle file modification."""
         if not isinstance(event, FileModifiedEvent):
             return
-        if Path(event.src_path) != self.file_path:
+        try:
+            if Path(event.src_path).resolve() != self.file_path.resolve():
+                return
+        except Exception:
             return
 
         try:
-            with open(self.file_path, "r") as f:
+            with open(self.file_path, "rb") as f:
                 # Seek to last position
-                f.seek(self._last_position)
+                last_pos = (
+                    self._get_position() if self._get_position else self._last_position
+                )
+                f.seek(last_pos)
 
                 # Read new lines
-                for line in f:
-                    line = line.strip()
-                    if line:
-                        self.callback(line)
+                while True:
+                    line = f.readline()
+                    if not line:
+                        break
+                    s = line.decode("utf-8", errors="ignore").strip()
+                    if s:
+                        self.callback(s)
 
-                # Update position
-                self._last_position = f.tell()
+                # Update shared position
+                new_pos = f.tell()
+                if self._set_position:
+                    self._set_position(new_pos)
+                else:
+                    self._last_position = new_pos
         except (OSError, IOError) as e:
             logger.error(f"Error reading events file: {e}")
 
@@ -681,6 +953,16 @@ class AsyncEventStream:
         self._observer: Optional[Observer] = None
         self._event_queue: asyncio.Queue = asyncio.Queue()
         self._shutdown = False
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
+        # File change tracking
+        self._prev_inode: Optional[int] = None
+        self._prev_size: int = 0
+        # Diagnostics
+        self._lines_enqueued_total: int = 0
+        self._lines_processed_total: int = 0
+        self._rotations: int = 0
+        self._truncations: int = 0
+        self._bytes_read_total: int = 0
 
     async def start(self, events_file: Path, from_offset: int = 0) -> None:
         """
@@ -692,6 +974,11 @@ class AsyncEventStream:
         """
         self._events_file = events_file
         self._last_position = from_offset
+        # Capture the running loop for thread-safe callbacks
+        try:
+            self._loop = asyncio.get_running_loop()
+        except RuntimeError:
+            self._loop = None
 
         logger.info(
             f"Starting event stream for file: {events_file}, offset: {from_offset}"
@@ -707,7 +994,7 @@ class AsyncEventStream:
         # Start file watcher for real-time updates
         self._start_file_watcher(events_file)
 
-        # Also start polling loop as fallback (in case file watching fails)
+        # Also start polling loop as a backup; sharing the same offset with the watcher avoids duplicates
         asyncio.create_task(self._polling_loop())
 
     async def stop(self) -> None:
@@ -728,18 +1015,32 @@ class AsyncEventStream:
             f"Reading existing events from {events_file}, starting at offset {from_offset}"
         )
         try:
-            with open(events_file, "r") as f:
+            with open(events_file, "rb") as f:
                 # Seek to offset
-                f.seek(from_offset)
+                if from_offset > 0:
+                    f.seek(from_offset - 1)
+                    prev = f.read(1)
+                    if prev != b"\n":
+                        # advance to next newline to align
+                        while True:
+                            b = f.read(1)
+                            if not b or b == b"\n":
+                                break
+                # finally set start position
+                f.seek(max(0, from_offset))
 
                 # Read all existing lines
                 lines_read = 0
-                for line in f:
-                    line = line.strip()
-                    if line:
+                while True:
+                    line = f.readline()
+                    if not line:
+                        break
+                    s = line.decode("utf-8", errors="ignore").strip()
+                    if s:
                         lines_read += 1
-                        logger.debug(f"Reading existing event: {line[:100]}...")
-                        await self._event_queue.put(line)
+                        logger.debug(f"Reading existing event: {s[:100]}...")
+                        await self._event_queue.put(s)
+                        self._lines_enqueued_total += 1
 
                 # Update position for polling to continue from here
                 self._last_position = f.tell()
@@ -753,20 +1054,38 @@ class AsyncEventStream:
     def _start_file_watcher(self, events_file: Path) -> None:
         """Start watching events file for changes."""
 
+        if not WATCHDOG_AVAILABLE or Observer is None:
+            logger.info("Watchdog not available; skipping file watcher and using polling only")
+            return
+
         def new_line_callback(line: str):
-            # Put line in queue for async processing
-            asyncio.create_task(self._event_queue.put(line))
+            # Put line in queue for async processing (thread-safe)
+            try:
+                loop = self._loop or asyncio.get_event_loop()
+                loop.call_soon_threadsafe(self._event_queue.put_nowait, line)
+                self._lines_enqueued_total += 1
+            except Exception as e:
+                logger.error(f"File watcher enqueue failed: {e}")
 
+        # Pass shared position getters/setters so watcher and poller use one offset
         event_handler = EventFileWatcher(
-            events_file, new_line_callback, self._last_position
+            events_file,
+            new_line_callback,
+            self._last_position,
+            get_position=lambda: self._last_position,
+            set_position=lambda pos: setattr(self, "_last_position", pos),
         )
 
-        self._observer = Observer()
-        self._observer.schedule(event_handler, str(events_file.parent), recursive=False)
-        self._observer.start()
-        logger.info(
-            f"Started file watcher for {events_file} at position {self._last_position}"
-        )
+        try:
+            self._observer = Observer()  # type: ignore[call-arg]
+            self._observer.schedule(event_handler, str(events_file.parent), recursive=False)  # type: ignore[union-attr]
+            self._observer.start()  # type: ignore[union-attr]
+            logger.info(
+                f"Started file watcher for {events_file} at position {self._last_position}"
+            )
+        except Exception as e:
+            logger.warning(f"Failed to start watchdog observer, falling back to polling: {e}")
+            self._observer = None
 
     async def _polling_loop(self) -> None:
         """Poll the events file for new content."""
@@ -784,9 +1103,36 @@ class AsyncEventStream:
         while not self._shutdown:
             try:
                 if self._events_file.exists():
+                    # Detect rotation or truncation
+                    try:
+                        st = self._events_file.stat()
+                        inode = getattr(st, "st_ino", None)
+                        size = st.st_size
+                        if self._prev_inode is None:
+                            self._prev_inode = inode
+                            self._prev_size = size
+                        else:
+                            rotated = inode is not None and inode != self._prev_inode
+                            truncated = size < self._last_position
+                            if rotated or truncated:
+                                logger.warning(
+                                    f"Events file {'rotated' if rotated else 'truncated'}; resetting read position"
+                                )
+                                # On rotation/truncation, jump to end of current file to avoid reprocessing duplicates
+                                self._last_position = size
+                                self._prev_inode = inode
+                                self._prev_size = size
+                                if rotated:
+                                    self._rotations += 1
+                                if truncated:
+                                    self._truncations += 1
+                    except Exception as e:
+                        logger.debug(f"Stat failed for events file: {e}")
+
                     # Use regular file operations instead of aiofiles for more reliable reading
                     try:
-                        with open(self._events_file, "r") as f:
+                        import os
+                        with open(self._events_file, "rb") as f:
                             # Seek to last position
                             f.seek(self._last_position)
 
@@ -796,11 +1142,12 @@ class AsyncEventStream:
                                 line = f.readline()
                                 if not line:
                                     break
-                                line = line.strip()
-                                if line:
+                                s = line.decode("utf-8", errors="ignore").strip()
+                                if s:
                                     lines_read += 1
-                                    logger.debug(f"Read event line: {line[:100]}...")
-                                    await self._event_queue.put(line)
+                                    logger.debug(f"Read event line: {s[:100]}...")
+                                    await self._event_queue.put(s)
+                                    self._lines_enqueued_total += 1
                                     # Yield control after each event to allow processing
                                     await asyncio.sleep(0)
 
@@ -811,11 +1158,21 @@ class AsyncEventStream:
                                     f"Read {lines_read} lines, position {self._last_position} -> {new_position}"
                                 )
                             self._last_position = new_position
+                            try:
+                                self._bytes_read_total += max(0, new_position - self._last_position)
+                            except Exception:
+                                pass
 
                             # Update state
                             self.event_processor.state.last_event_offset = (
                                 self._last_position
                             )
+                            # Update previous size
+                            try:
+                                st2 = self._events_file.stat()
+                                self._prev_size = st2.st_size
+                            except Exception:
+                                pass
                     except (OSError, IOError) as e:
                         logger.error(f"Error reading events file: {e}")
 
@@ -832,13 +1189,23 @@ class AsyncEventStream:
         while not self._shutdown:
             try:
                 # Get event with timeout to check shutdown
+                import time
+                t_wait0 = time.perf_counter()
                 line = await asyncio.wait_for(self._event_queue.get(), timeout=1.0)
+                q_after_get = self._event_queue.qsize()
 
                 # Parse and process event
                 try:
+                    t_p0 = time.perf_counter()
                     event = json.loads(line)
-                    logger.debug(f"Parsed event: {event.get('type', 'unknown')}")
+                    t_p1 = time.perf_counter()
+                    e_type = event.get('type', 'unknown')
                     self.event_processor.process_event(event)
+                    t_h1 = time.perf_counter()
+                    self._lines_processed_total += 1
+                    logger.debug(
+                        f"queue_event type={e_type} qsize={q_after_get} parse_ms={(t_p1-t_p0)*1000:.2f} handle_ms={(t_h1-t_p1)*1000:.2f} wait_ms={(t_p0-t_wait0)*1000:.2f}"
+                    )
 
                     # Yield control to allow UI to update
                     await asyncio.sleep(0)
@@ -853,3 +1220,20 @@ class AsyncEventStream:
             except asyncio.TimeoutError:
                 # This is normal - just checking for shutdown
                 pass
+
+    def get_stats(self) -> Dict[str, Any]:
+        """Return a snapshot of stream diagnostics."""
+        try:
+            qsize = self._event_queue.qsize()
+        except Exception:
+            qsize = -1
+        return {
+            "queue_size": qsize,
+            "last_position": getattr(self, "_last_position", 0),
+            "prev_size": self._prev_size,
+            "rotations": self._rotations,
+            "truncations": self._truncations,
+            "lines_enqueued": self._lines_enqueued_total,
+            "lines_processed": self._lines_processed_total,
+            "bytes_read": self._bytes_read_total,
+        }

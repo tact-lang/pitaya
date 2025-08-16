@@ -17,9 +17,15 @@ class JSONFormatter(logging.Formatter):
 
     def format(self, record: logging.LogRecord) -> str:
         """Convert log record to JSON string."""
+
+        def _iso_millis(dt: datetime) -> str:
+            # UTC ISO-8601 with milliseconds and trailing 'Z'
+            s = dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")
+            return s[:-3] + "Z"
+
         # Build base log entry
         log_entry = {
-            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "timestamp": _iso_millis(datetime.now(timezone.utc)),
             "level": record.levelname,
             "component": record.name,
             "message": record.getMessage(),
@@ -172,6 +178,16 @@ def setup_structured_logging(
 
     if console_handler:
         root_logger.addHandler(console_handler)
+
+    # Tame noisy third-party libraries to reduce debug spam while keeping our own DEBUG
+    try:
+        for noisy in ("urllib3", "docker", "docker.utils", "docker.auth", "docker.api"):
+            nl = logging.getLogger(noisy)
+            # Show warnings+ only from third-party libs even in debug mode
+            nl.setLevel(logging.WARNING)
+            nl.propagate = False
+    except Exception:
+        pass
 
 
 def get_component_logger(component: str) -> logging.Logger:

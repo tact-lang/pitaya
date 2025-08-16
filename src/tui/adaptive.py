@@ -2,9 +2,9 @@
 Adaptive display logic for the orchestrator TUI.
 
 Implements three display modes based on instance count:
-- Detailed (<=10 instances): Full instance details with progress
-- Compact (11-50 instances): One line per instance
-- Dense (>50 instances): Strategy-level summaries only
+- Detailed (<=5 instances): Full instance details with progress
+- Compact (6-30 instances): One line per instance
+- Dense (>30 instances): Strategy-level summaries only
 """
 
 from rich.console import RenderableType
@@ -16,6 +16,7 @@ from rich.align import Align
 from rich.console import Group
 
 from .models import RunDisplay, InstanceDisplay, InstanceStatus
+from datetime import datetime, timezone
 
 
 class AdaptiveDisplay:
@@ -29,7 +30,7 @@ class AdaptiveDisplay:
             "dense": self._render_dense,
         }
 
-    def render_dashboard(self, run: RunDisplay, display_mode: str) -> RenderableType:
+    def render_dashboard(self, run: RunDisplay, display_mode: str, frame_now=None) -> RenderableType:
         """
         Render dashboard based on display mode.
 
@@ -41,9 +42,17 @@ class AdaptiveDisplay:
             Rich renderable for the dashboard
         """
         renderer = self._mode_renderers.get(display_mode, self._render_compact)
-        return renderer(run)
+        try:
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.debug(
+                f"render_dashboard mode={display_mode} strategies={len(run.strategies)} instances={len(run.instances)}"
+            )
+        except Exception:
+            pass
+        return renderer(run, frame_now=frame_now)
 
-    def _render_detailed(self, run: RunDisplay) -> RenderableType:
+    def _render_detailed(self, run: RunDisplay, frame_now=None) -> RenderableType:
         """
         Render detailed view for <=10 instances.
 
@@ -55,16 +64,25 @@ class AdaptiveDisplay:
         """
         panels = []
 
+        # Snapshot to avoid concurrent mutation during iteration
+        try:
+            strategies = list(run.strategies.values())
+            instances_map = dict(run.instances)
+        except Exception:
+            # Fallback: empty view if snapshotting fails
+            return Panel(Align.center(Text("Rendering...", style="dim")), style="dim")
+
         # Group instances by strategy
-        for strategy in run.strategies.values():
+        for strategy in strategies:
             # Deduplicate instance IDs to avoid duplicate cards
             seen: set[str] = set()
             ordered_ids = []
-            for iid in strategy.instance_ids:
-                if iid in run.instances and iid not in seen:
+            # Snapshot instance id list to avoid concurrent mutation during iteration
+            for iid in list(strategy.instance_ids):
+                if iid in instances_map and iid not in seen:
                     seen.add(iid)
                     ordered_ids.append(iid)
-            strategy_instances = [run.instances[iid] for iid in ordered_ids]
+            strategy_instances = [instances_map[iid] for iid in ordered_ids]
 
             if not strategy_instances:
                 continue
@@ -72,7 +90,11 @@ class AdaptiveDisplay:
             # Create instance panels
             instance_panels = []
             for instance in strategy_instances:
-                panel = self._create_detailed_instance_panel(instance)
+                panel = self._create_detailed_instance_panel(
+                    instance,
+                    ui_started_at=getattr(run, "ui_started_at", None),
+                    frame_now=frame_now,
+                )
                 instance_panels.append(panel)
 
             # Create strategy panel containing instances
@@ -92,7 +114,7 @@ class AdaptiveDisplay:
         # Return all strategy panels
         return Group(*panels)
 
-    def _create_detailed_instance_panel(self, instance: InstanceDisplay) -> Panel:
+    def _create_detailed_instance_panel(self, instance: InstanceDisplay, ui_started_at=None, frame_now=None) -> Panel:
         """Create a detailed panel for a single instance."""
         # Create content table
         table = Table(show_header=False, show_edge=False, padding=0, expand=True)
@@ -107,22 +129,57 @@ class AdaptiveDisplay:
 
         # Current activity
         if instance.current_activity:
+            # Detect staleness (> 30s since last update)
+            stale_suffix = ""
+            try:
+                if instance.status == InstanceStatus.RUNNING and instance.last_updated:
+                    now = datetime.now(instance.last_updated.tzinfo) if instance.last_updated.tzinfo else datetime.now()
+                    age = (now - instance.last_updated).total_seconds()
+                    if age >= 30:
+                        stale_suffix = f"  (stalled {int(age)}s)"
+            except Exception:
+                pass
             if instance.status == InstanceStatus.RUNNING:
                 # Add spinner for running instances
                 activity = Text()
                 activity.append("🔄 ", style="yellow")
                 activity.append(instance.current_activity)
+                if stale_suffix:
+                    activity.append(stale_suffix, style="red")
                 table.add_row("Activity:", activity)
             else:
-                table.add_row("Activity:", instance.current_activity)
+                value = instance.current_activity + stale_suffix
+                table.add_row("Activity:", value)
 
         # Last tool use
         if instance.last_tool_use:
             table.add_row("Last Tool:", f"🔧 {instance.last_tool_use}")
 
         # Progress metrics
-        if instance.duration_seconds > 0:
-            table.add_row("Duration:", self._format_duration(instance.duration_seconds))
+        # Duration: prefer live duration for running, else recorded duration
+        try:
+            live_seconds = 0.0
+            if instance.status == InstanceStatus.RUNNING and instance.started_at:
+                if frame_now is not None:
+                    now = frame_now if instance.started_at.tzinfo else frame_now.replace(tzinfo=None)
+                else:
+                    now = datetime.now(instance.started_at.tzinfo) if instance.started_at.tzinfo else datetime.now()
+                start_eff = instance.started_at
+                # Clamp to UI start if provided so per-instance never precedes global
+                if ui_started_at:
+                    try:
+                        if start_eff.tzinfo is None and ui_started_at.tzinfo is not None:
+                            start_eff = start_eff.replace(tzinfo=ui_started_at.tzinfo)
+                    except Exception:
+                        pass
+                    if start_eff < ui_started_at:
+                        start_eff = ui_started_at
+                live_seconds = max(0.0, (now - start_eff).total_seconds())
+            show_seconds = instance.duration_seconds if instance.duration_seconds > 0 else live_seconds
+            if show_seconds > 0:
+                table.add_row("Duration:", self._format_duration(show_seconds))
+        except Exception:
+            pass
 
         if instance.total_tokens > 0:
             table.add_row(
@@ -163,9 +220,9 @@ class AdaptiveDisplay:
             padding=(0, 1),
         )
 
-    def _render_compact(self, run: RunDisplay) -> RenderableType:
+    def _render_compact(self, run: RunDisplay, frame_now=None) -> RenderableType:
         """
-        Render compact view for 11-50 instances.
+        Render compact view for 6-30 instances.
 
         Shows one-line summaries per instance with:
         - Instance ID [status emoji]
@@ -186,9 +243,25 @@ class AdaptiveDisplay:
         table.add_column("Cost", width=10)
         table.add_column("Tokens", width=10)
 
-        # Sort instances by strategy and status
+        # Build a fallback mapping from instance_id -> strategy name to avoid 'unknown' labels
+        fallback_strategy_by_instance: dict[str, str] = {}
+        try:
+            for strat in run.strategies.values():
+                sname = strat.strategy_name
+                if not sname or sname.lower() == "unknown":
+                    continue
+                for iid in strat.instance_ids:
+                    fallback_strategy_by_instance[iid] = sname
+        except Exception:
+            pass
+
+        # Snapshot and sort instances by strategy and status
+        try:
+            instances = list(run.instances.values())
+        except Exception:
+            instances = []
         instances = sorted(
-            run.instances.values(),
+            instances,
             key=lambda i: (
                 i.strategy_name,
                 0 if i.status == InstanceStatus.RUNNING else 1,
@@ -203,27 +276,60 @@ class AdaptiveDisplay:
             status.append(instance.status.emoji + " ")
             status.append(instance.status.value, style=instance.status.color)
 
-            # Activity
+            # Activity (+ staleness)
             activity = ""
             if instance.current_activity:
-                activity = instance.current_activity[:30]
-                if len(instance.current_activity) > 30:
-                    activity += "..."
+                # Add staleness if > 30s
+                stale = ""
+                try:
+                    if instance.status == InstanceStatus.RUNNING and instance.last_updated:
+                        now = datetime.now(instance.last_updated.tzinfo) if instance.last_updated.tzinfo else datetime.now()
+                        age = (now - instance.last_updated).total_seconds()
+                        if age >= 30:
+                            stale = f" (stalled {int(age)}s)"
+                except Exception:
+                    pass
+                base = instance.current_activity
+                activity = (base[:30] + ("..." if len(base) > 30 else "")) + stale
             elif instance.last_tool_use:
                 activity = f"🔧 {instance.last_tool_use}"
 
-            # Metrics
-            duration = (
-                self._format_duration(instance.duration_seconds)
-                if instance.duration_seconds > 0
-                else "-"
-            )
+            # Metrics - live duration with clamping to UI start; synchronized to frame_now
+            duration = "-"
+            try:
+                live_seconds = 0.0
+                if instance.status == InstanceStatus.RUNNING and instance.started_at:
+                    if frame_now is not None:
+                        now = frame_now if instance.started_at.tzinfo else frame_now.replace(tzinfo=None)
+                    else:
+                        now = datetime.now(instance.started_at.tzinfo) if instance.started_at.tzinfo else datetime.now()
+                    start_eff = instance.started_at
+                    ui_start = getattr(run, "ui_started_at", None)
+                    if ui_start:
+                        try:
+                            if start_eff.tzinfo is None and ui_start.tzinfo is not None:
+                                start_eff = start_eff.replace(tzinfo=ui_start.tzinfo)
+                        except Exception:
+                            pass
+                        if start_eff < ui_start:
+                            start_eff = ui_start
+                    live_seconds = max(0.0, (now - start_eff).total_seconds())
+                seconds_to_show = instance.duration_seconds if instance.duration_seconds > 0 else live_seconds
+                if seconds_to_show > 0:
+                    duration = self._format_duration(seconds_to_show)
+            except Exception:
+                pass
             cost = f"${instance.cost:.3f}" if instance.cost > 0 else "-"
             tokens = f"{instance.total_tokens:,}" if instance.total_tokens > 0 else "-"
 
+            # Strategy label with robust fallback
+            strategy_label = instance.strategy_name or ""
+            if not strategy_label or strategy_label.lower() == "unknown":
+                strategy_label = fallback_strategy_by_instance.get(instance.instance_id, "-")
+
             table.add_row(
                 instance.display_name,
-                instance.strategy_name,
+                strategy_label,
                 status,
                 activity,
                 duration,
@@ -235,7 +341,7 @@ class AdaptiveDisplay:
 
     def _render_dense(self, run: RunDisplay) -> RenderableType:
         """
-        Render dense view for >50 instances.
+        Render dense view for >30 instances.
 
         Shows strategy-level summaries only:
         - Strategy name and configuration
@@ -257,13 +363,21 @@ class AdaptiveDisplay:
         table.add_column("Cost", width=10)
         table.add_column("Avg Time", width=10)
 
+        # Snapshot to avoid concurrent mutation during iteration
+        try:
+            strategies = list(run.strategies.values())
+            instances_map = dict(run.instances)
+        except Exception:
+            strategies = []
+            instances_map = {}
+
         # Add strategy rows
-        for strategy in run.strategies.values():
+        for strategy in strategies:
             # Calculate strategy metrics
             strategy_instances = [
-                run.instances[iid]
+                instances_map[iid]
                 for iid in strategy.instance_ids
-                if iid in run.instances
+                if iid in instances_map
             ]
 
             if not strategy_instances:
@@ -342,7 +456,7 @@ class AdaptiveDisplay:
     def _format_duration(self, seconds: float) -> str:
         """Format duration for display."""
         if seconds < 60:
-            return f"{seconds:.0f}s"
+            return f"{int(seconds)}s"
         elif seconds < 3600:
             minutes = seconds / 60
             return f"{minutes:.1f}m"

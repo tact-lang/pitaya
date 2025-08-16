@@ -338,18 +338,13 @@ class StateManager:
                     limit=None,
                 )
 
-                # Filter only state.* events
-                state_events = [e for e in all_events if str(e.get("type", "")).startswith("state.")]
-
-                if state_events:
-                    # Apply events to reconstruct state
-                    await self.rebuild_from_events(state_events)
-
-                    # Update last offset to the returned next offset
+                # Apply canonical + state events for recovery
+                if all_events:
+                    await self.rebuild_from_events(all_events)
                     self.current_state.last_event_offset = next_offset
-                    logger.info(f"Applied {len(state_events)} events to recover state")
+                    logger.info(f"Applied {len(all_events)} events to recover state")
                 else:
-                    logger.info("No new state events to apply since snapshot")
+                    logger.info("No new events to apply since snapshot")
 
             except Exception as e:
                 logger.error(f"Failed to recover events for run {run_id}: {e}")
@@ -362,14 +357,18 @@ class StateManager:
                 terminal_iids: set[str] = set()
                 for ev in (all_events or []):
                     et = str(ev.get("type", ""))
-                    iid = ev.get("instance_id")
+                    iid = None
+                    if isinstance(ev.get("payload"), dict):
+                        iid = ev.get("payload", {}).get("instance_id")
+                    if not iid:
+                        iid = ev.get("instance_id")
                     if not iid:
                         continue
-                    if et in ("instance.completed", "instance.failed"):
+                    if et in ("task.completed", "task.failed", "task.interrupted"):
                         terminal_iids.add(iid)
                     if et == "state.instance_updated":
                         data = ev.get("data", {})
-                        if data.get("new_state") in (InstanceStatus.COMPLETED.value, InstanceStatus.FAILED.value):
+                        if data.get("new_state") in (InstanceStatus.COMPLETED.value, InstanceStatus.FAILED.value, InstanceStatus.INTERRUPTED.value):
                             terminal_iids.add(iid)
 
                 for iid, info in list(self.current_state.instances.items()):
@@ -755,15 +754,22 @@ class StateManager:
     def apply_event(self, event: Dict[str, Any]) -> None:
         """Apply a single event to reconstruct state.
 
-        This method is used during recovery to rebuild state from the event log.
-        It handles all state-modifying events emitted by this component.
+        Handles both internal state.* events (legacy) and canonical
+        task.* / strategy.* events written to events.jsonl.
         """
         if not self.current_state:
             logger.warning("No current state to apply event to")
             return
 
         event_type = event.get("type")
-        data = event.get("data", {})
+        # Canonical events carry payload and ts
+        payload = event.get("payload") if isinstance(event.get("payload"), dict) else None
+        data = payload if payload is not None else event.get("data", {})
+        ts_str = event.get("ts") or event.get("timestamp")
+        try:
+            ts = datetime.fromisoformat(ts_str.replace("Z", "+00:00")) if ts_str else None
+        except Exception:
+            ts = None
 
         if event_type == "state.run_initialized":
             # This would typically create a new state, but during replay
@@ -849,6 +855,107 @@ class StateManager:
 
                 # Note: Strategy results aren't included in events to keep them small
                 # Full results are stored in the final snapshot
+
+        # Canonical strategy events
+        elif event_type == "strategy.started":
+            sid = event.get("strategy_execution_id") or data.get("strategy_id")
+            if sid and sid not in self.current_state.strategies:
+                self.current_state.strategies[sid] = StrategyExecution(
+                    strategy_id=sid,
+                    strategy_name=data.get("name", data.get("strategy_name", "")),
+                    config=data.get("params", data.get("config", {})),
+                    started_at=ts or datetime.now(timezone.utc),
+                )
+
+        elif event_type == "strategy.completed":
+            sid = event.get("strategy_execution_id") or data.get("strategy_id")
+            if sid and sid in self.current_state.strategies:
+                strat = self.current_state.strategies[sid]
+                strat.completed_at = ts or datetime.now(timezone.utc)
+                # status mapping retained in strat.state for summaries
+                status = data.get("status")
+                if status == "success":
+                    strat.state = "completed"
+                elif status == "failed":
+                    strat.state = "failed"
+                elif status == "canceled":
+                    strat.state = "failed"
+
+        # Canonical task events
+        elif event_type == "task.scheduled":
+            iid = data.get("instance_id")
+            if iid and iid not in self.current_state.instances:
+                # Derive strategy name from strategies map when possible
+                sname = ""
+                sid = event.get("strategy_execution_id")
+                if sid and sid in self.current_state.strategies:
+                    sname = self.current_state.strategies[sid].strategy_name
+                info = InstanceInfo(
+                    instance_id=iid,
+                    strategy_name=sname,
+                    prompt="",
+                    base_branch="",
+                    branch_name="",
+                    container_name=data.get("container_name", ""),
+                    state=InstanceStatus.QUEUED,
+                    metadata={"model": data.get("model", "")},
+                )
+                self.current_state.instances[iid] = info
+                self.current_state.total_instances += 1
+                # Attach instance to strategy group
+                if sid and sid in self.current_state.strategies:
+                    strat = self.current_state.strategies[sid]
+                    if iid not in strat.instance_ids:
+                        strat.instance_ids.append(iid)
+                        strat.total_instances += 1
+
+        elif event_type == "task.started":
+            iid = data.get("instance_id")
+            if iid and iid in self.current_state.instances:
+                info = self.current_state.instances[iid]
+                info.state = InstanceStatus.RUNNING
+                info.started_at = ts or datetime.now(timezone.utc)
+
+        elif event_type == "task.completed":
+            iid = data.get("instance_id")
+            if iid and iid in self.current_state.instances:
+                info = self.current_state.instances[iid]
+                info.state = InstanceStatus.COMPLETED
+                info.completed_at = ts or datetime.now(timezone.utc)
+                art = data.get("artifact", {})
+                # Backfill base/branch
+                try:
+                    if not info.branch_name:
+                        info.branch_name = art.get("branch_final") or info.branch_name
+                    if not info.base_branch:
+                        info.base_branch = art.get("base") or info.base_branch
+                except Exception:
+                    pass
+                # Update aggregate metrics
+                if self.current_state.completed_instances is not None:
+                    self.current_state.completed_instances += 1
+                metrics = data.get("metrics", {})
+                try:
+                    self.current_state.total_cost += float(metrics.get("total_cost", 0.0))
+                    self.current_state.total_tokens += int(metrics.get("total_tokens", 0))
+                except Exception:
+                    pass
+
+        elif event_type == "task.failed":
+            iid = data.get("instance_id")
+            if iid and iid in self.current_state.instances:
+                info = self.current_state.instances[iid]
+                info.state = InstanceStatus.FAILED
+                info.completed_at = ts or datetime.now(timezone.utc)
+                if self.current_state.failed_instances is not None:
+                    self.current_state.failed_instances += 1
+
+        elif event_type == "task.interrupted":
+            iid = data.get("instance_id")
+            if iid and iid in self.current_state.instances:
+                info = self.current_state.instances[iid]
+                info.state = InstanceStatus.INTERRUPTED
+                info.interrupted_at = ts or datetime.now(timezone.utc)
 
     async def rebuild_from_events(self, events: List[Dict[str, Any]]) -> None:
         """Rebuild state by replaying a list of events.

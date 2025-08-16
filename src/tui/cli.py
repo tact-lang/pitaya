@@ -183,15 +183,8 @@ Examples:
             display = TUIDisplay(
                 console=self.console, refresh_rate=refresh_rate, state_poll_interval=3.0
             )
-
-            # Override display mode if specified
-            if self.display_mode:
-                display.state.current_run.force_detail_level = self.display_mode
-            else:
-                # Try env override
-                dm = os.environ.get("ORCHESTRATOR_TUI__FORCE_DISPLAY_MODE")
-                if dm in {"detailed", "compact", "dense"} and display.state.current_run:
-                    display.state.current_run.force_detail_level = dm
+            # Apply CLI/env forced display mode via display helper
+            display.set_forced_display_mode(self.display_mode)
 
             # Run TUI with client
             await display.run_connected(client, args.from_offset)
@@ -241,14 +234,8 @@ Examples:
             display = TUIDisplay(
                 console=self.console, refresh_rate=refresh_rate, state_poll_interval=3.0
             )
-
-            # Override display mode if specified
-            if self.display_mode and display.state.current_run:
-                display.state.current_run.force_detail_level = self.display_mode
-            else:
-                dm = os.environ.get("ORCHESTRATOR_TUI__FORCE_DISPLAY_MODE")
-                if dm in {"detailed", "compact", "dense"} and display.state.current_run:
-                    display.state.current_run.force_detail_level = dm
+            # Apply CLI/env forced display mode via display helper
+            display.set_forced_display_mode(self.display_mode)
 
             # Run TUI with file
             await display.run(None, events_file, args.from_offset)
@@ -285,7 +272,7 @@ Examples:
                 return
 
             # Format event for display
-            timestamp = event.get("timestamp", "")
+            timestamp = event.get("ts") or event.get("timestamp", "")
             event_type = event.get("type", "unknown")
             instance_id = event.get("instance_id", "")
 
@@ -342,17 +329,29 @@ Examples:
     ) -> None:
         """Output events as JSON."""
         # Read events directly
-        with open(events_file, "r") as f:
+        with open(events_file, "rb") as f:
             if args.from_offset > 0:
-                f.seek(args.from_offset)
+                # align to newline boundary
+                off = args.from_offset
+                if off > 0:
+                    f.seek(off - 1)
+                    if f.read(1) != b"\n":
+                        while True:
+                            b = f.read(1)
+                            if not b or b == b"\n":
+                                break
+                f.seek(max(0, args.from_offset))
 
-            for line in f:
-                line = line.strip()
+            while True:
+                line = f.readline()
                 if not line:
+                    break
+                s = line.decode("utf-8", errors="ignore").strip()
+                if not s:
                     continue
 
                 try:
-                    event = json.loads(line)
+                    event = json.loads(s)
 
                     # Apply filters
                     if args.run_id and event.get("run_id") != args.run_id:
@@ -411,7 +410,7 @@ Examples:
 
             for event in events:
                 # Format and display
-                timestamp = event.get("timestamp", "")
+                timestamp = event.get("ts") or event.get("timestamp", "")
                 event_type = event.get("type", "unknown")
                 instance_id = event.get("instance_id", "")
 

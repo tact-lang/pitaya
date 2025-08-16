@@ -40,10 +40,12 @@ def cleanup_old_logs(logs_dir: Path, retention_days: int = 7) -> int:
             continue
 
         try:
-            # Extract timestamp from directory name (run_YYYYMMDD_HHMMSS)
+            # Extract timestamp from directory name (run_YYYYMMDD_HHMMSS or run_YYYYMMDD_HHMMSS_<short8>)
             dir_name = run_dir.name
             if dir_name.startswith("run_"):
-                timestamp_str = dir_name[4:]  # Remove "run_" prefix
+                timestamp_full = dir_name[4:]
+                # Only take the fixed-length timestamp prefix (15 chars)
+                timestamp_str = timestamp_full[:15]
                 # Parse timestamp
                 dir_timestamp = datetime.strptime(timestamp_str, "%Y%m%d_%H%M%S")
                 dir_timestamp = dir_timestamp.replace(tzinfo=timezone.utc)
@@ -123,10 +125,11 @@ def get_log_directories_by_age(logs_dir: Path) -> List[tuple[Path, datetime]]:
             continue
 
         try:
-            # Extract timestamp
+            # Extract timestamp (support optional short8 suffix)
             dir_name = run_dir.name
             if dir_name.startswith("run_"):
-                timestamp_str = dir_name[4:]
+                timestamp_full = dir_name[4:]
+                timestamp_str = timestamp_full[:15]
                 dir_timestamp = datetime.strptime(timestamp_str, "%Y%m%d_%H%M%S")
                 dir_timestamp = dir_timestamp.replace(tzinfo=timezone.utc)
                 directories.append((run_dir, dir_timestamp))

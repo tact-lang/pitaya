@@ -292,7 +292,9 @@ class Orchestrator:
         # Generate run ID if not provided
         if not run_id:
             timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-            run_id = f"run_{timestamp}"
+            import uuid as _uuid
+            short8 = _uuid.uuid4().hex[:8]
+            run_id = f"run_{timestamp}_{short8}"
 
         # Initialize event bus for this run (if not already initialized)
         if not self.event_bus:
@@ -393,11 +395,16 @@ class Orchestrator:
                             )
 
                             self.event_bus.emit("strategy.completed", {"strategy_id": strat_id, "result_count": len(res), "branch_names": [r.branch_name for r in res if r.branch_name]})
+                            # Canonical completion with normative status semantics
+                            status = "success" if any(getattr(r, "success", False) for r in (res or [])) else "failed"
+                            payload = {"status": status}
+                            if status == "failed":
+                                payload["reason"] = "no_successful_tasks"
                             self.event_bus.emit_canonical(
                                 type="strategy.completed",
                                 run_id=run_id,
                                 strategy_execution_id=strat_id,
-                                payload={"status": "success"},
+                                payload=payload,
                             )
 
                             return res
@@ -490,11 +497,15 @@ class Orchestrator:
                 )
 
                 self.event_bus.emit("strategy.completed", {"strategy_id": strategy_id, "result_count": len(results), "branch_names": [r.branch_name for r in results if r.branch_name]})
+                status = "success" if any(getattr(r, "success", False) for r in (results or [])) else "failed"
+                payload = {"status": status}
+                if status == "failed":
+                    payload["reason"] = "no_successful_tasks"
                 self.event_bus.emit_canonical(
                     type="strategy.completed",
                     run_id=run_id,
                     strategy_execution_id=strategy_id,
-                    payload={"status": "success"},
+                    payload=payload,
                 )
 
                 # Save results to disk
@@ -603,17 +614,17 @@ class Orchestrator:
         else:
             sidx = 1
 
-        # Generate names according to spec
-        # Extract timestamp from run_id (format: "run_YYYYMMDD_HHMMSS")
-        run_timestamp = self.state_manager.current_state.run_id.replace("run_", "")
+        # Generate names according to spec using full run_id (run_YYYYMMDD_HHMMSS_<short8>)
+        run_id_val = self.state_manager.current_state.run_id
         if key:
             import hashlib
-            khash = hashlib.sha256(key.encode("utf-8")).hexdigest()[:8]
-            container_name = f"orchestrator_{run_timestamp}_s{sidx}_k{khash}"
-            branch_name = f"{strategy_name}_{run_timestamp}_k{khash}"
+            # Namespace durable key by strategy execution to avoid collisions across parallel runs
+            khash = hashlib.sha256(f"{strategy_execution_id}|{key}".encode("utf-8")).hexdigest()[:8]
+            container_name = f"orchestrator_{run_id_val}_s{sidx}_k{khash}"
+            branch_name = f"{strategy_name}_{run_id_val}_k{khash}"
         else:
-            container_name = f"orchestrator_{run_timestamp}_s{sidx}_i{instance_index}"
-            branch_name = f"{strategy_name}_{run_timestamp}_{sidx}_{instance_index}"
+            container_name = f"orchestrator_{run_id_val}_s{sidx}_i{instance_index}"
+            branch_name = f"{strategy_name}_{run_id_val}_{sidx}_{instance_index}"
 
         # Register instance only if this durable key wasn't seen before
         if instance_id not in self.state_manager.current_state.instances:
@@ -763,13 +774,68 @@ class Orchestrator:
                     p.write_text(datetime.now(timezone.utc).isoformat())
             except Exception:
                 pass
-            # Forward runner-level events; persist for real-time UI until canonical task.* stream is used
-            self.event_bus.emit(
-                event_type=event.get("type", "instance.event"),
-                data=data,
-                instance_id=instance_id,
-                persist=True,
-            )
+            # Forward runner-level events to in-memory bus for local diagnostics
+            try:
+                self.event_bus.emit(
+                    event_type=event.get("type", "instance.event"),
+                    data=data,
+                    instance_id=instance_id,
+                )
+            except Exception:
+                pass
+
+            # Map select instance.* events to canonical task.progress for the TUI/file
+            try:
+                et = str(event.get("type", ""))
+                phase = None
+                activity = None
+                tool = None
+                # Workspace and container phases
+                if et == "instance.workspace_preparing":
+                    phase, activity = "workspace_preparing", "Preparing workspace..."
+                elif et in ("instance.container_creating", "instance.container_create_call", "instance.container_create_attempt", "instance.container_image_check"):
+                    phase, activity = "container_creating", "Creating container..."
+                elif et == "instance.container_env_preparing":
+                    phase, activity = "container_env_preparing", "Preparing container env..."
+                elif et == "instance.container_env_prepared":
+                    phase, activity = "container_env_prepared", "Container env ready"
+                elif et == "instance.container_created":
+                    phase, activity = "container_created", "Container created"
+                elif et == "instance.claude_starting":
+                    phase, activity = "claude_starting", "Starting Claude..."
+                elif et == "instance.result_collection_started":
+                    phase, activity = "result_collection", "Collecting results..."
+                elif et == "instance.branch_imported":
+                    phase, activity = "branch_imported", f"Imported branch {data.get('branch_name','')}"
+                elif et == "instance.no_changes":
+                    phase, activity = "no_changes", "No changes"
+                elif et == "instance.workspace_cleaned":
+                    phase, activity = "cleanup", "Workspace cleaned"
+                # Claude tool and message events
+                elif et == "instance.claude_tool_use":
+                    phase, tool = "tool_use", (data.get("tool") or data.get("data", {}).get("tool"))
+                    activity = f"Using {tool}" if tool else "Tool use"
+                elif et == "instance.claude_assistant":
+                    phase, activity = "assistant", "Claude is thinking..."
+                elif et == "instance.claude_system":
+                    phase, activity = "system", "Claude connected"
+
+                if phase and task_key:
+                    self.event_bus.emit_canonical(
+                        type="task.progress",
+                        run_id=self.state_manager.current_state.run_id,
+                        strategy_execution_id=next((sid for sid, strat in self.state_manager.current_state.strategies.items() if instance_id in strat.instance_ids), None),
+                        key=task_key,
+                        payload={
+                            "key": task_key,
+                            "instance_id": instance_id,
+                            "phase": phase,
+                            **({"activity": activity} if activity else {}),
+                            **({"tool": tool} if tool else {}),
+                        },
+                    )
+            except Exception:
+                pass
 
         # Start a lightweight heartbeat that reports recent activity for this instance
         heartbeat_task: Optional[asyncio.Task] = None
@@ -841,14 +907,52 @@ class Orchestrator:
                         "branch_planned": info.branch_name,
                         "branch_final": result.branch_name,
                         "base": info.base_branch,
+                        "commit": getattr(result, "commit", None) or "",
                         "has_changes": result.has_changes,
+                        "duplicate_of_branch": getattr(result, "duplicate_of_branch", None),
+                        "dedupe_reason": getattr(result, "dedupe_reason", None),
                     }
+                    # Final message truncation per spec
+                    import os as _os
+                    try:
+                        max_bytes = int(_os.environ.get("ORCHESTRATOR_EVENTS__MAX_FINAL_MESSAGE_BYTES", "16384"))
+                    except Exception:
+                        max_bytes = 16384
+                    full_msg = result.final_message or ""
+                    msg_bytes = full_msg.encode("utf-8", errors="ignore")
+                    truncated_flag = False
+                    rel_path = ""
+                    out_msg = full_msg
+                    if max_bytes > 0 and len(msg_bytes) > max_bytes:
+                        truncated_flag = True
+                        out_msg = msg_bytes[:max_bytes].decode("utf-8", errors="ignore")
+                        # Write full message to run-relative path under logs/<run_id>/
+                        try:
+                            run_id = self.state_manager.current_state.run_id
+                            run_logs = self.logs_dir / run_id
+                            dest_dir = run_logs / "final_messages"
+                            dest_dir.mkdir(parents=True, exist_ok=True)
+                            fname = f"{instance_id}.txt"
+                            with open(dest_dir / fname, "w", encoding="utf-8", errors="ignore") as fh:
+                                fh.write(full_msg)
+                            rel_path = f"final_messages/{fname}"
+                        except Exception:
+                            truncated_flag = False
+                            rel_path = ""
                     self.event_bus.emit_canonical(
                         type="task.completed",
                         run_id=self.state_manager.current_state.run_id,
                         strategy_execution_id=strategy_execution_id,
                         key=task_key,
-                        payload={"key": task_key, "instance_id": instance_id, "artifact": artifact, "metrics": result.metrics or {}, "final_message": result.final_message or ""},
+                        payload={
+                            "key": task_key,
+                            "instance_id": instance_id,
+                            "artifact": artifact,
+                            "metrics": result.metrics or {},
+                            "final_message": out_msg,
+                            "final_message_truncated": truncated_flag,
+                            "final_message_path": rel_path,
+                        },
                     )
                 elif new_state == InstanceStatus.INTERRUPTED:
                     self.event_bus.emit_canonical(
@@ -864,7 +968,13 @@ class Orchestrator:
                         run_id=self.state_manager.current_state.run_id,
                         strategy_execution_id=strategy_execution_id,
                         key=task_key,
-                        payload={"key": task_key, "instance_id": instance_id, "error_type": result.error_type or "unknown", "message": result.error or ""},
+                        payload={
+                            "key": task_key,
+                            "instance_id": instance_id,
+                            "error_type": result.error_type or "unknown",
+                            "message": result.error or "",
+                            "network_egress": (info.metadata or {}).get("network_egress"),
+                        },
                     )
 
             # Resolve future

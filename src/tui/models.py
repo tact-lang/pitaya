@@ -138,9 +138,9 @@ class RunDisplay:
     """Display state for the entire run."""
 
     run_id: str
-    prompt: str
-    repo_path: str
-    base_branch: str
+    prompt: str = ""
+    repo_path: str = ""
+    base_branch: str = "main"
 
     # Strategy tracking
     strategies: Dict[str, StrategyDisplay] = field(default_factory=dict)
@@ -159,6 +159,8 @@ class RunDisplay:
     # Timing
     started_at: Optional[datetime] = None
     completed_at: Optional[datetime] = None
+    # UI session start (for global runtime and clamping)
+    ui_started_at: Optional[datetime] = None
 
     # Display preferences
     force_detail_level: Optional[str] = None  # detailed, compact, dense
@@ -168,8 +170,17 @@ class RunDisplay:
         """Calculate run duration."""
         if not self.started_at:
             return 0.0
-        end_time = self.completed_at or datetime.now()
-        return (end_time - self.started_at).total_seconds()
+        # Use a tz-aware/naive match to avoid subtraction errors
+        start = self.started_at
+        now = datetime.now(start.tzinfo) if start.tzinfo is not None else datetime.now()
+        end_time = self.completed_at or now
+        # If completed_at exists but tzinfo mismatches, align to start's tzinfo
+        if end_time.tzinfo != start.tzinfo:
+            try:
+                end_time = end_time.replace(tzinfo=start.tzinfo)
+            except Exception:
+                pass
+        return (end_time - start).total_seconds()
 
     @property
     def overall_progress(self) -> float:
@@ -202,9 +213,9 @@ class RunDisplay:
         if self.force_detail_level:
             return self.force_detail_level
 
-        if self.total_instances <= 10:
+        if self.total_instances <= 5:
             return "detailed"
-        elif self.total_instances <= 50:
+        elif self.total_instances <= 30:
             return "compact"
         else:
             return "dense"

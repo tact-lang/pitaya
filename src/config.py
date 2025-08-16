@@ -248,6 +248,8 @@ def load_env_config() -> Dict[str, Any]:
         "RUNNER__TIMEOUT": "runner.timeout",
         "RUNNER__CPU_LIMIT": "runner.cpu_limit",
         "RUNNER__MEMORY_LIMIT": "runner.memory_limit",
+        "RUNNER__REVIEW_WORKSPACE_MODE": "runner.review_workspace_mode",
+        "RUNNER__TMPFS_SIZE_MB": "runner.tmpfs_size_mb",
         # Spec-friendly resource names
         "CONTAINER_CPU": "runner.cpu_limit",
         "CONTAINER_MEMORY": "runner.memory_limit",
@@ -269,9 +271,13 @@ def load_env_config() -> Dict[str, Any]:
         "LOGGING__RETENTION_DAYS": "logging.retention_days",
         # TUI settings
         "TUI__REFRESH_RATE": "tui.refresh_rate",
+        "TUI__REFRESH_RATE_MS": "tui.refresh_rate_ms",
         "TUI__SHOW_TIMESTAMPS": "tui.show_timestamps",
         "TUI__COLOR_SCHEME": "tui.color_scheme",
         "TUI__FORCE_DISPLAY_MODE": "tui.force_display_mode",
+        # Events retention
+        "EVENTS__RETENTION_DAYS": "events.retention_days",
+        "EVENTS__RETENTION_GRACE_DAYS": "events.retention_grace_days",
     }
 
     for env_suffix, config_path in env_mappings.items():
@@ -345,7 +351,9 @@ def get_default_config() -> Dict[str, Any]:
             # Session volume scope: run|global
             "session_volume_scope": "run",
             # review workspace mode: rw|ro (ro enforces RO when import_policy=never)
-            "review_workspace_mode": "rw",
+            "review_workspace_mode": "ro",
+            # tmpfs size for /tmp mount in MB
+            "tmpfs_size_mb": 512,
         },
         "orchestration": {
             "max_parallel_instances": 20,
@@ -362,10 +370,17 @@ def get_default_config() -> Dict[str, Any]:
         "logging": {
             "level": "INFO",
             "max_file_size": 10485760,  # 10MB
-            "retention_days": 7,
+            "retention_days": 7,  # component logs only
+        },
+        # Events retention (terminal runs only after grace)
+        "events": {
+            "retention_days": 30,
+            "retention_grace_days": 7,
         },
         "tui": {
-            "refresh_rate": 10,  # Hz
+            # preferred configuration is ms; keep Hz fallback for compatibility
+            "refresh_rate": 10,  # Hz (fallback)
+            "refresh_rate_ms": 100,  # 10Hz
             "show_timestamps": False,
             "color_scheme": "default",
         },

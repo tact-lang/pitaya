@@ -85,6 +85,10 @@ class InstanceResult:
     log_path: Optional[str] = None
     workspace_path: Optional[str] = None  # Until cleanup
     status: str = "unknown"  # success/failed/timeout/canceled
+    # Artifact extras for orchestration mapping
+    commit: Optional[str] = None
+    duplicate_of_branch: Optional[str] = None
+    dedupe_reason: Optional[str] = None
     # Strategy-specific metadata
     metadata: Dict[str, Any] = field(default_factory=dict)
 

@@ -220,6 +220,7 @@ async def run_instance(
             import_policy=import_policy,
             import_conflict_policy=import_conflict_policy,
             skip_empty_import=skip_empty_import,
+            task_key=task_key,
             network_egress=network_egress,
             max_turns=max_turns,
         )
@@ -287,6 +288,7 @@ async def _run_instance_attempt(
     import_policy: str,
     import_conflict_policy: str,
     skip_empty_import: bool,
+    task_key: Optional[str] = None,
     network_egress: Optional[str] = None,
     max_turns: Optional[int] = None,
 ) -> InstanceResult:
@@ -314,6 +316,7 @@ async def _run_instance_attempt(
             }
             event_callback(event)
 
+    docker_manager: Optional[DockerManager] = None
     try:
         # Phase 1: Validation
         logger.info(f"Starting instance {instance_id} with prompt: {prompt[:100]}...")
@@ -486,9 +489,8 @@ async def _run_instance_attempt(
                 except Exception:
                     pass
 
-            emit_event(
-                "instance.container_created", {"container_id": container.id[:12]}
-            )
+            # 'instance.container_created' is emitted by DockerManager via event_callback
+            # to avoid duplicate events. Do not emit it again here.
 
             # Note: Environment variables were already set pre-creation via plugin
 
@@ -498,6 +500,12 @@ async def _run_instance_attempt(
             # Strict tool verification: fail fast if required tools are missing
             required = ["git", "claude"]
             await docker_manager.verify_container_tools(container, required)
+
+            # Start heartbeat inside container for last_active tracking
+            try:
+                await docker_manager.start_heartbeat(container)
+            except Exception:
+                pass
 
             # Phase 4: AI Tool Execution
             logger.info(f"Executing {plugin.name} with model {model}")
@@ -539,22 +547,29 @@ async def _run_instance_attempt(
             emit_event("instance.result_collection_started", {})
 
             # Import work from workspace to host repository according to policy
-            has_changes = await git_ops.import_branch(
+            import_info = await git_ops.import_branch(
                 repo_path=repo_path,
                 workspace_dir=workspace_dir,
                 branch_name=branch_name,
                 import_policy=import_policy,
                 import_conflict_policy=import_conflict_policy,
                 skip_empty_import=skip_empty_import,
+                task_key=task_key,
+                run_id=run_id,
+                strategy_execution_id=strategy_execution_id,
             )
 
+            has_changes = str(import_info.get("has_changes", "false")).lower() == "true"
+            final_branch = import_info.get("target_branch") or branch_name if has_changes else import_info.get("target_branch")
+
             if has_changes:
-                emit_event("instance.branch_imported", {"branch_name": branch_name})
+                emit_event("instance.branch_imported", {"branch_name": final_branch})
             else:
-                logger.info(
-                    "No new commits, but branch created pointing to base branch"
-                )
-                emit_event("instance.no_changes", {"branch_name": branch_name})
+                if import_info.get("target_branch"):
+                    logger.info("No new commits; created branch pointing to base branch")
+                else:
+                    logger.info("No changes; skipped branch import per policy")
+                emit_event("instance.no_changes", {"branch_name": import_info.get("target_branch")})
 
             emit_event("instance.phase_completed", {"phase": "result_collection"})
 
@@ -571,7 +586,7 @@ async def _run_instance_attempt(
                 "instance.completed",
                 {
                     "success": True,
-                    "branch_name": branch_name,
+                    "branch_name": final_branch,
                     "duration_seconds": duration,
                     "metrics": metrics,
                 },
@@ -619,6 +634,10 @@ async def _run_instance_attempt(
                 # Stop container in background to avoid blocking result return
                 async def stop_container_background():
                     try:
+                        try:
+                            await docker_manager.stop_heartbeat(container)
+                        except Exception:
+                            pass
                         await docker_manager.stop_container(container)
                         emit_event(
                             "instance.container_stopped",
@@ -681,7 +700,7 @@ async def _run_instance_attempt(
 
             return InstanceResult(
                 success=True,
-                branch_name=branch_name,
+                branch_name=final_branch,
                 has_changes=has_changes,
                 final_message=final_message,
                 session_id=claude_session_id,
@@ -697,6 +716,9 @@ async def _run_instance_attempt(
                     str(workspace_dir) if workspace_dir and not has_changes else None
                 ),
                 status="success",
+                commit=import_info.get("commit"),
+                duplicate_of_branch=import_info.get("duplicate_of_branch"),
+                dedupe_reason=import_info.get("dedupe_reason"),
             )
 
         except TimeoutError as e:
@@ -838,4 +860,8 @@ async def _run_instance_attempt(
 
     finally:
         # Always close the Docker client to prevent connection leaks
-        docker_manager.close()
+        try:
+            if docker_manager:
+                docker_manager.close()
+        except Exception:
+            pass

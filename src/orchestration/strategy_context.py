@@ -63,7 +63,8 @@ class StrategyContext:
         self._strategy_name = strategy_name
         self._strategy_execution_id = strategy_execution_id
         self._instance_counter = 0
-        self._rng_seq: List[int] = []
+        self._rng_seq: List[float] = []
+        self._rng_index: int = 0
 
     # Deterministic utilities per spec
     def key(self, *parts: Any) -> str:
@@ -72,10 +73,29 @@ class StrategyContext:
     def now(self) -> float:
         return time.time()
 
-    def rand(self) -> int:
-        # Record a simple deterministic sequence value (placeholder)
-        v = int(time.time_ns() & 0xFFFFFFFF)
+    def rand(self) -> float:
+        """Deterministic pseudo-random in [0,1) with canonical event emission.
+
+        Uses a stable hash of (strategy_execution_id, seq) to derive a float in [0,1).
+        Emits strategy.rand canonical event with {seq, value}.
+        """
+        self._rng_index += 1
+        h = hashlib.sha256(f"{self._strategy_execution_id}:{self._rng_index}".encode("utf-8")).hexdigest()
+        # Take 8 hex bytes -> int -> normalize to [0,1)
+        v_int = int(h[:8], 16)
+        v = (v_int % 10_000_000) / 10_000_000.0
         self._rng_seq.append(v)
+        try:
+            if getattr(self._orchestrator, "event_bus", None) and getattr(self._orchestrator, "state_manager", None):
+                run_id = self._orchestrator.state_manager.current_state.run_id
+                self._orchestrator.event_bus.emit_canonical(
+                    type="strategy.rand",
+                    run_id=run_id,
+                    strategy_execution_id=self._strategy_execution_id,
+                    payload={"seq": self._rng_index, "value": v},
+                )
+        except Exception:
+            pass
         return v
 
     async def spawn_instance(
@@ -125,7 +145,7 @@ class StrategyContext:
         policy: Optional[Dict[str, Any]] = None,
     ) -> Handle:
         """Schedule a durable task and return a handle."""
-        # Compute canonical fingerprint (JCS-like sorted JSON)
+        # Compute canonical fingerprint (JCS-like sorted JSON) with nulls dropped
         canonical = {
             "schema_version": "1",
             "prompt": task.get("prompt", ""),
@@ -140,20 +160,38 @@ class StrategyContext:
             "system_prompt": task.get("system_prompt"),
             "append_system_prompt": task.get("append_system_prompt"),
             "runner": {
-                "container_limits": {
-                    "cpus": task.get("container_limits", {}).get("cpu_count", 2),
-                    "memory": f"{task.get('container_limits', {}).get('memory_gb', 4)}g",
-                },
                 "network_egress": task.get("network_egress", "online"),
                 "max_turns": task.get("max_turns"),
+                # Include container defaults for fingerprint stability
+                "container_cpu": getattr(getattr(self._orchestrator, "container_limits", None), "cpu_count", None),
+                "container_memory": f"{getattr(getattr(self._orchestrator, 'container_limits', None), 'memory_gb', 0)}g" if getattr(getattr(self._orchestrator, 'container_limits', None), 'memory_gb', None) is not None else None,
             },
         }
+        # Drop nulls recursively
+        def _drop_nulls(obj):
+            if isinstance(obj, dict):
+                return {k: _drop_nulls(v) for k, v in obj.items() if v is not None}
+            elif isinstance(obj, list):
+                return [_drop_nulls(v) for v in obj if v is not None]
+            else:
+                return obj
+        canonical = _drop_nulls(canonical)
         encoded = json.dumps(canonical, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
-        fingerprint = hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+        # On resume, prefer previously stored normalized input to avoid drift
+        stored_encoded = None
+        try:
+            if self._orchestrator and self._orchestrator.state_manager and self._orchestrator.state_manager.current_state:
+                stored = self._orchestrator.state_manager.current_state.tasks.get(key)
+                if stored and isinstance(stored.get("input"), str):
+                    stored_encoded = stored.get("input")
+        except Exception:
+            stored_encoded = None
+        encoded_to_use = stored_encoded or encoded
+        fingerprint = hashlib.sha256(encoded_to_use.encode("utf-8")).hexdigest()
 
         # Register task fingerprint
         try:
-            self._orchestrator.state_manager.register_task(key, fingerprint, encoded)
+            self._orchestrator.state_manager.register_task(key, fingerprint, encoded_to_use)
         except ValueError as e:
             # KeyConflictDifferentFingerprint
             raise

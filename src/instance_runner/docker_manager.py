@@ -84,6 +84,76 @@ class DockerManager:
         except Exception:
             # Ignore errors during close
             pass
+        
+    # Heartbeat task registry
+    _hb_tasks: Dict[str, asyncio.Task] = {}
+
+    async def start_heartbeat(self, container: Container, interval_s: float = 15.0) -> None:
+        """Start a periodic heartbeat writer inside the container at /home/node/.orc/last_active.
+
+        Emits DEBUG logs indicating exec_create/exec_start success for easier diagnostics.
+        """
+        if not container:
+            return
+        cid = getattr(container, "id", None) or ""
+        if not cid or cid in self._hb_tasks:
+            return
+        def _iso_millis(dt: datetime) -> str:
+            s = dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")
+            return s[:-3] + "Z"
+        async def _hb():
+            try:
+                while True:
+                    try:
+                        # Ensure directory exists and write timestamp
+                        exec1 = container.client.api.exec_create(container.id, "sh -lc 'mkdir -p /home/node/.orc'", stdout=False, stderr=False)
+                        try:
+                            logger.debug("heartbeat: exec_create mkdir id=%s", exec1.get("Id", "-"))
+                        except Exception:
+                            pass
+                        try:
+                            container.client.api.exec_start(exec1["Id"], detach=True)
+                            logger.debug("heartbeat: exec_start mkdir ok id=%s", exec1.get("Id", "-"))
+                        except Exception:
+                            pass
+                        ts = _iso_millis(datetime.now(timezone.utc))
+                        exec2 = container.client.api.exec_create(container.id, f"sh -lc 'printf %s {ts} > /home/node/.orc/last_active'", stdout=False, stderr=False)
+                        try:
+                            logger.debug("heartbeat: exec_create write id=%s ts=%s", exec2.get("Id", "-"), ts)
+                        except Exception:
+                            pass
+                        try:
+                            container.client.api.exec_start(exec2["Id"], detach=True)
+                            logger.debug("heartbeat: exec_start write ok id=%s", exec2.get("Id", "-"))
+                        except Exception:
+                            pass
+                    except Exception:
+                        pass
+                    await asyncio.sleep(interval_s)
+            except asyncio.CancelledError:
+                # One final heartbeat on cancel
+                try:
+                    ts = _iso_millis(datetime.now(timezone.utc))
+                    exec3 = container.client.api.exec_create(container.id, f"sh -lc 'printf %s {ts} > /home/node/.orc/last_active'", stdout=False, stderr=False)
+                    try:
+                        logger.debug("heartbeat: final exec_create id=%s ts=%s", exec3.get("Id", "-"), ts)
+                    except Exception:
+                        pass
+                    try:
+                        container.client.api.exec_start(exec3["Id"], detach=True)
+                        logger.debug("heartbeat: final exec_start ok id=%s", exec3.get("Id", "-"))
+                    except Exception:
+                        pass
+                except Exception:
+                    pass
+                return
+        self._hb_tasks[cid] = asyncio.create_task(_hb())
+
+    async def stop_heartbeat(self, container: Container) -> None:
+        cid = getattr(container, "id", None) or ""
+        task = self._hb_tasks.pop(cid, None)
+        if task:
+            task.cancel()
 
     async def _async_iter(self, blocking_iter):
         """Convert a blocking iterator to an async iterator."""
@@ -224,7 +294,7 @@ class DockerManager:
                     )
                     existing = await asyncio.wait_for(get_future, timeout=10)
 
-                    # Reload to get current status
+                    # Reload to get current status and mounts
                     await asyncio.wait_for(
                         loop.run_in_executor(None, existing.reload), timeout=10
                     )
@@ -233,30 +303,74 @@ class DockerManager:
                         time.monotonic() - exist_check_start,
                     )
 
-                    if existing.status == "running":
-                        logger.info(f"Reusing running container {container_name}")
-                        return existing
-                    elif existing.status in ["exited", "created"]:
-                        logger.info(f"Starting existing container {container_name}")
-                        await asyncio.wait_for(
-                            loop.run_in_executor(None, existing.start), timeout=20
-                        )
-                        # Wait for it to be running
-                        for _ in range(10):
-                            await asyncio.sleep(0.5)
-                            await loop.run_in_executor(None, existing.reload)
-                            if existing.status == "running":
-                                logger.info(
-                                    f"Existing container {container_name} is running"
-                                )
-                                return existing
-                        raise DockerError(
-                            f"Failed to start existing container {container_name}"
-                        )
+                    # Determine if we must enforce RO /workspace (spec: review tasks)
+                    require_ro = (str(import_policy).lower() == "never")
+                    try:
+                        import os as _os
+                        review_mode_env = _os.environ.get("ORCHESTRATOR_RUNNER__REVIEW_WORKSPACE_MODE", "rw").lower()
+                        require_ro = require_ro and (review_mode_env == "ro")
+                    except Exception:
+                        pass
+
+                    def _workspace_is_ro(cont) -> bool:
+                        try:
+                            mounts = cont.attrs.get("Mounts", [])
+                            for m in mounts:
+                                # Docker reports RW boolean (True if writable)
+                                if str(m.get("Destination")) == "/workspace":
+                                    return not bool(m.get("RW", True))
+                        except Exception:
+                            pass
+                        # Unknown -> assume not RO
+                        return False
+
+                    if require_ro and not _workspace_is_ro(existing):
+                        # Replace container to honor RO mount requirement
+                        try:
+                            old_id = getattr(existing, "id", "")[:12]
+                            if event_callback:
+                                event_callback({
+                                    "type": "runner.container.replaced",
+                                    "data": {"old_id": old_id, "reason": "ro_required"},
+                                })
+                            try:
+                                await asyncio.wait_for(loop.run_in_executor(None, existing.stop), timeout=15)
+                            except Exception:
+                                pass
+                            try:
+                                await asyncio.wait_for(loop.run_in_executor(None, existing.remove), timeout=15)
+                            except Exception:
+                                pass
+                            logger.info("Replaced existing container to enforce RO /workspace")
+                        except Exception:
+                            logger.warning("Failed to replace existing container; creating new")
+                        # Fall through to creation of a new one
                     else:
-                        logger.info(
-                            f"Container {container_name} in unexpected state {existing.status}, creating new"
-                        )
+                        # Reuse the existing container as-is (start if needed)
+                        if existing.status == "running":
+                            logger.info(f"Reusing running container {container_name}")
+                            return existing
+                        elif existing.status in ["exited", "created"]:
+                            logger.info(f"Starting existing container {container_name}")
+                            await asyncio.wait_for(
+                                loop.run_in_executor(None, existing.start), timeout=20
+                            )
+                            # Wait for it to be running
+                            for _ in range(10):
+                                await asyncio.sleep(0.5)
+                                await loop.run_in_executor(None, existing.reload)
+                                if existing.status == "running":
+                                    logger.info(
+                                        f"Existing container {container_name} is running"
+                                    )
+                                    return existing
+                            raise DockerError(
+                                f"Failed to start existing container {container_name}"
+                            )
+                        else:
+                            logger.info(
+                                f"Container {container_name} in unexpected state {existing.status}, creating new"
+                            )
                 except asyncio.TimeoutError:
                     logger.warning(
                         "Timeout while checking/starting existing container; proceeding to create new"
@@ -349,8 +463,8 @@ class DockerManager:
                 },
                 # Use explicit Mounts; avoid old volumes/binds ambiguity
                 "mounts": mounts,
-                # tmpfs mount for /tmp
-                "tmpfs": {"/tmp": "rw,size=256m"},
+                # tmpfs mount for /tmp (configurable)
+                "tmpfs": {"/tmp": f"rw,size={int(os.environ.get('ORCHESTRATOR_RUNNER__TMPFS_SIZE_MB', '512'))}m"},
                 "working_dir": "/workspace",
                 "read_only": True,  # Lock down filesystem except mounts
                 "user": "node",  # Run as non-root node user

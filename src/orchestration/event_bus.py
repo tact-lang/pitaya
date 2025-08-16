@@ -69,6 +69,18 @@ class EventBus:
         # File watching support
         self._file_watchers: List[asyncio.Task] = []
 
+        # Flush policy (default interval-based per spec)
+        # Env overrides: ORCHESTRATOR_EVENTS__FLUSH_POLICY=interval|per_event, ORCHESTRATOR_EVENTS__FLUSH_INTERVAL_MS
+        import os as _os
+        self._flush_policy = (_os.environ.get("ORCHESTRATOR_EVENTS__FLUSH_POLICY") or "interval").lower()
+        try:
+            self._flush_interval_ms = max(5, int(_os.environ.get("ORCHESTRATOR_EVENTS__FLUSH_INTERVAL_MS", "50")))
+        except Exception:
+            self._flush_interval_ms = 50
+        self._pending_canonical: List[Tuple[Dict[str, Any], Dict[str, Any]]] = []  # (envelope record without start_offset/payload, payload)
+        self._pending_lock = asyncio.Lock()
+        self._flusher_task: Optional[asyncio.Task] = None
+
     def _open_persist_file(self) -> None:
         """Open persistence file for appending events."""
         if self.persist_path:
@@ -80,30 +92,32 @@ class EventBus:
             try:
                 lock_path = self.persist_path.with_suffix(self.persist_path.suffix + ".lock")
                 self._lock_file = open(lock_path, "a+")
-                # Cross-platform best-effort lock
-                try:
-                    if os.name == "nt":
-                        import msvcrt
-                        msvcrt.locking(self._lock_file.fileno(), msvcrt.LK_NBLCK, 1)
-                    else:
-                        import fcntl
-                        fcntl.flock(self._lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-                except Exception:
-                    # If lock cannot be acquired, proceed but log
-                    logger.warning("Could not acquire events.jsonl lock; proceeding best-effort")
+                # Cross-platform strict lock
+                if os.name == "nt":
+                    import msvcrt
+                    msvcrt.locking(self._lock_file.fileno(), msvcrt.LK_NBLCK, 1)
+                else:
+                    import fcntl
+                    fcntl.flock(self._lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
             except Exception as e:
-                logger.warning(f"Failed to open lock file: {e}")
+                # Strict enforcement: fail fast if lock cannot be acquired
+                raise RuntimeError(f"Failed to acquire events.jsonl lock: {e}")
 
             # Open file in binary append mode to track byte offsets precisely
             self._persist_file = open(self.persist_path, "ab", buffering=0)
+            # Start flusher for interval policy
+            if self._flush_policy == "interval":
+                try:
+                    self._flusher_task = asyncio.create_task(self._flush_loop())
+                except RuntimeError:
+                    # No running loop yet; will start when emit_canonical is called within a loop
+                    self._flusher_task = None
 
     def emit(
         self,
         event_type: str,
         data: Dict[str, Any],
         instance_id: Optional[str] = None,
-        *,
-        persist: bool = True,
     ) -> None:
         """
         Emit an event to all subscribers.
@@ -116,7 +130,7 @@ class EventBus:
         # Create event with metadata
         event = {
             "type": event_type,
-            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "timestamp": self._utc_ts_ms_z(),
             "data": data,
         }
 
@@ -129,18 +143,7 @@ class EventBus:
         # Update statistics
         self.event_counts[event_type] += 1
 
-        # Persist legacy event if configured (for backward-compatible consumers)
-        if persist and self._persist_file:
-            line = (json.dumps(event, separators=(",", ":")) + "\n").encode("utf-8")
-            try:
-                start_offset = self._current_offset
-                self._persist_file.write(line)
-                self._persist_file.flush()
-                os.fsync(self._persist_file.fileno())
-                self._current_offset += len(line)
-                event["offset"] = start_offset
-            except (OSError, IOError) as e:
-                logger.error(f"Failed to persist event: {e}")
+        # Do not persist legacy events to events.jsonl; canonical-only per spec
 
         # Notify subscribers
         self._notify_subscribers(event)
@@ -153,6 +156,18 @@ class EventBus:
         except Exception:
             # Fallback to original single-line message if anything goes wrong
             logger.debug(f"Emitted event: {event_type}")
+
+    def _utc_ts_ms_z(self) -> str:
+        """Return UTC ISO-8601 timestamp with milliseconds and trailing Z."""
+        dt = datetime.now(timezone.utc)
+        # Python 3.11+: timespec='milliseconds'
+        try:
+            return dt.isoformat(timespec="milliseconds").replace("+00:00", "Z")
+        except TypeError:
+            s = dt.isoformat()
+            if s.endswith("+00:00"):
+                s = s[:-6] + "Z"
+            return s
 
     def emit_canonical(
         self,
@@ -167,7 +182,7 @@ class EventBus:
 
         Fields: {id, type, ts, run_id, strategy_execution_id, key?, start_offset, payload}
         """
-        ts = datetime.now(timezone.utc).isoformat()
+        ts = self._utc_ts_ms_z()
         record = {
             "id": str(uuid.uuid4()),
             "type": type,
@@ -177,25 +192,92 @@ class EventBus:
             **({"key": key} if key else {}),
             # start_offset added after write
         }
+        # Queue for flush according to policy
         if self._persist_file:
             try:
-                start_offset = self._current_offset
-                record_with_payload = {**record, "start_offset": start_offset, "payload": payload}
-                line = (json.dumps(record_with_payload, separators=(",", ":")) + "\n").encode("utf-8")
-                self._persist_file.write(line)
-                self._persist_file.flush()
-                os.fsync(self._persist_file.fileno())
-                self._current_offset += len(line)
+                if self._flush_policy == "per_event":
+                    # Write immediately
+                    self._write_canonical_immediate(record, payload)
+                else:
+                    # Interval policy: queue and ensure flusher running
+                    async def _enqueue():
+                        async with self._pending_lock:
+                            self._pending_canonical.append((record, payload))
+                    try:
+                        loop = asyncio.get_running_loop()
+                        loop.create_task(_enqueue())
+                    except RuntimeError:
+                        # No running loop; fall back to immediate write
+                        self._write_canonical_immediate(record, payload)
+                    # Start flusher if not running
+                    if not self._flusher_task or self._flusher_task.done():
+                        try:
+                            self._flusher_task = asyncio.create_task(self._flush_loop())
+                        except RuntimeError:
+                            pass
             except Exception as e:
-                logger.error(f"Failed to persist canonical event: {e}")
+                logger.error(f"Failed to enqueue canonical event: {e}")
         # Also push an in-memory mirror for UI (map to legacy fields)
+        # In-memory mirror in canonical form for in-process consumers
         mirror = {
             "type": type,
-            "timestamp": ts,
-            "data": payload,
+            "ts": ts,
+            "run_id": run_id,
+            "strategy_execution_id": strategy_execution_id,
+            **({"key": key} if key else {}),
+            "payload": self._sanitize(payload),
         }
         self.events.append(mirror)
         self._notify_subscribers(mirror)
+
+    def _sanitize(self, obj: Any) -> Any:
+        """Redact sensitive fields recursively (best-effort)."""
+        try:
+            if isinstance(obj, dict):
+                redacted: Dict[str, Any] = {}
+                for k, v in obj.items():
+                    kl = str(k).lower()
+                    if any(tok in kl for tok in ["token", "api_key", "apikey", "authorization", "password", "secret", "bearer"]):
+                        redacted[k] = "***"
+                    else:
+                        redacted[k] = self._sanitize(v)
+                return redacted
+            if isinstance(obj, list):
+                return [self._sanitize(v) for v in obj]
+            return obj
+        except Exception:
+            return obj
+
+    def _write_canonical_immediate(self, record: Dict[str, Any], payload: Dict[str, Any]) -> None:
+        try:
+            start_offset = self._current_offset
+            record_with_payload = {**record, "start_offset": start_offset, "payload": self._sanitize(payload)}
+            line = (json.dumps(record_with_payload, separators=(",", ":")) + "\n").encode("utf-8")
+            self._persist_file.write(line)
+            # Per-event durability
+            self._persist_file.flush()
+            os.fsync(self._persist_file.fileno())
+            self._current_offset += len(line)
+        except Exception as e:
+            logger.error(f"Failed to persist canonical event: {e}")
+
+    async def _flush_loop(self) -> None:
+        """Periodic flusher for interval policy."""
+        try:
+            while self._persist_file and self._flush_policy == "interval":
+                await asyncio.sleep(self._flush_interval_ms / 1000.0)
+                try:
+                    async with self._pending_lock:
+                        if not self._pending_canonical:
+                            continue
+                        # Write all pending in order
+                        for record, payload in self._pending_canonical:
+                            self._write_canonical_immediate(record, payload)
+                        self._pending_canonical.clear()
+                except Exception as e:
+                    logger.error(f"Error in event flusher: {e}")
+        except asyncio.CancelledError:
+            return
 
     def _notify_subscribers(self, event: Dict[str, Any]) -> None:
         """Notify all relevant subscribers of an event."""
@@ -294,27 +376,61 @@ class EventBus:
         events: List[Dict[str, Any]] = []
 
         # If offset specified, read from file (in binary mode to track byte offsets)
-        if offset is not None and self.persist_path and self.persist_path.exists():
+        if (offset is not None or timestamp is not None) and self.persist_path and self.persist_path.exists():
             try:
                 # Open in binary mode to ensure tell/seek operate on byte offsets
                 with open(self.persist_path, "rb") as f:
+                    # Derive starting offset from timestamp if provided
+                    current_offset = 0
+                    if timestamp is not None:
+                        # Scan to find first record with ts >= timestamp
+                        # Note: this is O(N); acceptable for v1
+                        from datetime import datetime as _dt
+                        ts_bytes = None
+                        try:
+                            # Ensure tz-aware parse; if naive, treat as UTC
+                            ts_target = timestamp if timestamp.tzinfo else timestamp.replace(tzinfo=timezone.utc)
+                        except Exception:
+                            ts_target = timestamp
+                        f.seek(0)
+                        while True:
+                            pos = f.tell()
+                            line = f.readline()
+                            if not line:
+                                break
+                            try:
+                                rec = json.loads(line.decode("utf-8").strip())
+                                ts_str = rec.get("ts")
+                                if ts_str:
+                                    try:
+                                        t = _dt.fromisoformat(ts_str.replace("Z", "+00:00"))
+                                        if t >= ts_target:
+                                            current_offset = rec.get("start_offset", pos)
+                                            break
+                                    except Exception:
+                                        pass
+                            except json.JSONDecodeError:
+                                pass
+                        # If not found, set to EOF
+                        if current_offset == 0:
+                            f.seek(0, os.SEEK_END)
+                            return [], f.tell()
+                    else:
+                        current_offset = offset or 0
                     # Validate offset is at a line boundary
-                    if offset > 0:
-                        f.seek(offset - 1)
-                        # Check if previous byte is newline
+                    if current_offset > 0:
+                        f.seek(current_offset - 1)
                         prev_byte = f.read(1)
                         if prev_byte != b"\n":
-                            # Not at line boundary, scan forward to next newline
                             while True:
                                 b = f.read(1)
                                 if not b or b == b"\n":
                                     break
-                            offset = f.tell()
+                            current_offset = f.tell()
                     else:
                         f.seek(0)
 
                     # Read lines from validated offset
-                    current_offset = offset
                     while True:
                         if limit and len(events) >= limit:
                             break
@@ -349,13 +465,15 @@ class EventBus:
 
             # Check timestamp
             if timestamp:
-                event_time = datetime.fromisoformat(event["timestamp"])
-                if event_time <= timestamp:
-                    continue
+                try:
+                    ts_s = event.get("ts") or event.get("timestamp")
+                    event_time = datetime.fromisoformat(str(ts_s).replace("Z", "+00:00")) if ts_s else None
+                    if event_time and event_time <= timestamp:
+                        continue
+                except Exception:
+                    pass
 
-            # Check offset
-            if offset is not None and event.get("offset", 0) <= offset:
-                continue
+            # Offset filtering applies to file-backed events; in-memory mirror has no byte offsets
 
             # Check event type
             if event_types and event["type"] not in event_types:
@@ -461,6 +579,32 @@ class EventBus:
         for task in self._file_watchers:
             task.cancel()
         self._file_watchers.clear()
+
+        # Flush any pending events (best-effort)
+        try:
+            if self._flusher_task and not self._flusher_task.done():
+                self._flusher_task.cancel()
+        except Exception:
+            pass
+        try:
+            # Synchronously flush pending if file open
+            if self._persist_file:
+                # Drain pending queue
+                try:
+                    pending: List[Tuple[Dict[str, Any], Dict[str, Any]]] = []
+                    try:
+                        # best-effort no-await acquire
+                        if self._pending_canonical:
+                            pending = list(self._pending_canonical)
+                            self._pending_canonical.clear()
+                    except Exception:
+                        pass
+                    for record, payload in pending:
+                        self._write_canonical_immediate(record, payload)
+                except Exception:
+                    pass
+        finally:
+            pass
 
         if self._persist_file:
             self._persist_file.close()

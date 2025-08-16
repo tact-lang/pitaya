@@ -10,8 +10,11 @@ import asyncio
 import os
 import logging
 import shutil
+import json
+import time
+from datetime import datetime
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Dict
 
 from . import GitError
 from ..utils.platform_utils import get_temp_dir
@@ -104,45 +107,6 @@ class GitOperations:
 
             logger.info(f"Creating isolated workspace at {workspace_dir}")
 
-            use_shared_clone = bool(os.environ.get("ORCHESTRATOR_GIT_SHARED_CLONE"))
-
-            # Prepare optional shared mirror for faster clones
-            reference_arg = []
-            if use_shared_clone:
-                try:
-                    mirror_base = base_dir / "orchestrator/cache"
-                    mirror_base.mkdir(parents=True, exist_ok=True)
-                    # Use a simple hash of repo path for cache key
-                    import hashlib
-                    key = hashlib.sha256(str(repo_path).encode("utf-8")).hexdigest()[:12]
-                    mirror = mirror_base / f"{key}.mirror"
-                    if not mirror.exists():
-                        # Create mirror
-                        init_cmd = [
-                            "git",
-                            "clone",
-                            "--mirror",
-                            str(repo_path),
-                            str(mirror),
-                        ]
-                        result = await self._run_command(init_cmd)
-                        if result[0] != 0:
-                            logger.warning(f"Failed to create mirror: {result[1]}")
-                    else:
-                        # Update mirror
-                        fetch_cmd = [
-                            "git",
-                            "-C",
-                            str(mirror),
-                            "fetch",
-                            "-p",
-                        ]
-                        await self._run_command(fetch_cmd)
-                    if mirror.exists():
-                        reference_arg = ["--reference-if-able", str(mirror)]
-                except Exception as e:
-                    logger.debug(f"Shared clone setup failed: {e}")
-
             # Clone with complete isolation (optionally using shared reference)
             # --branch: Start from specific branch
             # --single-branch: Only clone that branch, no other refs
@@ -154,7 +118,6 @@ class GitOperations:
                 base_branch,
                 "--single-branch",
                 "--no-hardlinks",
-                *reference_arg,
                 str(repo_path),
                 str(workspace_dir),
             ]
@@ -226,7 +189,11 @@ class GitOperations:
         import_policy: str = "auto",
         import_conflict_policy: str = "fail",
         skip_empty_import: bool = True,
-    ) -> bool:
+        *,
+        task_key: Optional[str] = None,
+        run_id: Optional[str] = None,
+        strategy_execution_id: Optional[str] = None,
+    ) -> Dict[str, Optional[str]]:
         """
         Import work from isolated workspace back to host repository.
 
@@ -240,7 +207,12 @@ class GitOperations:
             force: Force overwrite if branch already exists
 
         Returns:
-            True if changes were imported, False if no changes
+            Dict with keys:
+              - has_changes (bool as string 'true'/'false' for JSON friendliness handled by caller)
+              - target_branch (str)
+              - commit (str)
+              - duplicate_of_branch (str|None)
+              - dedupe_reason (str|None)
         """
         try:
             # Note: We do NOT create commits here. Claude Code handles its own commits.
@@ -262,20 +234,77 @@ class GitOperations:
             if rc != 0:
                 raise GitError(f"Failed to resolve git dir: {out}")
             from pathlib import Path as _P
-            git_dir = _P(out.strip()) if _P(out.strip()).is_absolute() else (repo_path / out.strip())
+            _raw = _P(out.strip()) if _P(out.strip()).is_absolute() else (repo_path / out.strip())
+            # Use realpath (resolve) per spec to avoid duplicate locks on symlinked repos
+            git_dir = _raw.resolve()
             lock_path = git_dir / ".orc_import.lock"
 
-            # Simple cross-platform exclusive lock (best-effort)
-            import os, sys
-            lock_fh = None
+            # Simple cross-platform exclusive lock with diagnostics and wait-loop
+            import sys
             lock_fh = open(lock_path, "a+")
+            lock_fh.seek(0)
+            # Best-effort metadata for diagnostics
+            holder_meta = {
+                "pid": os.getpid(),
+                "ts": datetime.utcnow().isoformat() + "Z",
+                "action": "import_branch",
+                "run_id": run_id,
+                "strategy_execution_id": strategy_execution_id,
+            }
+            # Try non-blocking first, then wait with heartbeat
+            start_wait = time.monotonic()
+            last_log = 0.0
+            timeout_env = os.environ.get("ORCHESTRATOR_IMPORT_LOCK_TIMEOUT_SEC")
+            max_wait = None
             try:
-                if sys.platform.startswith("win"):
-                    import msvcrt
-                    msvcrt.locking(lock_fh.fileno(), msvcrt.LK_NBLCK, 1)
-                else:
-                    import fcntl
-                    fcntl.flock(lock_fh.fileno(), fcntl.LOCK_EX)
+                max_wait = float(timeout_env) if timeout_env else None
+            except Exception:
+                max_wait = None
+
+            if sys.platform.startswith("win"):
+                import msvcrt
+                # Non-blocking attempt; if fails, sleep and retry
+                while True:
+                    try:
+                        msvcrt.locking(lock_fh.fileno(), msvcrt.LK_NBLCK, 1)
+                        break
+                    except Exception:
+                        now = time.monotonic()
+                        if (now - last_log) >= 2.0:
+                            logger.info(
+                                f"waiting_for_repo_lock path={lock_path} held_by={_read_lock_holder(lock_path)} waited_s={(now-start_wait):.1f}"
+                            )
+                            last_log = now
+                        if max_wait and (now - start_wait) > max_wait:
+                            raise GitError(
+                                f"Timeout waiting for repo import lock after {max_wait:.1f}s"
+                            )
+                        await asyncio.sleep(0.2)
+            else:
+                import fcntl
+                while True:
+                    try:
+                        fcntl.flock(lock_fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        break
+                    except BlockingIOError:
+                        now = time.monotonic()
+                        if (now - last_log) >= 2.0:
+                            logger.info(
+                                f"waiting_for_repo_lock path={lock_path} held_by={_read_lock_holder(lock_path)} waited_s={(now-start_wait):.1f}"
+                            )
+                            last_log = now
+                        if max_wait and (now - start_wait) > max_wait:
+                            raise GitError(
+                                f"Timeout waiting for repo import lock after {max_wait:.1f}s"
+                            )
+                        await asyncio.sleep(0.2)
+
+            # Write holder metadata (best-effort) once acquired
+            try:
+                lock_fh.seek(0)
+                lock_fh.truncate(0)
+                lock_fh.write(json.dumps(holder_meta))
+                lock_fh.flush()
             except Exception:
                 pass
 
@@ -303,13 +332,22 @@ class GitOperations:
                 raise GitError(f"Failed to get workspace HEAD: {ws_head_out}")
             workspace_head = ws_head_out.strip()
 
-            # If branch exists, idempotent pre-check: identical heads → treat as success
+            dedupe_reason: Optional[str] = None
+            duplicate_of_branch: Optional[str] = None
+
+            # If branch exists, idempotent pre-check: identical heads → treat as success (by_commit or same_task_provenance)
             if branch_exists:
                 br_head_cmd = ["git", "-C", str(repo_path), "rev-parse", f"refs/heads/{branch_name}"]
                 rc, br_head_out = await self._run_command(br_head_cmd)
                 if rc == 0 and br_head_out.strip() == workspace_head:
+                    # Check provenance note for same task_key
+                    note_rc, note_out = await self._run_command(["git", "-C", str(repo_path), "notes", "--ref=orchestrator", "show", workspace_head])
+                    if note_rc == 0 and task_key and (f"task_key={task_key}" in note_out):
+                        dedupe_reason = "same_task_provenance"
+                    else:
+                        dedupe_reason = "by_commit"
                     logger.info("Branch already matches workspace HEAD; idempotent success")
-                    return True
+                    return {"has_changes": "true", "target_branch": branch_name, "commit": workspace_head, "duplicate_of_branch": duplicate_of_branch, "dedupe_reason": dedupe_reason}
 
             # Suffix idempotency: if suffix policy and base name missing, but a suffixed branch points to ws HEAD
             if import_conflict_policy == "suffix" and not branch_exists:
@@ -331,8 +369,21 @@ class GitOperations:
                                 continue
                             import re
                             if re.match(rf"^{branch_name}(_[0-9]+)?$", ref) and obj == workspace_head:
-                                logger.info(f"Found existing suffixed branch {ref} with matching HEAD; idempotent success")
-                                return True
+                                # Check provenance for this task_key
+                                note_rc, note_out = await self._run_command(["git", "-C", str(repo_path), "notes", "--ref=orchestrator", "show", workspace_head])
+                                if note_rc == 0 and task_key and (f"task_key={task_key}" in note_out):
+                                    dedupe_reason = "same_task_provenance"
+                                    logger.info(f"Found existing suffixed branch {ref} with matching HEAD and provenance; idempotent success")
+                                    return {"has_changes": "true", "target_branch": ref, "commit": workspace_head, "duplicate_of_branch": ref, "dedupe_reason": dedupe_reason}
+                                else:
+                                    # Treat as crash_window resume: append provenance and return existing
+                                    duplicate_of_branch = ref
+                                    dedupe_reason = "crash_window"
+                                    logger.info(f"Found existing suffixed branch {ref} with matching HEAD but missing provenance; treating as resume")
+                                    # Proceed to append provenance after import path below
+                                    target_branch = ref
+                                    branch_exists = True
+                                    break
                 except Exception:
                     pass
 
@@ -357,10 +408,10 @@ class GitOperations:
             # Apply import policy
             if import_policy == "never":
                 logger.info("Import policy 'never'; skipping branch import")
-                return False
+                return {"has_changes": "false", "target_branch": None, "commit": base_commit or workspace_head, "duplicate_of_branch": None, "dedupe_reason": None}
             if import_policy == "auto" and skip_empty_import and not has_new_commits:
                 logger.info("No changes; skipping branch creation per policy")
-                return False
+                return {"has_changes": "false", "target_branch": None, "commit": base_commit or workspace_head, "duplicate_of_branch": None, "dedupe_reason": "by_commit_no_changes"}
 
             # Import commits from workspace
             logger.info(
@@ -401,7 +452,17 @@ class GitOperations:
                     raise GitError(f"Failed to import branch: {result[1]}")
 
                 logger.info(f"Successfully imported branch {target_branch}")
-                return True
+                # Write provenance note under lock
+                try:
+                    # UTC ISO-8601 with milliseconds + Z for ts
+                    _ts = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+                    note_lines = [
+                        f"task_key={task_key}; run_id={run_id}; strategy_execution_id={strategy_execution_id}; branch={target_branch}; ts={_ts}"
+                    ]
+                    await self._run_command(["git", "-C", str(repo_path), "notes", "--ref=orchestrator", "add", "-f", "-m", "\n".join(note_lines), workspace_head])
+                except Exception:
+                    pass
+                return {"has_changes": "true", "target_branch": target_branch, "commit": workspace_head, "duplicate_of_branch": duplicate_of_branch, "dedupe_reason": dedupe_reason}
             else:
                 # No new commits, create branch pointing to base
                 logger.info(
@@ -429,7 +490,7 @@ class GitOperations:
                     raise GitError(f"Failed to create branch: {result[1]}")
 
                 logger.info(f"Created branch {target_branch} pointing to {base_branch}")
-                return False  # No changes imported
+                return {"has_changes": "false", "target_branch": target_branch, "commit": base_sha, "duplicate_of_branch": duplicate_of_branch, "dedupe_reason": "by_commit_no_changes"}
 
         except GitError:
             raise
@@ -451,9 +512,18 @@ class GitOperations:
                             fcntl.flock(lock_fh.fileno(), fcntl.LOCK_UN)
                         except Exception:
                             pass
+                    # Clear holder metadata (best-effort) and close
+                    try:
+                        lock_fh.seek(0)
+                        lock_fh.truncate(0)
+                        lock_fh.flush()
+                    except Exception:
+                        pass
                     lock_fh.close()
             except Exception:
                 pass
+
+    
 
     async def cleanup_workspace(self, workspace_dir: Path) -> None:
         """
@@ -499,3 +569,21 @@ class GitOperations:
         except (OSError, asyncio.SubprocessError) as e:
             logger.error(f"Command failed: {e}")
             return 1, str(e)
+
+# Helper to read current holder metadata of lock (best-effort, may return raw string)
+def _read_lock_holder(lock_path: Path) -> str:
+    try:
+        with open(lock_path, "r") as fh:
+            data = fh.read().strip()
+            if not data:
+                return "{}"
+            try:
+                obj = json.loads(data)
+                pid = obj.get("pid")
+                ts = obj.get("ts")
+                act = obj.get("action")
+                return f"pid={pid} ts={ts} action={act}"
+            except Exception:
+                return data[:120]
+    except Exception:
+        return "<unavailable>"

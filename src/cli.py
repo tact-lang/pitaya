@@ -560,8 +560,10 @@ Examples:
                 cleaned = 0
 
                 for container in containers:
-                    labels = container.labels
-                    if labels.get("orchestrator.run_id") == run_id:
+                    labels = container.labels or {}
+                    # Accept both legacy and current label keys
+                    c_run_id = labels.get("run_id") or labels.get("orchestrator.run_id")
+                    if c_run_id == run_id:
                         try:
                             if args.dry_run:
                                 self.console.print(f"  Would remove container: {container.name}")
@@ -1033,14 +1035,16 @@ Examples:
         Returns:
             Exit code
         """
-        # Determine run_id for logging
+        # Determine run_id for logging (spec: run_YYYYMMDD_HHMMSS_<short8>)
         if args.resume:
             run_id = args.resume
         elif args.resume_fresh:
             run_id = args.resume_fresh
         else:
             timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-            run_id = f"run_{timestamp}"
+            import uuid as _uuid
+            short8 = _uuid.uuid4().hex[:8]
+            run_id = f"run_{timestamp}_{short8}"
 
         # Setup structured logging
         from .utils.structured_logging import setup_structured_logging
@@ -1253,7 +1257,7 @@ Examples:
         # Determine run mode
         if args.no_tui:
             # Headless mode
-            return await self._run_headless(args, full_config)
+            return await self._run_headless(args, run_id, full_config)
         else:
             # TUI mode
             return await self._run_with_tui(args, run_id, full_config)
@@ -1347,7 +1351,7 @@ Examples:
                 pass
 
     async def _run_headless(
-        self, args: argparse.Namespace, full_config: Dict[str, Any]
+        self, args: argparse.Namespace, run_id: str, full_config: Dict[str, Any]
     ) -> int:
         """Run orchestrator in headless mode."""
         output_mode = args.output or "streaming"
@@ -1355,39 +1359,40 @@ Examples:
         # Set up event subscriptions for output
         if output_mode == "streaming":
             # Maintain mapping from instance_id -> k<8> for canonical prefixes
-            import hashlib as _hashlib
+            # Compute from branch_name when instance events arrive to keep parity with orchestrator naming
+            import re as _re
             _inst_to_k8: dict[str, str] = {}
-
-            def _record_task_event(event):
-                et = event.get("type", "")
-                if et not in ("task.scheduled", "task.started"):
-                    return
-                data = event.get("data", {})
-                key = data.get("key")
-                iid = data.get("instance_id")
-                if key and iid:
-                    k8 = _hashlib.sha256(key.encode("utf-8")).hexdigest()[:8]
-                    _inst_to_k8[iid] = k8
-
-            # Subscribe to canonical task events to build mapping
-            self.orchestrator.subscribe("task.scheduled", _record_task_event)
-            self.orchestrator.subscribe("task.started", _record_task_event)
 
             # Subscribe to key events for console output with canonical prefix
             def print_event(event):
                 event_type = event.get("type", "unknown")
                 data = event.get("data", {})
                 iid = event.get("instance_id") or data.get("instance_id") or ""
-                inst5 = (iid[:5] if iid else "?????")
-                k8 = _inst_to_k8.get(iid, "????????")
-                prefix = f"k{k8}/inst-{inst5}: "
+                # Backfill k8 from branch_name when available
+                if iid and iid not in _inst_to_k8:
+                    bn = data.get("branch_name") or ""
+                    if isinstance(bn, str):
+                        m = _re.search(r"_k([0-9a-f]{8})$", bn)
+                        if m:
+                            _inst_to_k8[iid] = m.group(1)
+                # Only show canonical instance prefix when we actually have an instance context
+                if iid:
+                    inst5 = iid[:5]
+                    k8 = _inst_to_k8.get(iid, "????????")
+                    prefix = f"k{k8}/inst-{inst5}: "
+                else:
+                    prefix = ""
 
                 # Format event based on type
                 if event_type == "instance.started":
-                    self.console.print(f"{prefix}[blue]Starting[/blue] {data.get('prompt', '')[:80]}...")
+                    # Suppress runner-level duplicate (has attempt/total_attempts)
+                    if any(k in data for k in ("attempt", "total_attempts")):
+                        pass
+                    else:
+                        self.console.print(f"{prefix}[blue]Starting[/blue] {data.get('prompt', '')[:80]}...")
                 elif event_type == "instance.completed":
                     success = data.get("success", False)
-                    branch = data.get("branch_name", "unknown")
+                    branch = data.get("branch_name") or "no branch (no changes)"
                     duration = data.get("duration_seconds", 0)
                     if success:
                         self.console.print(f"{prefix}[green]✓ Completed:[/green] {branch} ({duration:.1f}s)")
@@ -1397,7 +1402,11 @@ Examples:
                     error = data.get("error", "Unknown error")
                     self.console.print(f"{prefix}[red]Failed:[/red] {error}")
                 elif event_type == "strategy.completed":
-                    self.console.print(f"{prefix}[green]Strategy completed[/green]")
+                    # Strategy events are run-scoped; do not prepend instance prefix
+                    # Avoid duplicate prints from canonical mirror by only handling the
+                    # legacy event that includes result_count/branch_names.
+                    if any(k in data for k in ("result_count", "branch_names")):
+                        self.console.print("[green]Strategy completed[/green]")
                 # Container lifecycle visibility (helpful for diagnosing stalls)
                 elif event_type == "instance.container_create_entry":
                     self.console.print(f"{prefix}[dim]docker:[/dim] preparing {data.get('container_name')} (image={data.get('image', '-')})")
@@ -1408,6 +1417,7 @@ Examples:
                 elif event_type == "instance.container_create_attempt":
                     self.console.print(f"{prefix}[dim]docker:[/dim] creating {data.get('container_name')}")
                 elif event_type == "instance.container_created":
+                    # Single source of truth from DockerManager via event_callback
                     self.console.print(f"{prefix}[green]docker:[/green] created id={data.get('container_id')}")
                 elif event_type == "instance.container_create_timeout":
                     self.console.print(f"{prefix}[red]docker:[/red] create timed out after {data.get('timeout_s')}s")
@@ -1469,6 +1479,7 @@ Examples:
                     base_branch=args.base_branch,
                     runs=args.runs,
                     strategy_config=strategy_config,
+                    run_id=run_id,
                 )
 
             # Output results based on mode
@@ -1520,7 +1531,7 @@ Examples:
 
             # Shutdown orchestrator to stop background tasks
             await self.orchestrator.shutdown()
-
+            
             return 0
 
         except KeyboardInterrupt:
@@ -1551,9 +1562,14 @@ Examples:
         self, args: argparse.Namespace, run_id: str, full_config: Dict[str, Any]
     ) -> int:
         """Run orchestrator with TUI display."""
-        # Create TUI display
+        # Create TUI display with configured refresh rate
+        try:
+            rr_ms = int(full_config.get("tui", {}).get("refresh_rate_ms", 100))
+            rr_sec = max(0.01, rr_ms / 1000.0)
+        except Exception:
+            rr_sec = 0.1
         self.tui_display = TUIDisplay(
-            console=self.console, refresh_rate=0.1, state_poll_interval=3.0
+            console=self.console, refresh_rate=rr_sec, state_poll_interval=3.0
         )
 
         # Start orchestrator and TUI together
