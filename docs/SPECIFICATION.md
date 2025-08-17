@@ -22,13 +22,13 @@ The tool transforms single-threaded AI coding into a parallel, strategy-driven p
 
 **RunnerResult** - The runner-level output from a completed task containing: branch artifact info, token usage, cost, execution time, and final message. Strategy-specific scoring/selection metadata lives in orchestration, not in runner results.
 
-**TaskResult (public API)** - Exposed via canonical events (`task.*`, `strategy.*`). V1 does not require a separate typed "TaskResult" structure beyond the canonical event schema. External consumers observe results through the event stream; internal orchestration may use an implementation type (e.g., `InstanceResult`).
+**TaskResult (public API)** - Exposed via canonical events (`task.*`, `strategy.*`). A separate typed "TaskResult" structure is not required beyond the canonical event schema. External consumers observe results through the event stream; internal orchestration uses an implementation type (e.g., `InstanceResult`).
 
 **Orchestration Run** - A complete execution of the orchestrator with a chosen strategy. Identified by a unique run ID, it tracks all scheduled tasks, aggregate metrics, and final results.
 
 **Event Stream** - Real-time runner events (internal) and canonical task/strategy events written by orchestration. The TUI consumes the public `task.*` and `strategy.*` events for monitoring.
 
-**Branch-per-Task** - By default (`import_policy="auto"` with `skip_empty_import=true`), a task creates a branch named `{strategy}_{run_id}_k{short8(qual_key)}` only if changes exist, enabling easy comparison and cherry-picking. With `import_policy="always"`, an empty branch may be created pointing at the base.
+**Branch-per-Task** - By default (`import_policy="auto"` with `skip_empty_import=true`), a task creates a branch named `{strategy}_{run_id}_k{short8(qual_key)}` only if changes exist, enabling easy comparison and cherry-picking. With `import_policy="always"`, an empty branch is created pointing at the base.
 
 Where `short8(y)` means the first 8 hex characters of `sha256(y)`, and `qual_key = f"{strategy_execution_id}|{durable_key}"` (durable key namespaced by the strategy execution). This prevents collisions when multiple strategy executions reuse the same durable key strings.
 
@@ -46,7 +46,7 @@ orchestrator "implement user authentication with OAuth2" --strategy simple --run
 
 Schedules 5 strategy executions (each strategy schedules one task). Concurrency is still bounded by `max_parallel_tasks`; excess tasks queue. Creates up to 5 branches with different implementations and displays real-time progress in TUI.
 
-### Best-of-N (inline scoring)
+### Best-of-N (Inline Scoring)
 
 ```python
 import json
@@ -70,7 +70,7 @@ async def best_of_n(prompt: str, base_branch: str, ctx):
 
     scored = []
     for r in ok:
-        # Select next base: prefer created branch when available, otherwise fall back to base_branch
+        # Select next base: use created branch when available; otherwise use base_branch
         bb = r["artifact"]["branch_final"] or base_branch
         review1 = await ctx.wait(
             ctx.run(
@@ -79,7 +79,7 @@ async def best_of_n(prompt: str, base_branch: str, ctx):
                     "base_branch": bb,
                     "import_policy": "never",
                 },
-                # Note: For durable idempotency prefer the generation handle's durable key
+                # Note: For durable idempotency, use the generation handle's durable key
                 # e.g., ctx.key("score", gen_key, "attempt-1"). Using instance_id here is illustrative only.
                 key=ctx.key("score", r["instance_id"], "attempt-1")
             )
@@ -91,7 +91,7 @@ async def best_of_n(prompt: str, base_branch: str, ctx):
                     {"prompt": "Return ONLY JSON {score:0..10,rationale:string} reviewing this result again:\n"
                                 f"{r['final_message']}",
                      "base_branch": bb, "import_policy": "never"},
-                    # Prefer: ctx.key("score", gen_key, "attempt-2") for durable lineage
+                    # Use: ctx.key("score", gen_key, "attempt-2") for durable lineage
                     key=ctx.key("score", r["instance_id"], "attempt-2")
                 )
             )
@@ -160,9 +160,9 @@ async def plan_score_implement(prompt: str, base_branch: str, ctx):
     best_score, best_plan = max(scored, key=lambda t: t[0])
 
     # Stage 3: implement with session/branch resume
-    # Prefer created branch when available; otherwise fall back to base
+    # Select base: use created branch when available; otherwise use base branch
     impl_base = best_plan["artifact"]["branch_final"] or best_plan["artifact"]["base"]
-    # Note: On resume, orchestration MAY override `resume_session_id` with the latest persisted session id.
+    # Note: On resume, orchestration uses the latest persisted session id.
     return await ctx.wait(ctx.run({
         "prompt": f"Implement this plan with all details:\n{best_plan['final_message']}",
         "base_branch": impl_base,
@@ -188,10 +188,14 @@ orchestrator --resume run_20250114_123456
 
 Each workflow produces branches in your repository, detailed logs, and a final summary with costs, tokens used, and execution times for informed decision-making.
 
-## 1.4 Non-Goals (v1)
+## 1.4 Non-Goals
 
-- Memory-aware admission control: V1 admits tasks using CPU tokens only; memory-based gating is out of scope.
-- Formal fsync/clock proofs: V1 relies on interval fsync (≤50ms) and atomic snapshot renames; deeper formalization is deferred.
+- Memory-aware admission control: the system admits tasks using CPU tokens only; memory-based gating is out of scope.
+- Formal fsync/clock proofs: the system relies on interval fsync (≤50ms) and atomic snapshot renames.
+
+## 1.5 Conventions and RFC Keywords
+
+The key words MUST, MUST NOT, REQUIRED, SHALL, and SHALL NOT in this document are to be interpreted as described in RFC 2119 and RFC 8174 when, and only when, they appear in all capitals. This specification restricts normative language to those keywords. Non‑normative behavior is labeled explicitly as optional or configurable.
 
 # 2. System Architecture
 
@@ -203,9 +207,9 @@ The orchestrator implements strict separation of concerns through three independ
 
 **Orchestration** - Coordinates multiple durable tasks according to strategies. Owns the event bus, manages parallel execution, and tracks global state. Depends only on Instance Runner's public API. Strategies schedule durable tasks with `ctx.run` and make decisions based on results. Provides branch names and container names to tasks.
 
-**TUI (Interface)** - Displays real-time progress and results. Subscribes to orchestration events for real-time updates and periodically polls state for reconciliation. Has zero knowledge of how tasks run or how strategies work - just visualizes events and state. Can be replaced with a web UI or CLI-only output without touching other layers.
+**TUI (Interface)** - Displays real-time progress and results. Subscribes to orchestration events for real-time updates and periodically polls state for reconciliation. Has zero knowledge of how tasks run or how strategies work—it visualizes events and state only. The TUI is replaceable with a web UI or CLI-only output without changes to other layers.
 
-Components are decoupled: the TUI can be replaced without modifying instance execution, and alternative AI tools can be supported by changing only the Instance Runner.
+Components are decoupled: replacing the TUI does not modify instance execution, and supporting alternative AI tools requires changing only the Instance Runner.
 
 ## 2.2 Event-Driven Communication
 
@@ -229,22 +233,22 @@ Events flow unidirectionally upward:
 - Orchestration writes strategy-level events (strategy.started, strategy.completed) and maps runner events to the public task lifecycle.
 - TUI consumes events to update displays
 
-Note: Orchestration may ingest runner events for live state and diagnostics, but ONLY canonical `task.*` and `strategy.*` events are written to `events.jsonl`. Runner events are routed to `runner.jsonl` (one line per `instance.*` event) and are not part of the public file contract. A single writer per run writes both files under `logs/<run_id>/`.
+Orchestration ingests runner events for live state and diagnostics, but ONLY canonical `task.*` and `strategy.*` events are written to `events.jsonl`. Runner events are routed to `runner.jsonl` (one line per `instance.*` event) and are not part of the public file contract. A single writer per run writes both files under `logs/<run_id>/`.
 
-The event system uses append-only file storage (`events.jsonl`) with monotonic byte offsets for position tracking. A single writer task computes the `start_offset` (byte position before writing the line), appends the JSON line, and flushes according to the configured flush policy (interval-based batching by default, or per-event with `--safe-fsync=per_event`). The event records this `start_offset`. Components can request events from a specific `start_offset` for recovery after disconnection.
+The event system uses append-only file storage (`events.jsonl`) with monotonic byte offsets for position tracking. A single writer task computes the `start_offset` (byte position before writing the line), appends the JSON line, and flushes according to the configured flush policy (interval-based batching by default, or per-event with `--safe-fsync=per_event`). The event records this `start_offset`. Clients request events from a specific `start_offset` when recovering after disconnection.
 
 **Offset & Writer Semantics**
 
 - Offsets are byte positions (not line counts). Readers MUST open in binary mode and advance offsets by the exact number of bytes consumed.
 - Readers MUST align to newline boundaries: if an offset lands mid-line, scan forward to the next `\n` before parsing.
 - Readers MUST tolerate a truncated final line (e.g., during a crash) by skipping it until a terminating newline appears.
-- Writers MUST be single-process per run (single-writer model), emit UTF-8 JSON per line, and flush according to the configured flush policy (interval-based batching by default; per-event when explicitly configured). The event carries the `start_offset` (byte position before the record was written). Implementations MAY expose this via CLI flag (e.g., `--safe-fsync=per_event`) or environment variable (e.g., `ORCHESTRATOR_EVENTS__FLUSH_POLICY=per_event`).
+- Writers MUST be single-process per run (single-writer model), emit UTF-8 JSON per line, and flush according to the configured flush policy (interval-based batching by default; per-event when explicitly configured). The event carries the `start_offset` (byte position before the record was written). This is configured via environment variable (e.g., `ORCHESTRATOR_EVENTS__FLUSH_POLICY=per_event`).
   The single-writer invariant is enforced by an OS lockfile `events.jsonl.lock` (see Event Log Contract below).
-  Implementations MAY also bound the number of events flushed per interval by a configured batch size for latency control (see `events.flush_policy.max_batch`).
+  The number of events flushed per interval is bounded by a configured batch size for latency control (see `events.flush_policy.max_batch`).
 
 **Event Envelope**
 
-- Public events in `events.jsonl`: `task.scheduled`, `task.started`, `task.progress`, `task.completed`, `task.failed`, `task.interrupted`, `strategy.started`, `strategy.completed`, and `strategy.rand`. See the “Minimum Payload Fields” section for the canonical schema and required payload fields. The public namespace is `task.*` and `strategy.*`; additional event types MAY exist but MUST have normative schemas.
+- Public events in `events.jsonl`: `task.scheduled`, `task.started`, `task.progress`, `task.completed`, `task.failed`, `task.interrupted`, `strategy.started`, `strategy.completed`, and `strategy.rand`. See the “Minimum Payload Fields” section for the canonical schema and required payload fields. The canonical namespace includes `task.*`, `strategy.*`, and the diagnostic `strategy.debug`. Only `task.*` and `strategy.*` are normative; `strategy.debug` is informational and non-normative.
 - Envelope fields are authoritative for `ts`, `run_id`, and `strategy_execution_id`. Payloads MUST NOT duplicate these.
 - Each event includes `{id, type, ts, run_id, strategy_execution_id, key?, start_offset, payload}`.
   - For `task.*` events, `key` is REQUIRED.
@@ -278,15 +282,13 @@ The event system uses append-only file storage (`events.jsonl`) with monotonic b
   - Before hashing, drop all keys whose value is `null`
   - Normalize defaults before hashing (see §6.1.1) and include `schema_version` to avoid spurious conflicts across releases
   - Compute the SHA‑256 over the UTF‑8 bytes of a canonical JSON representation.
-    Implementations SHOULD use RFC 8785 (JCS). When unavailable, a stable
-    canonicalization with sorted keys, no whitespace, and consistent number
-    formatting MAY be used as a compatible alternative.
+    Canonicalization uses JSON with sorted keys, no extra whitespace, and consistent number formatting (JCS‑equivalent semantics).
   The engine MUST reject scheduling a task with the same key if the fingerprint differs from previously recorded history for that key (`KeyConflictDifferentFingerprint`). On resume, orchestration MUST reuse the previously stored normalized input when computing/validating fingerprints to avoid drift from default changes.
 - Runner-specific events are not written to `events.jsonl` and instead go to `runner.jsonl`.
 
 Components follow a strict communication pattern: downward direct calls (Orchestration → Runner) are allowed for control flow, while upward communication (Runner → Orchestration, any → TUI) happens primarily through events, with periodic state polling for reconciliation. The `subscribe()` function sets up file watching on `events.jsonl`, enabling capabilities like multiple processes monitoring the same run by tailing the event file or replaying events for debugging.
 
-### Minimum Payload Fields (normative)
+### Minimum Payload Fields
 
  Minimum payload fields per event type (MUST be present, alongside envelope fields `run_id`, `strategy_execution_id`, and `start_offset`):
 
@@ -294,14 +296,14 @@ Components follow a strict communication pattern: downward direct calls (Orchest
 - `task.started`: `{ key, instance_id, container_name, model }`
 - `task.progress`: `{ key, instance_id, phase, activity?, tool? }` where `phase` is an enum among `{workspace_preparing, container_creating, container_env_preparing, container_env_prepared, container_created, claude_starting, tool_use, assistant, system, result_collection, branch_imported, no_changes, cleanup}`. `activity` is an optional human-readable string; `tool` is the tool name when `phase=tool_use`.
 - `task.completed`: `{ key, instance_id, artifact, metrics, final_message, final_message_truncated, final_message_path }`  # success only
-  `final_message` MAY be truncated per a configured byte budget. When truncated, `final_message_truncated=true` and `final_message_path` MUST be a run‑relative path under `logs/<run_id>/` (no absolute host paths) and is retained according to the events retention policy; otherwise `final_message_truncated=false` and `final_message_path` MAY be empty. Implementations MAY expose the budget via a configuration file or environment variable (e.g., `ORCHESTRATOR_EVENTS__MAX_FINAL_MESSAGE_BYTES`).
+  `final_message` is truncated when it exceeds a configured byte budget. When truncated, `final_message_truncated=true` and `final_message_path` MUST be a run‑relative path under `logs/<run_id>/` (no absolute host paths) and is retained according to the events retention policy; otherwise `final_message_truncated=false` and `final_message_path` is empty. The budget is configured via environment variable (e.g., `ORCHESTRATOR_EVENTS__MAX_FINAL_MESSAGE_BYTES`).
 - `task.failed`: `{ key, instance_id, error_type, message, network_egress? }` where `error_type ∈ { docker, api, network, git, timeout, session_corrupted, auth, unknown }` (normative and closed set) and `network_egress` (optional) is one of `online|offline|proxy` when relevant.
 - `task.interrupted`: `{ key, instance_id }`
 - `strategy.started`: `{ name, params }`
 - `strategy.completed`: `{ status, reason? }` where `status ∈ {"success","failed","canceled"}` and `reason` is an optional short summary for failed/canceled strategies.
 - `strategy.rand`: `{ seq, value }` where `seq` is a monotonically increasing integer per strategy execution, and `value` is a float in [0,1).
 
-### Strategy Status Semantics (normative)
+### Strategy Status Semantics
 
 - `success`: At least one scheduled child task for the strategy execution completed with status `success`.
 - `failed`: All scheduled child tasks reached terminal states and none succeeded (i.e., all `failed` or `interrupted`).
@@ -311,15 +313,15 @@ Note: `interrupted` is not success; success requires at least one `task.complete
 
 TUI and summaries MUST use the same criteria to avoid ambiguity.
 
-### Event Log Contract (normative)
+### Event Log Contract
 
 - Exactly one writer per run: enforced by `logs/<run_id>/events.jsonl.lock` held for the run duration (OS-level exclusive lock).
 - Writer computes `start_offset` as the byte position before writing each line, appends UTF‑8 JSON + `\n`, and flushes per configured policy:
   - Default `interval`: batch and fsync every `events.flush_policy.interval_ms` or `max_batch`.
   - `max_batch` is configurable (default 256) via environment variable `ORCHESTRATOR_EVENTS__FLUSH_MAX_BATCH`.
-  - Optional `per_event`: fsync after each event; slower but safest.
+  - `per_event`: fsync after each event; slower but safest.
 - Truncated last line rule: readers MUST skip any unterminated last line until a newline appears.
-- Snapshots (`state.json`) persist a durable offset reference. Implementations MAY store either the `start_offset` of the last applied event or the file position immediately after it ("next offset"; named `last_event_offset` in this implementation). On recovery, readers MUST resume from a position that guarantees replay of only events not yet applied.
+- Snapshots (`state.json`) persist a durable offset reference: the `start_offset` of the last applied event (`last_event_start_offset`). On recovery, readers resume from this position.
 - Timestamp queries: `get_events_since(ts)` MUST locate the first event with `ts ≥ T` (by scanning or index) and return from that event’s `start_offset` to avoid partial-line reads. If `ts` refers to an event that was written but not yet fsynced (writer crash window), readers MUST start from the last durable `start_offset` ≤ that event. Snapshots (`state.json.last_event_start_offset`) MUST reference only fsynced offsets.
 - Sanitization: Before writing any record to `events.jsonl`, orchestration MUST pass the entire event object (envelope + payload) through the recursive sanitizer to redact secrets.
 
@@ -343,7 +345,7 @@ The system follows a clear request/response + event stream pattern:
 
 **State Queries**
 
-- TUI can query Orchestration for current state snapshots
+- TUI queries Orchestration for current state snapshots
 - Orchestration maintains authoritative state derived from events
 - No component stores UI state - everything derives from event stream
 
@@ -355,11 +357,11 @@ This unidirectional flow prevents circular dependencies and makes the system pre
 
 **asyncio** - Natural fit for I/O-bound operations (Docker commands, git operations, API calls). Enables high concurrency for managing hundreds of container operations and git commands without thread complexity. Built-in primitives for coordination (locks, queues, events).
 
-**docker-py 7.1.0** - Python library for Docker container management. Provides programmatic control over container lifecycle, resource limits, and cleanup. The Docker daemon version is less critical as we use standard features compatible with any recent version.
+**docker-py 7.1.0** - Python library for Docker container management. Provides programmatic control over container lifecycle, resource limits, and cleanup. Supports Docker daemon 20.10+.
 
 **Local Docker image** - The runner uses a local image named `claude-code`. Build it from this repo: `docker build -t claude-code .`.
 
-**uv** - Lightning-fast Python package and project manager. Replaces pip, pip-tools, pipenv, poetry, and virtualenv with a single tool. Near-instant dependency resolution and project setup. Written in Rust for performance. Recommended: latest stable uv; dependency versions are pinned via `uv.lock` for reproducibility.
+**uv** - Lightning-fast Python package and project manager. Replaces pip, pip-tools, pipenv, poetry, and virtualenv with a single tool. Near-instant dependency resolution and project setup. Written in Rust for performance. Use the latest stable uv; dependency versions are pinned via `uv.lock` for reproducibility.
 
 **Git** - Natural version control for code outputs. Branch-per-task model enables easy comparison. Local operations are fast and reliable. Universal developer familiarity.
 
@@ -411,7 +413,7 @@ The Runner exposes a single async function `run_instance()` that accepts:
   Mapping: the strategy/task input field `resume_session_id` maps directly to this runner parameter `session_id`.
   
 Task vs instance: The orchestration schedules tasks; the runner executes each task as an instance. `instance_id` uniquely identifies the runner instance executing a task and is surfaced in container labels and runner logs.
-- **session_group_key**: Optional key to group tasks that should share the same persistent session volume; defaults to the task key if not provided
+- **session_group_key**: Optional key to group tasks that share the same persistent session volume; defaults to the task key if not provided
 - **event_callback**: Function to receive real-time events
 - **container_timeout_seconds**: Maximum execution time (default: 3600). Alias: `timeout_seconds` accepted for backward compatibility.
 - **container_cpu**: CPU cores for the container
@@ -469,11 +471,11 @@ Each phase emits structured events for observability. The pipeline is designed f
 
 Key architectural boundaries:
 
-- Container naming comes from orchestration (runner doesn't generate IDs)
+- Runner receives container names from orchestration (the runner does not generate IDs)
 - Git isolation happens through separate clones, not shared mounts
 - Each instance works in complete isolation
 
-The runner executes these phases mechanically without understanding the broader orchestration context. It doesn't know why containers are named a certain way - it just follows the contract.
+The runner executes these phases mechanically without interpreting orchestration semantics. It follows the contract defined by orchestration.
 
 ## 3.4 Docker Management
 
@@ -486,11 +488,11 @@ Containers follow a careful lifecycle designed to provide complete isolation whi
 ```bash
 # Create temporary directory for this task (key-derived)
 # Note: Orchestration computes short hashes cross-platform (Python), not via shell utilities.
-# Provided environment vars (normative):
+# Provided environment vars:
 #   TASK_KEY              # durable task key (fully qualified)
 #   SESSION_GROUP_KEY     # optional session group key; defaults to TASK_KEY
 #   KHASH                 # short8(TASK_KEY) = first 8 hex of SHA-256
-#   GHASH                 # per §3.4 GHASH (run/global scope)
+#   GHASH                 # per §3.5 GHASH (run/global scope)
 
 WORKSPACE_DIR="/tmp/orchestrator/${run_id}/k_${KHASH}"
 mkdir -p "$WORKSPACE_DIR"
@@ -509,7 +511,7 @@ tmpfs → /tmp
 
 Platform-specific mount handling ensures compatibility. The named volume (pattern: `orc_home_{run_id}_g{GHASH}`) provides persistent storage for Claude Code's session data, ensuring sessions survive container restarts and enabling cross-task continuity when the same session group key is used. Note: The implementation uses `/home/node` due to the base Docker image using the `node` user.
 
-`GHASH` (normative):
+`GHASH`:
   • Run scope (default): `GHASH = short8( sha256( JCS({"session_group_key": EFFECTIVE_SGK}) ) )`, where `EFFECTIVE_SGK = session_group_key if provided else durable task key`. Namespacing is provided by the run-scoped volume name `orc_home_{run_id}_g{GHASH}`.
   • Global scope: `GHASH = short8( sha256( JCS({"session_group_key": "...", "plugin": "...", "model": "..."}) ) )` to avoid cross‑tool contamination. Here, `model` is the resolved concrete model ID (not a friendly alias from `models.yaml`).
 When `runner.session_volume_scope="global"`, the named volume omits the `run_id` prefix and uses only `GHASH`. Global scope is advanced and requires `--allow-global-session-volume`.
@@ -554,18 +556,18 @@ The `--read-only` flag locks down the entire container filesystem except for exp
 
 Writable mounts: `/home/node` is a writable named volume that persists across container restarts and is used for session state. `/tmp` is a writable tmpfs. The container root filesystem remains read‑only.
 
-When a task declares `import_policy="never"`, the runner SHOULD mount the `/workspace` path as read-only when `runner.review_workspace_mode=ro`. Default is `runner.review_workspace_mode=ro`. If `reuse_container=True` would prevent a read-only remount, the runner MUST start a fresh container (ignoring `reuse_container`) to honor read-only when `review_workspace_mode=ro`. Review/scoring tasks MAY always write to `/tmp` and `/home/node`. When `review_workspace_mode=ro`, attempted writes to `/workspace` MUST error fast with a clear message. Plugins MAY override scratch locations to `/tmp` to enable strict RO mode.
+When a task declares `import_policy="never"`, the runner MUST mount the `/workspace` path as read-only when `runner.review_workspace_mode=ro` (default `ro`). If `reuse_container=True` would prevent a read-only remount, the runner MUST start a fresh container (ignoring `reuse_container`) to honor read-only when `review_workspace_mode=ro`. Review/scoring tasks write only to `/tmp` and `/home/node`. When `review_workspace_mode=ro`, attempted writes to `/workspace` MUST error fast with a clear message. Plugins write scratch output to `/tmp` in strict RO mode.
 
 **Container Reuse**: When `reuse_container=True`:
 
-- If container exists and is running: Execute Claude Code in existing container
-- If container exists but stopped: Start container, then execute  
-- If container doesn't exist: Create new container as above
+- If a container exists and is running: Execute Claude Code in the existing container
+- If a container exists but is stopped: Start the container, then execute
+- If no container exists: Create a new container as above
 
-**Runner Decision Tree (Normative)**:
+**Runner Decision Tree**:
 
 1. If `import_policy="never"` and `review_workspace_mode="ro"`, **force** RO `/workspace`.
-2. If a container exists but can't be remounted RO, **replace** it (same name, same session volume) and log `runner.container.replaced`.
+2. If a container exists but cannot be remounted read-only, **replace** it (same name, same session volume) and log `runner.container.replaced`.
 
 Priority order when constraints conflict:
 
@@ -575,7 +577,7 @@ Priority order when constraints conflict:
 
 If (1) and (3) conflict, the runner MUST stop and remove the existing container and create a fresh one with the same deterministic `container_name`, attached to the same session volume, to satisfy read-only.
 
-Container replacement protocol (normative): To honor mount mode changes (e.g., switching to read‑only for review tasks), the runner MUST stop and remove the existing container and re-create a new one with the same `container_name` and the same session volume. The new container MUST apply current task labels (`run_id`, `strategy_execution_id`, `task_key`, `instance_id`). Emit a runner‑internal event `runner.container.replaced` with `{ old_id, new_id, reason: "ro_required" }`. Public `task.*` events are unaffected. Retention timers apply to the latest active container; replaced containers are not retained.
+Container replacement protocol: To honor mount mode changes (e.g., switching to read‑only for review tasks), the runner MUST stop and remove the existing container and re-create a new one with the same `container_name` and the same session volume. The new container MUST apply current task labels (`run_id`, `strategy_execution_id`, `task_key`, `instance_id`). Emit a runner‑internal event `runner.container.replaced` with `{ old_id, new_id, reason: "ro_required" }`. Public `task.*` events are unaffected. Retention timers apply to the latest active container; replaced containers are not retained.
 
 **Container Persistence**: Containers are kept after execution to enable Claude Code session resume:
 
@@ -583,9 +585,9 @@ Container replacement protocol (normative): To honor mount mode changes (e.g., s
 - Successful instances with `finalize=True`: Container is stopped (not removed) after successful completion and retained for 2 hours (configurable)
 - Successful instances with `finalize=False`: Container continues running until explicitly stopped by the operator or via an orchestration cleanup command; there is no implicit auto‑stop
 
-This persistence is crucial because Claude Code maintains session state inside the container. If an instance times out after partial work, the session can be resumed by using the same container with the preserved session. Operators may stop non‑finalized containers manually via Docker or separate operational tooling; the orchestrator does not auto‑stop them by default. When the runner deletes the workspace, it MUST first fsync its own `runner.jsonl` completion record; public events MUST NOT include host workspace paths.
+This persistence is crucial because Claude Code maintains session state inside the container. If an instance times out after partial work, the session is resumed by using the same container with the preserved session. The orchestrator does not auto‑stop non‑finalized containers by default; operators manage them explicitly. When the runner deletes the workspace, it MUST first fsync its own `runner.jsonl` completion record; public events MUST NOT include host workspace paths.
 
-**Network Egress (normative)**:
+**Network Egress**:
 
 - `online` (default): standard Docker networking; outbound internet allowed.
 - `offline`: containers MUST run with `--network none`. Strategies MUST NOT request `offline` unless explicitly configured by the user/environment.
@@ -593,9 +595,14 @@ This persistence is crucial because Claude Code maintains session state inside t
 
 Failure classification for offline runs: if a task runs with `offline` and fails due to blocked egress, classify as `error_type="network"`, set `network_egress="offline"` in the payload, and include `egress=offline` in the human message for clarity.
 
-**Session Groups**: To maintain session continuity across multiple tasks (e.g., plan → implement → refine), strategies may supply a `session_group_key` in `ctx.run`. Containers and the `/home/node` named volume are keyed by this group (default = the task key). Passing the same `session_group_key` for related tasks ensures they share the same session volume; passing a different key isolates sessions. Volume scope is configurable via `runner.session_volume_scope = "run" | "global"` (default: `"run"`). In `"global"` scope, the volume name omits the `run_id` so sessions can be reused across runs, but this requires explicit `--allow-global-session-volume` to prevent cross-contamination between different model/tool configs; in `"run"` scope, volumes are run‑scoped.
+**Session Groups**: To maintain session continuity across multiple tasks (e.g., plan → implement → refine), strategies supply a `session_group_key` in `ctx.run`. Containers and the `/home/node` named volume are keyed by this group (default = the task key). Passing the same `session_group_key` for related tasks ensures they share the same session volume; passing a different key isolates sessions. Volume scope is configurable via `runner.session_volume_scope = "run" | "global"` (default: `"run"`). In `"global"` scope, the volume name omits the `run_id` so sessions can be reused across runs; this requires explicit `--allow-global-session-volume` to prevent cross-contamination between different model/tool configs; in `"run"` scope, volumes are run‑scoped.
 
-Global scope naming (normative): `orc_home_g{GHASH}`.
+Global scope naming: `orc_home_g{GHASH}`.
+
+Session group hashing:
+
+- Run scope (default): `GHASH = short8(sha256(JCS({"session_group_key": EFFECTIVE_SGK})))` and the home volume name is `orc_home_{run_id}_g{GHASH}`.
+- Global scope: requires `--allow-global-session-volume`; `GHASH = short8(sha256(JCS({"session_group_key": EFFECTIVE_SGK, "plugin": PLUGIN, "model": MODEL})))` and the home volume name is `orc_home_g{GHASH}`.
 
 **Resource Limits**: Each container gets configurable CPU/memory limits with sensible defaults:
 
@@ -652,7 +659,18 @@ Session resumption is handled via Claude Code's `--resume` CLI flag with the ses
 
 The Docker management layer remains agnostic about orchestration strategies or git workflows. It simply provides isolated execution environments with proper resource controls and session preservation. The true isolation comes from each container working with its own complete git repository, with no possibility of cross-contamination between instances or with the host system.
 
-## 3.5 Git Operations
+## 3.5 Container Environment
+
+Runner MUST set the following environment variables inside the container for observability and correlation:
+
+- `TASK_KEY`: Durable task key used by orchestration
+- `SESSION_GROUP_KEY`: Session group key used to scope the home volume
+- `KHASH`: `short8(sha256(task_key))` or empty when unavailable
+- `GHASH`: `short8(sha256(session_group_key or fallback))`
+
+On Linux with SELinux enabled, the workspace bind mount MUST be labeled with `:z` (and `:z,ro` when review workspace mode is read-only). The home directory MUST be a named Docker volume scoped as documented (per-run by default).
+
+## 3.6 Git Operations
 
 Git operations use an isolation strategy that provides complete separation between parallel instances while maintaining efficiency. Each AI agent works in complete isolation, seeing only the branch it needs to modify, without the possibility of interfering with other instances or accessing the host repository.
 
@@ -666,23 +684,23 @@ git clone --branch <base-branch> --single-branch --no-hardlinks \
           /path/to/host/repo /tmp/orchestrator/${run_id}/k_${KHASH}
 cd /tmp/orchestrator/${run_id}/k_${KHASH}
 git remote remove origin        # Complete disconnection from source
-# Store base branch reference for later
+# Store base branch reference
 echo "<base-branch>" > .git/BASE_BRANCH
 git rev-parse HEAD > .git/BASE_COMMIT
 ```
 
 Let's break down why each flag matters:
 
-- `--branch <base-branch> --single-branch` ensures the clone contains ONLY the target branch. No other refs exist in `.git/refs/heads/`. The agent literally cannot see any other branches because they don't exist in its universe
+- `--branch <base-branch> --single-branch` ensures the clone contains only the target branch. No other refs exist in `.git/refs/heads/`; the agent has no visibility into other branches.
 - `--no-hardlinks` forces Git to physically copy all object files instead of using filesystem hardlinks. This prevents any inode-level crosstalk between repositories - critical for true isolation
-- `git remote remove origin` completes the isolation. With no remote configured, the agent cannot push anywhere even if it tried
+- `git remote remove origin` completes the isolation. With no remote configured, pushing to a remote is impossible.
 - Store the base branch reference to preserve traceability of change origin
 
-**Isolation Mode (V1)**:
+**Isolation Mode**:
 
-- `full_copy` only: The runner MUST clone with `--no-hardlinks --single-branch` and MUST remove any remotes. The runner MUST NOT configure alternates, partial clone, or shared objects in V1. Monorepo performance improvements (e.g., sparse checkout) may be introduced post‑V1.
+- `full_copy` only: The runner MUST clone with `--no-hardlinks --single-branch` and MUST remove any remotes. The runner MUST NOT configure alternates, partial clone, or shared objects.
 
-**Agent Commits**: The AI agent works directly on the base branch in its isolated clone. It doesn't create new branches - it simply commits its changes to the only branch it can see. This simplifies the agent's task and ensures predictable behavior.
+**Agent Commits**: The AI agent works directly on the base branch in its isolated clone. It does not create new branches; it commits changes to the single available branch. This simplifies the agent's task and ensures predictable behavior.
 
 **Container Workspace**: Each container receives its isolated clone as a volume mount:
 
@@ -707,11 +725,11 @@ docker run \
   claude-code
 ```
 
-The SELinux flag is only applied on Linux systems where it's needed. The `--read-only` flag locks down everything except the mounted volumes. The container can only modify its isolated git repository.
+Apply the SELinux flag only on Linux systems with SELinux enabled. The `--read-only` flag locks down everything except the mounted volumes. The container MUST modify only its isolated git repository.
 
-Note: This minimal example omits the `/home/node` named volume and `/tmp` tmpfs shown in 3.4; those mounts are required in the full runner configuration.
+Note: This minimal example omits the `/home/node` named volume and `/tmp` tmpfs shown in 3.5; those mounts are required in the full runner configuration.
 
-Reviewer scratch space (normative): For review/scoring tasks using `import_policy="never"` and default `review_workspace_mode="ro"`, tools MUST write any temporary files to `/tmp` or `/home/node` and MUST NOT write to `/workspace`.
+Reviewer scratch space: For review/scoring tasks using `import_policy="never"` and default `review_workspace_mode="ro"`, tools MUST write any temporary files to `/tmp` or `/home/node` and MUST NOT write to `/workspace`.
 
 **Branch Import After Completion**: After the container exits, as the final step of `run_instance()`, Git fetch from a local filesystem path is used instead of push coordination:
 
@@ -735,7 +753,7 @@ if git show-ref --verify --quiet "refs/heads/${branch_name}"; then
   fi
 fi
 
-## Provenance-based suffix idempotency (see §4.7)
+### Provenance-Based Suffix Idempotency
 if [ "${import_conflict_policy:-fail}" = "suffix" ] && ! git show-ref --verify --quiet "refs/heads/${branch_name}"; then
   WS_HEAD=$(git --git-dir="/tmp/orchestrator/${run_id}/k_${KHASH}/.git" rev-parse HEAD)
   CANDIDATE=$(git for-each-ref --format='%(refname:short) %(objectname)' refs/heads \
@@ -813,7 +831,7 @@ emit_runner_event("runner.instance.completed", {
 rm -rf /tmp/orchestrator/${run_id}/k_${KHASH}
 ```
 
-This ensures the runner log contains the workspace path for audit trails before it's deleted. Public events in `events.jsonl` do not include host workspace paths to avoid leaking host paths; if a strategy needs provenance, prefer sidecar metadata (results directory) or git notes rather than adding host paths to public events. On success, the workspace path is only valid until the completion event is emitted; callers must not rely on it afterward.
+This ensures the runner log contains the workspace path for audit trails before it's deleted. Public events in `events.jsonl` do not include host workspace paths to avoid leaking host paths; when provenance is needed, write sidecar metadata (results directory) or attach git notes rather than adding host paths to public events. On success, the workspace path is only valid until the completion event is emitted; callers must not rely on it afterward.
 
 **Isolation Properties**:
 
@@ -823,19 +841,9 @@ This ensures the runner log contains the workspace path for audit trails before 
 - All operations are local to the host (no network required for import)
 - Temporary workspaces enable post‑execution inspection when retained by policy
 
-**Alternative Bundle Approach**: For environments requiring even stronger isolation, branches can be exported as bundle files:
+ 
 
-```bash
-# Inside container before exit
-git bundle create /workspace/result.bundle HEAD
-
-# On host after container exits
-git fetch /tmp/orchestrator/${run_id}/k_${KHASH}/result.bundle HEAD:${branch_name}
-```
-
-Bundles are self-contained files containing exactly the commits and objects reachable from the specified branch. They provide tamper-evidence and can be archived for audit purposes.
-
-## 3.6 Claude Code Integration
+## 3.7 Claude Code Integration
 
 Integration focuses on reliable execution and comprehensive event extraction:
 
@@ -876,7 +884,7 @@ Key events extracted:
 
 **Prompt Engineering**: System prompts and append-system-prompt options enable customizing Claude's behavior per task. Model selection allows choosing between speed (Sonnet) and capability (Opus). The default model is configurable via `ORCHESTRATOR_DEFAULT_MODEL` (default: `sonnet`).
 
-## 3.7 Error Handling
+## 3.8 Error Handling
 
 Errors are categorized for appropriate recovery strategies:
 
@@ -900,11 +908,11 @@ Errors are categorized for appropriate recovery strategies:
 The retry configuration supports pattern-based matching with tuples of (pattern, error_type) for fine-grained control.
 Runners MUST normalize failures to one of `{ docker, api, network, git, timeout, session_corrupted, auth, unknown }` for `task.failed.error_type`.
 
-**Cancellation Semantics**: `asyncio.CancelledError` is terminal and reported as `INTERRUPTED`; cancellations are not retried by the runner. Orchestration may resume pending work from checkpoints, but already-failed/interrupted instances remain terminal.
+**Cancellation Semantics**: `asyncio.CancelledError` is terminal and reported as `INTERRUPTED`; cancellations are not retried by the runner. When resuming a run, orchestration resumes pending work from checkpoints; already‑failed/interrupted instances remain terminal.
 
 **Failure Reasons**: `task.failed` payloads include a normalized `error_type` and human-readable `message` to enable precise categorization (docker/api/network/git/timeout/etc.) for dashboards and analytics.
 
-## 3.8 Runner Plugin Interface
+## 3.9 Runner Plugin Interface
 
 Abstract interface enables supporting multiple AI coding tools:
 
@@ -997,27 +1005,27 @@ The Orchestration component provides five essential interfaces:
 
 **Event System**: The `subscribe()` function sets up file watching on `events.jsonl` to receive real-time events. Orchestration writes the canonical public events (`task.scheduled|started|progress|completed|failed|interrupted` and `strategy.started|completed`) — see the “Minimum Payload Fields” section for the canonical schema. Runner-specific events are kept in `runner.jsonl` and are not part of the public file contract. The runner NEVER writes public `task.*`/`strategy.*` events; orchestration emits them, and `task.completed` is written only after `run_instance()` returns. Exactly one writer per run is enforced by `events.jsonl.lock` (see Event Log Contract). This decoupling means TUI never directly calls Instance Runner. Even in-process components use file watching for consistency.
 
-Shutdown/Interruption Semantics (normative): When the operator interrupts the run (e.g., Ctrl+C), orchestration MUST:
+Shutdown/Interruption Semantics: When the operator interrupts the run (e.g., Ctrl+C), orchestration MUST:
 
 - Transition all RUNNING tasks to `INTERRUPTED` in state, capturing `interrupted_at`.
 - Emit a canonical `task.interrupted { key, instance_id }` for each such task immediately upon transition and synchronously flush pending events to disk to ensure durability before process exit.
 - For each strategy execution that has not yet produced any successful `task.completed`, emit a canonical `strategy.completed { status: "canceled", reason: "operator_interrupt" }` and flush pending events.
-- Stop any still-running containers in parallel as part of graceful shutdown. Implementations SHOULD use a short stop timeout (≤1s) to avoid the Docker default 10s grace period (PID 1 ignores SIGTERM by default). A management override MAY be provided (e.g., `ORCHESTRATOR_SHUTDOWN_STOP_TIMEOUT_S`).
+- Stop any still-running containers in parallel as part of graceful shutdown. Use a short stop timeout (≤1s) by default to avoid the Docker default 10s grace period (PID 1 ignores SIGTERM by default). A management override is available via `ORCHESTRATOR_SHUTDOWN_STOP_TIMEOUT_S`.
 
-**Event History**: The `get_events_since()` function retrieves historical events from `events.jsonl` starting at a given `start_offset` (byte position before the line) or timestamp. Accepts run_id, offset/timestamp, optional event type filters, and result limit. The events file is never rotated during an active run; rotation/archival may occur only after the run completes. Implementations MAY scan the file if no index is present; indexing is optional but recommended for long runs.
-Timestamp to offset (normative): When called with a timestamp, the implementation MUST locate the first record with `ts ≥ T` (by scanning or via an index) and begin returning events from that record’s `start_offset`.
+**Event History**: The `get_events_since()` function retrieves historical events from `events.jsonl` starting at a given `start_offset` (byte position before the line) or timestamp. Accepts run_id, offset/timestamp, optional event type filters, and result limit. The events file is never rotated during an active run; rotation/archival occurs only after the run completes. The system scans the file when no index is present; indexing is optional for long runs.
+Timestamp to offset: When called with a timestamp, the implementation MUST locate the first record with `ts ≥ T` (by scanning or via an index) and begin returning events from that record’s `start_offset`.
 
 **Run Resumption**: The `resume_run()` function restores an interrupted run from saved state. It loads the state snapshot, replays events, verifies container existence, checks plugin capabilities, and continues execution from where it left off. Supports both session-based resume and fresh restart options.
 
-Resumption behavior (normative):
+Resumption behavior:
 
-- Re-open previously terminal strategy executions that require continuation (clear `completed_at`, set state to `running`). Orchestration SHOULD emit a canonical `strategy.started { name, params, resumed: true }` for each re-opened strategy to prime consumers that attach after the initial run.
+- Re-open previously terminal strategy executions that require continuation (clear `completed_at`, set state to `running`). Orchestration emits a canonical `strategy.started { name, params, resumed: true }` for each re-opened strategy to prime consumers that attach after the initial run.
 - Backfill canonical terminal events for any terminal tasks that are missing from `events.jsonl` (exactly once per task): emit a synthetic `task.completed|task.failed|task.interrupted` with the correct payload, preserving idempotency.
 - Enqueue only `QUEUED`, `RUNNING`, or `INTERRUPTED` tasks for execution and preserve parallelism gating via the same executor/queue. Already-terminal tasks are NOT re-enqueued.
 - Downstream scheduling MUST be per-candidate: as each generation task completes, dependent scoring/review tasks are scheduled immediately (no batch barrier across candidates).
-- Fresh resume option (`--resume-fresh`) MUST clear `resume_session_id`, set `reuse_container=false`, and assign a new container name; otherwise orchestration SHOULD attempt session resume when the plugin advertises `supports_resume=true` and the original container exists.
+- Fresh resume option (`--resume-fresh`) MUST clear `resume_session_id`, set `reuse_container=false`, and assign a new container name; otherwise orchestration attempts session resume when the plugin advertises `supports_resume=true` and the original container exists.
 
-Completion and summary (normative):
+Completion and summary:
 
 - On successful resumption to completion, set the run’s `completed_at` to the final completion time (not the initial interruption time) and write a `run.completed` management event for local consumers.
 - The `results/summary.json` status MUST be `"interrupted"` if and only if at least one task’s final state is `INTERRUPTED`; otherwise it MUST be `"completed"`. For resumed runs that finish successfully, the top-level `completed_at` MUST reflect the final completion time after resumption.
@@ -1034,7 +1042,7 @@ Durable strategies reduce orchestration to a single primitive while guaranteeing
 - `result = await ctx.wait(handle)` / `results = await ctx.wait_all(list[Handle])` — await completion.
 - `ctx.parallel([ ... ])` — sugar for schedule-many + wait_all.
 - Deterministic utilities: `ctx.key(*parts) -> str` (stable idempotency keys), `ctx.now()`, `ctx.rand()` (recorded + replayed), `await ctx.sleep(seconds)` (checkpointed). `ctx.rand()` values MUST be recorded per strategy execution (e.g., strategy-scoped events/state) so replay is deterministic without re-seeding.
-Determinism recording (normative): Each call to `ctx.rand()` MUST emit a `strategy.rand` event with a monotonic sequence index and value in `events.jsonl`, and the latest sequence index/value MUST be mirrored into `state.json` for fast resume. On replay, the strategy runtime MUST consume the recorded values in order and MUST NOT generate new randomness.
+Determinism recording: Each call to `ctx.rand()` MUST emit a `strategy.rand` event with a monotonic sequence index and value in `events.jsonl`, and the latest sequence index/value MUST be mirrored into `state.json` for fast resume. On replay, the strategy runtime MUST consume the recorded values in order and MUST NOT generate new randomness.
 
 Handle contract:
 
@@ -1075,7 +1083,7 @@ Exceptions (thrown by orchestration utilities):
 
 - `TaskFailed(key, error_type, message)` — raised by `wait()` when a single task fails.
 - `AggregateTaskFailed([key...])` — raised by `wait_all()` when one or more tasks fail and `tolerate_failures=False`.
-- `NoViableCandidates()` — recommended to signal selection failure in strategies (e.g., Best‑of‑N scoring yields zero valid candidates).
+- `NoViableCandidates()` — used to signal selection failure in strategies (e.g., Best‑of‑N scoring yields zero valid candidates).
 - `KeyConflictDifferentFingerprint(key)` — scheduling error: same key with a different canonical fingerprint.
 
 `ctx.key(...)` always expands to an internal fully-qualified key namespaced by the current run and strategy execution: `run_id/strategy_execution_id/<joined parts>`. Authors only supply the `<joined parts>`; namespacing prevents collisions across parallel runs. Normative: `instance_id = sha256(JCS({"run_id": ..., "strategy_execution_id": ..., "key": ...})).hex()[:16]` — stable within a run across retries/resumes. UI **short form** is `inst-<first5>` for display only; the full 16‑hex `instance_id` MUST appear in labels and events.
@@ -1098,7 +1106,7 @@ Exceptions (thrown by orchestration utilities):
 Field mapping to Runner API: `resume_session_id` (strategy input) maps to Runner `session_id`.
 ```
 
-**Result Shape (TaskResult)** returned by `wait`/`wait_all` (fields stable unless marked optional):
+**Result Shape (TaskResult)** returned by `wait`/`wait_all` (fields stable; optional fields are explicitly marked):
 
 ```json
 {
@@ -1121,27 +1129,27 @@ Field mapping to Runner API: `resume_session_id` (strategy input) maps to Runner
 Artifact field semantics:
 
 - `artifact.commit` is the tip commit of the imported branch and is the primary stable identifier of the artifact. For `import_policy="always"` with no changes, it equals the base commit. For `import_policy="never"` or skip-empty cases, `artifact.has_changes=false`, `artifact.branch_final=null`, and `artifact.commit` equals the base commit for provenance.
-- `artifact.branch_planned` is the deterministic name planned from the durable key; `artifact.branch_final` is the actual created branch (may differ when `import_conflict_policy="suffix"`).
-  A branch MAY exist with `artifact.has_changes=false` when `import_policy="always"`; use `artifact.branch_final is not null` to test for branch existence.
+- `artifact.branch_planned` is the deterministic name planned from the durable key; `artifact.branch_final` is the actual created branch (can differ when `import_conflict_policy="suffix"`).
+  A branch exists with `artifact.has_changes=false` when `import_policy="always"`; use `artifact.branch_final is not null` to test for branch existence.
 
 Optional dedupe fields:
 
-- `artifact.duplicate_of_branch`: when import short‑circuits due to idempotency/dedupe, this field MAY carry the branch that was used instead of creating a new one.
-- `artifact.dedupe_reason`: MAY be one of `same_task_provenance | crash_window | by_commit | by_commit_no_changes` indicating why no new branch was created.
+- `artifact.duplicate_of_branch` (optional): when import short‑circuits due to idempotency/dedupe, this field carries the branch that was used instead of creating a new one.
+- `artifact.dedupe_reason` (optional): one of `same_task_provenance | crash_window | by_commit | by_commit_no_changes` indicating why no new branch was created.
 
-Mapping of dedupe reasons (normative):
+Mapping of dedupe reasons:
 - `same_task_provenance`: Idempotent pre‑check or suffix check found an existing branch whose HEAD equals `WS_HEAD` and whose commit note already includes the same `task_key`.
 - `crash_window`: Exactly one candidate branch had `HEAD == WS_HEAD` but lacked provenance for this `task_key`; treat as resume and append provenance without allocating a new branch.
 - `by_commit`: Non‑suffix import pre‑check found that the planned branch already equals `WS_HEAD`; treat as already imported without creating a new branch.
 - `by_commit_no_changes`: `import_policy="always"` created or pointed a branch at the base when there were zero commits relative to base.
 
-Population responsibility (normative): The runner sets `artifact.base` from `.git/BASE_BRANCH` in the workspace and MUST set `artifact.commit` to `.git/BASE_COMMIT` when no import occurs.
+Population responsibility: The runner sets `artifact.base` from `.git/BASE_BRANCH` in the workspace and MUST set `artifact.commit` to `.git/BASE_COMMIT` when no import occurs.
 
 `instance_id` is stable across runner-level retries, container replacements, and resumes within a run. Normative derivation: `instance_id = sha256(JCS({"run_id": ..., "strategy_execution_id": ..., "key": ...})).hex()[:16]`. `TaskResult` is the strategy-facing view of the runner's `RunnerResult`.
 
 There are no other orchestration operations. Generation, review/scoring, and refinement are all regular `ctx.run` tasks with distinct keys.
 
-`wait(handle)` raises on task failure. `wait_all(handles)` raises an aggregated error by default; callers may opt into partial tolerance via `await ctx.wait_all(handles, tolerate_failures=True)` which returns `(successes, failures)`.
+`wait(handle)` raises on task failure. `wait_all(handles)` raises an aggregated error by default; callers opt into partial tolerance via `await ctx.wait_all(handles, tolerate_failures=True)` which returns `(successes, failures)`.
 
 **Durability Semantics**:
 
@@ -1172,7 +1180,7 @@ Managing concurrent tasks requires careful resource control:
 
 **Resource Pool**: Maximum parallel tasks configurable (default adaptive). The default limit is `max(2, min(20, floor(host_cpu / runner.container_cpu)))`. This prevents host oversubscription while allowing parallelism. When at capacity, new task requests queue until a slot opens. A warning MUST be logged if the configured value oversubscribes the host (i.e., `max_parallel_tasks * runner.container_cpu > host_cpu`).
 
-Host CPU detection (normative):
+Host CPU detection:
 
 - Baseline = `os.cpu_count()`.
 - If cgroup CPU quota is detected (Linux), clamp by `ceil(quota / period)`.
@@ -1186,23 +1194,23 @@ The engine:
 
 - Generates container names using pattern `orchestrator_{run_id}_s{strategy_index}_k{short8(durable_key)}` (derived from the durable task key) and computes them before scheduling; container_name MUST NOT change thereafter
 - Uses deterministic branch names derived from the durable task key (orchestration provides the final name)
-- Persists `strategy_index` label on containers with the 1-based value for easier grouping and debugging (the display alias `sidx` MAY be used in UI only)
+- Persists `strategy_index` label on containers with the 1-based value for easier grouping and debugging (the display alias `sidx` is used in UI only)
 - Tracks task-to-container mapping for monitoring and cleanup
 - Manages multiple background executor tasks (configurable count) for true parallel execution
 - Validates disk space before starting tasks (20GB minimum)
 
 **Execution Tracking**: Each task tracked from schedule to completion. Strategies can wait for specific tasks or groups. Essential for patterns like "wait for all 5 to complete, then pick best".
 
-**Capacity Model (normative)**:
+**Capacity Model**:
 
 - Each task declares `container_cpu` and `container_memory` at scheduling time (defaults apply).
 - Scheduler maintains an aggregate CPU token bucket equal to detected `host_cpu` (cgroup-aware). A task is admitted only if `sum(running.container_cpu) + new.container_cpu ≤ host_cpu`.
-- Tasks that cannot be admitted wait in FIFO order. This prevents oversubscription even with per-task overrides.
+- Tasks not admitted wait in FIFO order. This prevents oversubscription even with per-task overrides.
 - Oversubscription warnings are emitted when `max_parallel_tasks * runner.container_cpu > host_cpu` or when a single task requests `container_cpu > host_cpu`.
 
-V1 scope note: Admission control is CPU-based only. Memory-aware admission control is a known limitation and is explicitly out of scope for V1; operators should size `runner.container_memory` conservatively.
+Admission control is CPU-based only. Memory-aware gating is out of scope; operators must size `runner.container_memory` conservatively.
 
-**Resource Cleanup**: When tasks complete, their slots immediately return to the pool. Failed tasks don't block resources. Ensures maximum utilization without manual intervention.
+**Resource Cleanup**: When tasks complete, their slots immediately return to the pool. Failed tasks do not block resources. This ensures maximum utilization without manual intervention.
 
 The engine uses a FIFO queue and a fixed pool size. Strategies provide the intelligence about what to run and when.
 
@@ -1249,15 +1257,15 @@ This approach balances simplicity with reliability. Memory is fast for normal op
 - Recovery MUST replay only events after `last_event_start_offset`.
 - Event application MUST be idempotent: re-applying a transition already reflected in the snapshot MUST NOT double count aggregate metrics (e.g., completed/failed counters).
 - Aggregate counters MUST be derived from guarded state transitions (increment only when moving from a non-terminal to a terminal state).
-- Internal runner events may include `session_id` updates used for in-memory tracking. These are not part of the public `events.jsonl` contract. The public event set remains `task.*` and `strategy.*` only.
+- Internal runner events include `session_id` updates used for in-memory tracking. These are not part of the public `events.jsonl` contract. The public event set remains `task.*` and `strategy.*` only.
 
 ## 4.7 Git Synchronization
 
 Parallel tasks work in complete isolation, requiring no coordination during execution. The synchronization happens after containers complete through a simple branch import process:
 
-**Branch Import Process**: After each container exits, the Instance Runner performs the git import as the final atomic step of `run_instance()`. This uses git's filesystem fetch capability to import the isolated workspace into the host repository. The runner MUST serialize imports per repository using a cross‑platform, process‑internal file lock at `<realpath(git-dir)>/.orc_import.lock` (determine `git-dir` via `git rev-parse --git-dir` and resolve to a realpath to avoid aliasing). Use fcntl on POSIX, msvcrt on Windows, or a cross‑platform library. Do not rely on shell `flock`. The import respects the per‑task `import_policy` ("auto" | "never" | "always"). The import is atomic — either all commits transfer successfully or none do. Collision policy is enforced while holding the import lock. Since V1 disallows alternates/partial clones, locking per `<realpath(git-dir)>` is sufficient.
+**Branch Import Process**: After each container exits, the Instance Runner performs the git import as the final atomic step of `run_instance()`. This uses git's filesystem fetch capability to import the isolated workspace into the host repository. The runner MUST serialize imports per repository using a cross‑platform, process‑internal file lock at `<realpath(git-dir)>/.orc_import.lock` (determine `git-dir` via `git rev-parse --git-dir` and resolve to a realpath to avoid aliasing). Use fcntl on POSIX, msvcrt on Windows, or a cross‑platform library. Do not rely on shell `flock`. The import respects the per‑task `import_policy` ("auto" | "never" | "always"). The import is atomic — either all commits transfer successfully or none do. Collision policy is enforced while holding the import lock. Alternates/partial clones are disallowed; locking per `<realpath(git-dir)>` is sufficient.
 
-**Branch Naming (normative)**: `branch_name = f"{strategy_name}_{run_id}_k{short8(qual_key)}"` where `qual_key = f"{strategy_execution_id}|{durable_key}"` and `short8(x) = sha256(x).hex()[:8]`. Using `run_id` (not a timestamp) guarantees stability across resumes of the same run. Runner never invents names; it receives the final branch name from orchestration and creates that branch during import.
+**Branch Naming**: `branch_name = f"{strategy_name}_{run_id}_k{short8(qual_key)}"` where `qual_key = f"{strategy_execution_id}|{durable_key}"` and `short8(x) = sha256(x).hex()[:8]`. Using `run_id` (not a timestamp) guarantees stability across resumes of the same run. Runner never invents names; it receives the final branch name from orchestration and creates that branch during import.
 
 **Clean Separation**: The synchronization mechanism maintains architectural boundaries:
 
@@ -1292,6 +1300,8 @@ else
 fi
 ```
 
+Alternate import paths such as `git bundle` are not implemented. The supported import path is `git fetch` from the isolated workspace under the repository lock defined above.
+
 This operation runs under the per-repo import lock to serialize updates to refs and packs. Unique branch names avoid cross-branch conflicts; the lock prevents ref/pack races.
 
 The idempotent pre-check ("does the branch already equal the workspace HEAD?") **and** the subsequent `git fetch` MUST both occur while holding the same per-repo import lock.
@@ -1304,9 +1314,9 @@ The idempotent pre-check ("does the branch already equal the workspace HEAD?") *
 - Name collisions: controlled by `import_conflict_policy = "fail" | "overwrite" | "suffix"` (default `"fail"`). For `"suffix"`, `_2`, `_3`, … are appended atomically while holding the import lock. For `"overwrite"`, a forced ref update is used.
 - Failures: if git fetch fails (disk space/corruption), the instance is marked failed with details. The isolated workspace is preserved for debugging.
 
-**Deduplication policy (suffix)**: By provenance. Different tasks importing the same commit MAY create separate suffixed branches; this is by design to preserve branch‑per‑task traceability.
+**Deduplication policy (suffix)**: By provenance. Different tasks importing the same commit create separate suffixed branches; this preserves branch‑per‑task traceability.
 
-**Suffix idempotency with provenance (normative)**: Under the per‑repo import lock and when `import_conflict_policy="suffix"`:
+**Suffix idempotency with provenance**: Under the per‑repo import lock and when `import_conflict_policy="suffix"`:
 
 1) If any candidate branch matching `^${branch_name}(_[0-9]+)?$` has `HEAD == WS_HEAD` and the commit’s note already includes this `task_key`, treat as idempotent success and return that branch (no new suffix).
 
@@ -1322,7 +1332,7 @@ git notes --ref=orchestrator add -m 'task_key=<fully_qualified_key>; run_id=<run
 
 Idempotency rule: treat as already imported only if both (a) `HEAD`s match and (b) the note includes the same `task_key`. The note MUST be written before releasing the import lock to minimize duplication in a crash window.
 
-Determinism note: `import_conflict_policy="suffix"` breaks strict determinism of branch names across resumes and is intended for manual/experimental runs. For reproducibility, prefer `"fail"`.
+Determinism note: `import_conflict_policy="suffix"` breaks strict determinism of branch names across resumes and is intended for manual/experimental runs. For reproducibility, use `"fail"`.
 
 **No Remote Operations**: By design, containers never push to any remote. All git operations are local to the host machine. If remote synchronization is needed, it happens as a separate post-processing step after all tasks complete, completely decoupled from instance execution.
 
@@ -1340,14 +1350,14 @@ Workspaces are reused on resume when available. The orchestrator reattaches the 
 
 This provides visibility into what each AI agent produced and when it was integrated.
 
-**Provenance**: Do not mutate the imported branch tip after import. Prefer one of the following:
+**Provenance**: Do not mutate the imported branch tip after import. Implement provenance using one of the following mechanisms:
 
-- Write provenance as a sidecar file in `results/<run_id>/strategy_output/` (recommended), or
+- Write provenance as a sidecar file in `results/<run_id>/strategy_output/`, or
 - Attach provenance via git notes or a lightweight tag referencing the imported commit.
 
 If provenance must live in-repo history, write it into the workspace before import so it becomes part of the agent’s own commit(s). Avoid adding commits after import to preserve the “import HEAD” auditability guarantee.
 
-Optional: Configure `git config notes.displayRef 'refs/notes/orchestrator:refs/notes/commits'` in the repository to display orchestrator provenance notes in `git log` output. This is a debugging aid and not required at runtime.
+To display orchestrator provenance notes in `git log` output, configure `git config notes.displayRef 'refs/notes/orchestrator:refs/notes/commits'` in the repository. This configuration is not required at runtime.
 
 ## 4.8 Resume Capabilities
 
@@ -1360,7 +1370,7 @@ Resumption produces identical final outcomes with no duplicate work using durabl
 3. Reattach pending tasks by key:
    - Find the container via labels for `run_id/strategy_execution_id/key`.
    - If running → reattach streams.
-   - If stopped but a session-group volume exists (see 3.4 Session Groups) → start container and continue using `resume_session_id`.
+   - If stopped but a session-group volume exists (see 3.5 Session Groups) → start container and continue using `resume_session_id`.
    - Else → start fresh with the same key.
 4. Re-enter the strategy function deterministically: completed `ctx.run` calls return recorded results immediately; execution advances to the first unfinished run.
 5. Continue to completion. Container and branch names derive from the durable key, preventing duplicates.
@@ -1372,6 +1382,16 @@ Resumption produces identical final outcomes with no duplicate work using durabl
 - Graceful shutdown: Full state preserved, seamless resume
 - Crash during execution: State recovered from last snapshot + event replay
 - Partial container failure: Failed instances marked, others continue
+
+### Resume Semantics
+
+On resumption of an interrupted run, orchestration MUST:
+
+- Recover state from the latest snapshot and apply canonical events since the recorded offset.
+- Backfill canonical terminal events for terminal tasks missing from the log.
+- Re-enter all strategy executions concurrently so downstream stages (e.g., scoring) proceed as soon as prerequisites complete.
+
+Resumption MUST respect resource gates (queue and semaphore) and MUST NOT serialize strategy re-entry.
 
 ## 4.9 Results Export
 
@@ -1452,7 +1472,7 @@ Core responsibilities:
 - Stream important events to console in non-TUI mode
 - Present final results and branch information
 
-The TUI knows nothing about how tasks run or how strategies work - it simply subscribes to events and queries state. This separation means you could replace it entirely with a web UI without touching orchestration logic.
+The TUI knows nothing about how tasks run or how strategies work—it simply subscribes to events and queries state. This separation allows full replacement with a web UI without changing orchestration logic.
 
 **Multi-UI Support**: Multiple UIs can monitor the same run by tailing the shared `events.jsonl` file and periodically reading `state.json` snapshots. No HTTP server is provided.
 
@@ -1460,11 +1480,11 @@ The TUI knows nothing about how tasks run or how strategies work - it simply sub
 
 The TUI uses a hybrid approach combining event streams with periodic state polling for both responsiveness and reliability:
 
-**Event Handling**: The TUI watches `events.jsonl` for new events using a portable file watcher with a polling fallback (to support macOS/Windows/Linux uniformly). As new events are appended to the file, the TUI reads and processes them, updating its internal state immediately. However, events don't trigger renders directly. Whether 1 event or 100 events arrive, they simply update the internal data structures. This prevents display flooding when hundreds of tasks generate rapid events.
+**Event Handling**: The TUI watches `events.jsonl` for new events using a portable file watcher with a polling fallback (to support macOS/Windows/Linux uniformly). As new events are appended to the file, the TUI reads and processes them, updating its internal state immediately. Events do not trigger renders directly. Whether 1 event or 100 events arrive, they update only the internal data structures. This prevents display flooding when hundreds of tasks generate rapid events.
 
 **Fixed Render Loop**: A separate render loop runs at 10Hz by default (every 100ms), reading the current internal state and updating the display. The refresh rate is configurable via `tui.refresh_rate_ms`. Do not render directly from watcher callbacks. This decoupling is crucial - event processing and display rendering operate independently. Users see smooth, consistent updates regardless of event volume.
 
-**State Reconciliation**: Every 3 seconds, the TUI reads the latest `state.json` snapshot to reconcile any drift. This isn't the primary update mechanism—just a safety net catching missed events or recovering from disconnections.
+**State Reconciliation**: Every 3 seconds, the TUI reads the latest `state.json` snapshot to reconcile any drift. This is a safety net catching missed events or recovering from disconnections, not the primary update mechanism.
 
 **Buffer Management**: Events update a simple in-memory representation:
 
@@ -1524,7 +1544,7 @@ The display intelligently adapts to task count, showing maximum useful informati
 **Dense Mode (30+ tasks)**:
 
 - Minimal cards in tight grid
-- Just ID, status emoji, cost, and runtime
+- ID, status emoji, cost, and runtime only
 - Color coding for quick status scanning
 - Strategy-level progress more prominent
 - Summary stats matter more than individuals
@@ -1569,7 +1589,7 @@ Writer safety options:
 
 **Strategy Configuration**:
 
-- `--runs`: Number of parallel strategy executions within a single run ID (one run folder; N executions). An alias `--executions` MAY be provided for clarity.
+- `--runs`: Number of parallel strategy executions within a single run ID (one run folder; N executions).
 - `-S key=value`: Set strategy-specific parameters (repeatable)
 - `--config`: Load configuration from YAML or JSON file
 
@@ -1635,7 +1655,7 @@ Additional flags and mappings:
   - Config: `runner.network.proxy.http|https|no_proxy`
   - Env: `HTTP_PROXY`, `HTTPS_PROXY`, `NO_PROXY`
 
-Cleanup semantics (normative): On startup, orchestration performs a conservative orphan scan limited to containers labeled `orchestrator=true` in the current run namespace. Age calculations prefer `state.json` timestamps, then heartbeat file mtime, then Docker `CreatedAt`. Explicit `--clean-containers` is an operator action that MAY remove across runs according to retention settings.
+Cleanup semantics: On startup, orchestration performs a conservative orphan scan limited to containers labeled `orchestrator=true` in the current run namespace. Age calculations use the following precedence: `state.json` timestamps, then heartbeat file mtime, then Docker `CreatedAt`. Explicit `--clean-containers` is an operator action that removes across runs according to retention settings.
 
 CLI design follows conventional Unix patterns; common tasks require minimal flags while complex workflows remain configurable.
 
@@ -1657,7 +1677,7 @@ python -m src.tui --run-id run_20250114_123456
 Implementation notes (current TUI):
 - The TUI renders via Rich at a fixed 10Hz. If the optional `watchdog` package is not available, it automatically falls back to a pure polling tail of `events.jsonl` without any loss of fidelity.
 - Forcing display density: pass `--display-mode {detailed|compact|dense}` to override the automatic mode selection. This is useful when you want one-line summaries even for small runs.
-- Non-TTY environments: prefer `--output streaming` or `--output json` to avoid using the alternate screen buffer.
+- Non-TTY environments: use `--output streaming` or `--output json` to avoid using the alternate screen buffer.
 - Stalled indicator: For running instances that haven’t updated in >30s, the Activity shows a “stalled Ns” suffix to highlight potential hangs while keeping the last known step (e.g., “Container created (stalled 45s)”).
 - Debug event processing separately
 - Test display layouts without running instances
@@ -1715,7 +1735,7 @@ Orchestration determines the mode using the above precedence and passes the effe
 - `tui.*` - Display preferences
 - `logging.*` - Output paths, verbosity
 
-This separation ensures components remain independent. Adding TUI color schemes doesn't affect runner configuration.
+This separation ensures components remain independent. Adding TUI color schemes does not affect runner configuration.
 
 **Environment Variables**: The system supports extensive environment variables (27 beyond core auth):
 
@@ -1744,9 +1764,9 @@ ORCHESTRATOR_DEFAULT_MODEL=sonnet
 
 **Configuration Merging**: Complex deep merge with recursive dictionary merging for nested configurations. Arrays are replaced, not merged.
 
-**Model Mapping (normative)**: Friendly model names MUST resolve via a single shared mapping file `models.yaml`. Both orchestration and runner load from this single file. At process start, each component computes a checksum (e.g., SHA‑256) of the loaded `models.yaml`. Orchestration SHOULD pass its checksum to the runner (e.g., via environment/config), and the runner SHOULD fail fast if its checksum does not match. In single‑process deployments where both layers share the same address space and loader, checksum equality is implicit and an explicit handshake MAY be skipped. Any divergence or failure to load the same mapping in multi‑process deployments is a configuration error.
+**Model Mapping**: Friendly model names MUST resolve via a single shared mapping file `models.yaml`. Both orchestration and runner load from this single file. At process start, each component computes a checksum (e.g., SHA‑256) of the loaded `models.yaml`. Orchestration passes its checksum to the runner; the runner fails fast on mismatch. Any divergence or failure to load the same mapping in multi‑process deployments is a configuration error.
 
-### 6.1.1 Default Values Catalog (normative)
+### 6.1.1 Default Values Catalog
 
 Defaults used by orchestration and runner. Fingerprinting canonicalization treats missing fields as these explicit defaults, and **removes keys with `null` values prior to hashing** (i.e., `null` ≡ missing).
 
@@ -1766,7 +1786,7 @@ Defaults used by orchestration and runner. Fingerprinting canonicalization treat
 - runner.tmpfs_size_mb: `512`
  - tui.refresh_rate_ms: `100`
 
-Read-only review enforcement (normative): If `import_policy="never"` and `runner.review_workspace_mode="ro"`, the runner MUST mount `/workspace` read‑only, replacing an existing container if necessary to satisfy RO semantics.
+Read-only review enforcement: If `import_policy="never"` and `runner.review_workspace_mode="ro"`, the runner MUST mount `/workspace` read‑only, replacing an existing container if necessary to satisfy RO semantics.
 
 Events configuration:
 - events.flush_policy.mode: `"interval"`
@@ -1785,7 +1805,7 @@ Retention configuration:
 
 All defaults are validated and logged at run start. Fingerprint computation (RFC 8785 JCS) must apply these defaults before hashing.
 
-### 6.1.2 Fingerprinting Defaults Scope (normative)
+### 6.1.2 Fingerprinting Defaults Scope
 
 Defaults that participate in fingerprint canonicalization (set missing values to these before hashing):
 - model
@@ -1856,18 +1876,18 @@ Logging captures detailed data to files while minimizing console noise.
 - Dynamic logger configuration based on debug mode
 - Headless mode console output integration
 - File size-based rotation with configurable backup count (applies to component logs only; never to `events.jsonl`)
-- `events.jsonl` is never rotated during an active run; rotation/archival may occur only after the run completes
+- `events.jsonl` is never rotated during an active run; rotation/archival occurs only after the run completes
 - Async rotation tasks to prevent blocking
   
 Cost estimation configuration:
 
-- When a plugin cannot report cost but can report tokens, costs are estimated from `pricing.*` config keys (USD):
+- When a plugin does not report cost but reports tokens, costs are estimated from `pricing.*` config keys (USD):
   - `pricing.anthropic.sonnet.input_per_1k_usd`
   - `pricing.anthropic.sonnet.output_per_1k_usd`
   - (similarly for other models)
 - Orchestration performs the estimate and reports in results and TUI.
 
-Estimation semantics (normative): Currency is USD. Per-task cost is computed from the task’s model attribution and rounded to 4 decimal places; run totals sum per-task costs and are also rounded to 4 decimals.
+Estimation semantics: Currency is USD. Per-task cost is computed from the task’s model attribution and rounded to 4 decimal places; run totals sum per-task costs and are also rounded to 4 decimals.
 
 
 ## 6.3 Security and Isolation
@@ -1905,11 +1925,11 @@ def sanitize_public(obj):
         return s
     # walk dict/str recursively and scrub strings
 
-Patterns are illustrative and SHOULD be configurable to cover provider-specific keys. Sanitization MUST apply to all public `message` fields and to `final_message` content before emission.
-Sanitization scope (normative): Redaction applies to all public strings in event payloads, including but not limited to `final_message`, `message`, and textual metadata.
+Patterns are illustrative and configurable to cover provider-specific keys. Sanitization MUST apply to all public `message` fields and to `final_message` content before emission.
+Sanitization scope: Redaction applies to all public strings in event payloads, including but not limited to `final_message`, `message`, and textual metadata.
 ```
 
-**File System Boundaries**: Instances cannot:
+**File System Boundaries**: Instances MUST NOT:
 
 - Access the original host repository or any host paths except their isolated workspace at `/tmp/orchestrator/<run_id>/k_<short8(durable_key)>`
 - See or modify the original repository
@@ -1925,15 +1945,15 @@ Sanitization scope (normative): Redaction applies to all public strings in event
 - Physical file copying with `--no-hardlinks` prevents inode-level interference
 - Branch imports happen after container exits, eliminating concurrent access
 
-Public event path policy (normative): Public events MUST NOT include absolute host paths or host workspace paths. Run‑relative log paths under `logs/<run_id>/` are allowed (e.g., `final_message_path`).
+Public event path policy: Public events MUST NOT include absolute host paths or host workspace paths. Run‑relative log paths under `logs/<run_id>/` are allowed (e.g., `final_message_path`).
 
-These measures provide reasonable security without enterprise complexity. We're protecting against accidents and basic isolation violations, not nation-state attackers. The complete workspace isolation is the key defense - containers literally cannot access the host repository or other instances' work.
+These measures provide strong isolation without enterprise complexity and protect against accidents and basic isolation violations. Complete workspace isolation is the key defense—containers have no access to the host repository or other instances' work.
 
 ## 6.4 Resource Management
 
 Resource management keeps things simple and functional:
 
-**Parallel Task Limit**: Single configuration value `max_parallel_tasks` (default adaptive: `max(2, min(20, floor(host_cpu / runner.container_cpu)))`). Prevents system overload and API rate limit issues. No complex scheduling or priorities - just a simple pool. (`max_parallel_instances` is supported as a deprecated alias and MUST log a one-time deprecation warning if used.) A warning MUST be logged if the configured value oversubscribes the host.
+**Parallel Task Limit**: Single configuration value `max_parallel_tasks` (default adaptive: `max(2, min(20, floor(host_cpu / runner.container_cpu)))`). Prevents system overload and API rate limit issues. No complex scheduling or priorities; a simple pool is used. (`max_parallel_instances` is supported as a deprecated alias and MUST log a one-time deprecation warning if used.) A warning MUST be logged if the configured value oversubscribes the host.
 
 **Container Resources**: Fixed defaults that work well:
 
@@ -1943,7 +1963,7 @@ Resource management keeps things simple and functional:
 
 Override only if needed via `container_cpu` and `container_memory` settings. Most users never touch these.
 
-**Cost Tracking**: Simple accumulation from Claude Code's reported costs. No budgets or limits for now - users can monitor costs in real-time and cancel if needed. Complex budget enforcement can come later if demanded.
+**Cost Tracking**: Simple accumulation from Claude Code's reported costs. No budgets or limits are implemented. Users monitor costs in real time and cancel when needed.
 
 **Timeouts**: Two-level timeout system:
 
@@ -2025,11 +2045,27 @@ results/
 
 **Crash Tolerance & Sessions**: Readers tolerate truncated last lines, resuming from the `last_event_start_offset`. Claude Code sessions are preserved via container+volume naming. On resume, orchestration reattaches by durable task key without duplicating containers or branches.
 
-This approach balances durability with simplicity. No databases to manage, no complex schemas to migrate. Just files that are easy to inspect, backup, and understand.
+This approach balances durability with simplicity. No databases to manage and no complex schemas to migrate. Files are easy to inspect, back up, and understand. State snapshots are written atomically (temporary file + rename) and duplicated under `logs/<run_id>/state.json`.
 
 ## 6.6 Platform Support
 
 The orchestrator includes extensive platform-specific support:
+
+**Primary Platform**: Linux is the primary development and deployment platform with full feature support.
+
+**macOS Support**: Fully supported via Docker Desktop. The SELinux `:z` flag is automatically excluded on macOS. Path length limitations are generally not an issue. Requires Docker Desktop installation.
+
+**Windows Support**:
+
+- WSL2 (Windows Subsystem for Linux) provides the supported configuration for best compatibility
+- Alternative: Native Docker Desktop works but has limitations:
+  - Path length restrictions (260 character limit)
+  - Different path separators cause issues in some edge cases
+  - Performance is typically slower than WSL2
+  
+WSL2 note: Place the repository inside the WSL filesystem (e.g., `~/repo`), not under `/mnt/c/...`, to avoid slow bind mounts. Bind-mounting NTFS paths into Linux containers can significantly degrade performance.
+
+Native Windows note: If running outside WSL, enable Windows long‑path support or keep repository paths short to avoid path length issues. WSL2 remains the supported approach.
 
 **Windows Subsystem for Linux (WSL)**: Automatic detection and path conversion:
 
@@ -2064,13 +2100,41 @@ Normative rule: Apply `:z` only on Linux with SELinux; never apply on macOS or W
 - Unix: Uses /tmp
 - Validates write permissions on startup
 
+## 6.7 Operational Controls
+
+The following environment variables and behaviors are normative:
+
+- Events flush policy:
+  - `ORCHESTRATOR_EVENTS__FLUSH_POLICY = interval|per_event` (default: interval)
+  - `ORCHESTRATOR_EVENTS__FLUSH_INTERVAL_MS` (default: 50)
+  - `ORCHESTRATOR_EVENTS__FLUSH_MAX_BATCH` (default: 256)
+  In interval mode, implementations MUST batch and fsync off-thread; per-event mode fsyncs synchronously.
+
+- Final message truncation:
+  - `ORCHESTRATOR_EVENTS__MAX_FINAL_MESSAGE_BYTES` (default: 65536)
+  If truncated, implementations MUST set `final_message_truncated=true` and write the full message to a run-relative path under `logs/<run_id>/` in `task.completed`.
+
+- Events retention (pruning):
+  - `ORCHESTRATOR_EVENTS__RETENTION_DAYS` (default: 30)
+  - `ORCHESTRATOR_EVENTS__RETENTION_GRACE_DAYS` (default: 7)
+  The orchestrator deletes `events.jsonl` and `runner.jsonl` for terminal runs older than the retention + grace window.
+
+- Adaptive parallelism:
+  - `ORCHESTRATOR_ADAPTIVE_PARALLELISM=1` enables auto-scaling when the max parallel instances is at its default. The system detects cgroup CPU quota on Linux and warns when configured parallelism oversubscribes host CPUs.
+
+- Error classification mapping:
+  - When `network_egress=offline`, failures are classified as `task.failed.error_type="network"` unless canceled.
+
+- Model mapping handshake:
+  - A shared `models.yaml` mapping MUST be loaded at runtime. A checksum is emitted and validated to ensure consistency between orchestration and runner.
+
 # 7. Operations
 
 ## 7.1 Starting a Run
 
 Starting a run is designed to be frictionless while catching common errors early:
 
-**Basic Invocation**: The simplest case requires just a prompt:
+**Basic Invocation**: The simplest case requires only a prompt:
 
 ```bash
 orchestrator "implement user authentication"
@@ -2109,7 +2173,7 @@ Parameters are validated immediately with clear errors for missing required opti
 
 These checks take milliseconds but prevent frustrating failures mid-run. Better to fail fast with helpful errors.
 
-**Run ID Generation** (normative): Each run gets a unique ID `run_YYYYMMDD_HHMMSS_<short8>` where `<short8>` is the first 8 hex chars of a random UUID. This guarantees uniqueness under concurrent starts while preserving sortability.
+**Run ID Generation**: Each run gets a unique ID `run_YYYYMMDD_HHMMSS_<short8>` where `<short8>` is the first 8 hex chars of a random UUID. This guarantees uniqueness under concurrent starts while preserving sortability.
 
 **Configuration Loading**: Settings are resolved in precedence order and logged at startup. Users see exactly what configuration is active. No guessing about which config file was loaded or which environment variable took precedence.
 
@@ -2126,7 +2190,7 @@ Monitoring is designed to answer the key question: "Is everything going as expec
 - Progress indicators based on Claude's task completion
 - Clear failure indication with error snippets
 
-The dashboard adapts to run scale automatically. Users don't configure view modes - it just works whether running 3 tasks or 300.
+The dashboard adapts to run scale automatically. Users do not configure view modes; behavior scales from small runs to large runs (for example, 3 to 300 tasks).
 
 **Non-TUI Monitoring**: When TUI is disabled, progress streams to console (showing both task hash and instance id):
 
@@ -2158,7 +2222,7 @@ Clean prefixes, instance correlation, key metrics. No timestamp spam or debug no
 tail -f logs/run_20250114_123456/events.jsonl | jq
 ```
 
-Teams can build custom dashboards or alerts from this stream. The orchestrator doesn't prescribe monitoring solutions.
+Teams build custom dashboards or alerts from this stream. The orchestrator does not prescribe monitoring solutions.
 
 **Health Indicators**: Key metrics visible at all times:
 
@@ -2167,7 +2231,7 @@ Teams can build custom dashboards or alerts from this stream. The orchestrator d
 - Total cost accumulation rate
 - Average task duration
 
-These indicators reveal system health without overwhelming detail. Rising queue depth might indicate too aggressive parallelism. Unusual cost rates prompt investigation.
+These indicators reveal system health without overwhelming detail. Rising queue depth indicates too aggressive parallelism. Unusual cost rates prompt investigation.
 
 ## 7.3 Handling Failures
 
@@ -2180,7 +2244,7 @@ Failure handling follows a simple principle: assume transient issues and retry w
 - Exponential backoff between attempts (10s, 60s, 360s)
 - Container preserved across retries for session continuity
 
-This approach handles the reality of AI coding: API timeouts, rate limits, temporary network issues. Most failures are transient. Session resume means retry doesn't waste work already done - if Claude wrote half the solution before failing, retry continues from there.
+This approach handles the reality of AI coding: API timeouts, rate limits, and temporary network issues. Most failures are transient. Session resume ensures retry does not waste prior work—if Claude wrote half the solution before failing, retry continues from that point.
 
 **Failure Categories**: After exhausting retries, failures are marked with cause:
 
@@ -2190,7 +2254,7 @@ This approach handles the reality of AI coding: API timeouts, rate limits, tempo
 - Git Error: import/fetch failures (e.g., ref lock, pack corruption, insufficient disk)
  - Network Error: Blocked or unreachable network. When `runner.network_egress=offline`, failures due to blocked egress MUST be classified as `network` and include `egress=offline` in the message.
 
-The Instance Runner reports failure type, but doesn't interpret it. That's the strategy's job.
+The Instance Runner reports failure type but does not interpret it. Strategy code is responsible for interpretation.
 
 **Cancellation vs Failure**
 
@@ -2201,7 +2265,7 @@ The Instance Runner reports failure type, but doesn't interpret it. That's the s
 **Strategy-Level Handling**: Strategies decide how to respond to failures:
 
 - Best-of-N patterns: Continue with successful candidates; exclude failed or unscorable ones.
-- Inline scoring patterns: If a candidate can't be scored after one repair attempt, exclude it rather than coercing a score.
+- Inline scoring patterns: If scoring fails after one repair attempt, exclude the candidate rather than coercing a score.
 - Custom patterns: Implement domain-specific recovery and selection logic.
 
 This separation is crucial. Infrastructure (Runner) handles retries for transient issues. Business logic (Strategy) handles semantic failures. A network blip gets retried automatically. A fundamental task impossibility gets surfaced to strategy.
@@ -2259,7 +2323,7 @@ This balance ensures quick shutdown while maximizing resumability.
 
 **Crash vs Graceful Interruption**
 
-- In a hard crash or power loss, interruption markers may not be written. On resume, any instance that is `RUNNING` in `state.json` and has no terminal state event at or after `last_event_start_offset` MUST be treated as "interrupted by crash" and handled under the Interrupted rules.
+- In a hard crash or power loss, interruption markers are not written. On resume, any instance that is `RUNNING` in `state.json` and has no terminal state event at or after `last_event_start_offset` MUST be treated as "interrupted by crash" and handled under the Interrupted rules.
 
 **Explicit Resume**: Recovery requires deliberate action:
 
@@ -2277,21 +2341,21 @@ No automatic detection of previous runs. No "found interrupted run, continue?" p
 
 - **Interrupted instances** (including those inferred after a crash):
   - If container exists AND plugin supports resume: Resume from saved session
-  - If container exists BUT plugin doesn't support resume: Record diagnostic `resume_diagnostic=cannot_resume` in state metadata
+- If container exists BUT plugin does not support resume: Record diagnostic `resume_diagnostic=cannot_resume` in state metadata
   - If container missing BUT workspace exists: Record diagnostic `resume_diagnostic=container_missing` in state metadata
   - If both container and workspace missing: Record diagnostic `resume_diagnostic=artifacts_missing` in state metadata
 
 - **Queued instances**: Start normally
 
-Override rule (normative): On resume, orchestration MUST override any `resume_session_id` present in a task input with the most recent persisted `session_id` from `state.json` before calling the runner. This prevents races with later session updates.
+Override rule: On resume, orchestration MUST override any `resume_session_id` present in a task input with the most recent persisted `session_id` from `state.json` before calling the runner. This prevents races with subsequent session updates.
 
-Execution scope (v1): Resume re-enters strategy code so downstream phases (e.g., scoring/review) can be scheduled as each generation completes. Durable task keys and fingerprint checks ensure idempotency: re-entry MUST NOT duplicate already-registered work. Only tasks that were previously registered (QUEUED/RUNNING/INTERRUPTED) or deterministically rescheduled by strategy re-entry will execute; no speculative replay of arbitrary past code occurs.
+Execution scope: Resume re-enters strategy code so downstream phases (e.g., scoring/review) can be scheduled as each generation completes. Durable task keys and fingerprint checks ensure idempotency: re-entry MUST NOT duplicate already-registered work. Only tasks that were previously registered (QUEUED/RUNNING/INTERRUPTED) or deterministically rescheduled by strategy re-entry will execute; no speculative replay of arbitrary past code occurs.
 
-Diagnostic note: The isolated workspace is a first-class resume artifact. On resume, the runner reuses the prior workspace when present and valid, preserving uncommitted changes. If the workspace is missing or invalid, resume proceeds with a fresh clone (files from the prior attempt will not be present in that case). Status diagnostics MAY still reference workspace presence for post‑mortem analysis.
+Diagnostic note: The isolated workspace is a first-class resume artifact. On resume, the runner reuses the prior workspace when present and valid, preserving uncommitted changes. If the workspace is missing or invalid, resume proceeds with a fresh clone (files from the prior attempt will not be present in that case). Status diagnostics reference workspace presence for post‑mortem analysis.
 
 **Immediate Finalization on Resume**
 
-- If after restoration and verification there are no runnable tasks (all are terminal or cannot be resumed), the orchestrator SHOULD immediately finalize the run and exit. Completion is inferred when all top‑level strategies emit `strategy.completed`.
+- If after restoration and verification there are no runnable tasks (all are terminal or not resumable), the orchestrator immediately finalizes the run and exits. Completion is inferred when all top‑level strategies emit `strategy.completed`.
 
 Notes on Sessions:
 
@@ -2300,8 +2364,8 @@ Notes on Sessions:
 
 Resume knobs:
 
-- `--resume-fresh` MUST re-run incomplete instances with fresh containers (new container name, `reuse_container=false`, and no session). Branch naming remains unchanged. Implementations MAY append a short suffix to the container name for uniqueness (e.g., `_r<short>`).
-- Implementations MAY store `reuse_container` in per-instance metadata to drive container reuse on subsequent runs.
+- `--resume-fresh` MUST re-run incomplete instances with fresh containers (new container name, `reuse_container=false`, and no session). Branch naming remains unchanged. appends a short suffix to the container name for uniqueness (e.g., `_r<short>`).
+- stores `reuse_container` in per-instance metadata to drive container reuse on subsequent runs.
 
 Special cases:
 
@@ -2338,7 +2402,7 @@ All snapshots MUST be written atomically using a temp-file-then-rename pattern t
 - Primary snapshot: `orchestrator_state/<run_id>/state.json`
 - Duplicate snapshot (for convenience and multi-UI): `logs/<run_id>/state.json`
 
-Both MUST be written via a temporary file (e.g., `state.json.tmp`) and then `rename()`d to the final path so readers never observe partial JSON. Readers SHOULD prefer the primary snapshot but MAY fall back to the duplicate if the primary is missing or corrupt.
+Both MUST be written via a temporary file (e.g., `state.json.tmp`) and then `rename()`d to the final path so readers never observe partial JSON. Readers use the primary snapshot and fall back to the duplicate if the primary is missing or corrupt.
 
 ## 7.6 Results and Reporting
 
@@ -2413,84 +2477,17 @@ To merge selected solution:
 - Markdown for documentation
 - CSV for spreadsheet analysis
 
-No complex reporting engine - just structured data users can process with familiar tools.
+No complex reporting engine; structured data users can process with familiar tools.
 
 Results aim to make it clear what was produced and how to use it. The orchestrator's job ends at branch creation; users decide what to merge.
 
-## 7.7 Platform Support
+## 7.7 Maintenance and Pruning
 
-**Primary Platform**: Linux is the primary development and deployment platform with full feature support.
+The orchestrator provides maintenance commands to prune old artifacts according to retention settings:
 
-**macOS Support**: Fully supported via Docker Desktop. The SELinux `:z` flag is automatically excluded on macOS. Path length limitations are generally not an issue. Requires Docker Desktop installation.
+- `--prune`: deletes old run logs and results.
+  - Logs under `logs/run_*` are pruned when `completed_at` (or mtime fallback) is older than `events.retention_days + events.retention_grace_days`.
+  - Results under `results/run_*` are pruned when older than `results.retention_days` when configured; when unset, results are not pruned by age.
+- `--prune-dry-run`: prints what would be removed without deleting.
 
-**Windows Support**:
-
-- Recommended: Run via WSL2 (Windows Subsystem for Linux) for best compatibility
-- Alternative: Native Docker Desktop works but has limitations:
-  - Path length restrictions (260 character limit)
-  - Different path separators may cause issues in some edge cases
-  - Performance is typically slower than WSL2
-  
-WSL2 note: Place the repository inside the WSL filesystem (e.g., `~/repo`), not under `/mnt/c/...`, to avoid slow bind mounts. Bind-mounting NTFS paths into Linux containers can significantly degrade performance.
-
-Native Windows note: If running outside WSL, enable Windows long‑path support or keep repository paths short to avoid path length issues. WSL2 remains the recommended approach.
-
-**Platform Detection**: The system automatically detects the platform and adjusts behavior:
-
-- SELinux flags only applied on Linux systems with SELinux enabled
-- Path handling adjusted for Windows when necessary
-- File watching uses appropriate APIs (inotify on Linux, kqueue on macOS, polling on Windows)
-
-**Minimum Requirements**:
-
-- Docker 20.10 or newer (Docker Desktop on macOS/Windows)
-- Git 2.25 or newer
-- Python 3.11+
-- 8GB RAM minimum, 16GB recommended for parallel execution
-- 20GB free disk space for Docker images and temporary workspaces
-### 3.5 Container Environment (normative)
-
-Runner MUST set the following environment variables inside the container for observability and correlation:
-
-- `TASK_KEY`: Durable task key used by orchestration
-- `SESSION_GROUP_KEY`: Session group key used to scope the home volume
-- `KHASH`: `short8(sha256(task_key))` or empty when unavailable
-- `GHASH`: `short8(sha256(session_group_key or fallback))`
-
-On Linux with SELinux enabled, the workspace bind mount MUST be labeled with `:z` (and `:z,ro` when review workspace mode is read-only). The home directory MUST be a named Docker volume scoped as documented (per-run by default).
-### 2.5 Resume Semantics (normative)
-
-On resumption of an interrupted run, orchestration MUST:
-
-- Recover state from the latest snapshot and apply canonical events since the recorded offset
-- Backfill canonical terminal events for terminal tasks missing from the log (best-effort)
-- Re-enter all strategy executions concurrently (not serially) so downstream stages (e.g., scoring) can proceed independently as soon as prerequisites complete
-
-Resumption MUST respect resource gates (queue and semaphore) but MUST NOT serialize strategy re-entry.
-## 6.1 Operational Controls
-
-The following environment variables and behaviors are normative in V1:
-
-- Events flush policy:
-  - `ORCHESTRATOR_EVENTS__FLUSH_POLICY = interval|per_event` (default: interval)
-  - `ORCHESTRATOR_EVENTS__FLUSH_INTERVAL_MS` (default: 50)
-  - `ORCHESTRATOR_EVENTS__FLUSH_MAX_BATCH` (default: 256)
-  In interval mode, implementations MUST batch and fsync off-thread; per-event mode MAY fsync synchronously.
-
-- Final message truncation:
-  - `ORCHESTRATOR_EVENTS__MAX_FINAL_MESSAGE_BYTES` (default: 65536)
-  If truncated, implementations MUST set `final_message_truncated=true` and write the full message to a run-relative path under `logs/<run_id>/` in `task.completed`.
-
-- Events retention (pruning):
-  - `ORCHESTRATOR_EVENTS__RETENTION_DAYS` (default: 30)
-  - `ORCHESTRATOR_EVENTS__RETENTION_GRACE_DAYS` (default: 7)
-  Implementations MAY prune `events.jsonl` and `runner.jsonl` for terminal runs older than the retention + grace window.
-
-- Adaptive parallelism:
-  - `ORCHESTRATOR_ADAPTIVE_PARALLELISM=1` enables auto-scaling when the max parallel instances is at its default. Implementations SHOULD detect cgroup CPU quota on Linux and warn when configured parallelism oversubscribes host CPUs.
-
-- Error classification mapping:
-  - When `network_egress=offline`, failures SHOULD be classified as `task.failed.error_type="network"` unless canceled.
-
-- Model mapping handshake:
-  - A shared `models.yaml` mapping MUST be loaded at runtime. A checksum MAY be emitted for distributed deployments. For single-process deployments, checksum emission is OPTIONAL (SHOULD).
+ 
