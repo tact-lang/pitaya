@@ -33,6 +33,7 @@ class GitOperations:
         run_id: Optional[str] = None,
         strategy_execution_id: Optional[str] = None,
         container_name: Optional[str] = None,
+        reuse_if_exists: bool = False,
     ) -> Path:
         """
         Create isolated git workspace before container starts.
@@ -101,7 +102,26 @@ class GitOperations:
                 workspace_dir.parent.mkdir, parents=True, exist_ok=True
             )
 
-            # Remove any existing workspace (shouldn't happen but be safe)
+            # Reuse existing workspace on resume when requested
+            if reuse_if_exists and workspace_dir.exists():
+                # Validate it's a git repo; if not, fall back to fresh clone
+                if (workspace_dir / ".git").exists():
+                    logger.info(f"Reusing existing workspace at {workspace_dir}")
+                    # Best-effort: ensure BASE_BRANCH marker exists; if missing, write it
+                    try:
+                        base_branch_file = workspace_dir / ".git" / "BASE_BRANCH"
+                        if not base_branch_file.exists():
+                            base_branch_file.write_text(base_branch)
+                    except Exception:
+                        pass
+                    return workspace_dir
+                else:
+                    logger.info(
+                        f"Existing workspace at {workspace_dir} is not a git repo; recreating"
+                    )
+                    await asyncio.to_thread(shutil.rmtree, workspace_dir)
+
+            # Remove any existing workspace when not reusing (fresh prepare)
             if workspace_dir.exists():
                 await asyncio.to_thread(shutil.rmtree, workspace_dir)
 

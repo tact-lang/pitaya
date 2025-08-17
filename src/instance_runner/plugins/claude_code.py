@@ -123,6 +123,7 @@ class ClaudeCodePlugin(RunnerPlugin):
         prompt: str,
         model: str,
         session_id: Optional[str] = None,
+        operator_resume: bool = False,
         **kwargs,
     ) -> List[str]:
         """Build Claude Code command."""
@@ -147,8 +148,10 @@ class ClaudeCodePlugin(RunnerPlugin):
         if "append_system_prompt" in kwargs and kwargs["append_system_prompt"]:
             command.extend(["--append-system-prompt", kwargs["append_system_prompt"]])
 
-        # Add the prompt
-        command.append(prompt)
+        # Add the prompt only when not in operator resume mode
+        # Operator resume continues the session without re-sending the prompt
+        if not (session_id and operator_resume):
+            command.append(prompt)
 
         return command
 
@@ -224,10 +227,13 @@ class ClaudeCodePlugin(RunnerPlugin):
     ) -> Dict[str, Any]:
         """Execute Claude Code inside the container and return result data."""
         # Build command
+        # Extract operator_resume flag (avoid passing duplicate kwarg)
+        op_resume = bool(kwargs.pop("operator_resume", False))
         command = await self.build_command(
             prompt=prompt,
             model=model,
             session_id=session_id,
+            operator_resume=op_resume,
             **kwargs,
         )
 

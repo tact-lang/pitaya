@@ -91,6 +91,15 @@ class ClaudeOutputParser:
             "type": event_type,
             "timestamp": data.get("timestamp", datetime.now(timezone.utc).isoformat()),
         }
+        # Surface assistant text content in-stream for diagnostics/logging
+        # This does not affect canonical events; it is only written to runner.jsonl
+        if event_type == "assistant" and self.last_message:
+            # Keep a concise but informative snapshot; avoid huge payloads
+            try:
+                snippet = self.last_message if len(self.last_message) <= 4000 else (self.last_message[:4000] + "…")
+            except Exception:
+                snippet = self.last_message
+            event["content"] = snippet
 
         # Parse based on event type
         if event_type == "system" and data.get("subtype") == "init":

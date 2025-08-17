@@ -191,14 +191,17 @@ class EventProcessor:
         strategy_name = "unknown"
         if sid and self.state.current_run and sid in self.state.current_run.strategies:
             strategy_name = self.state.current_run.strategies[sid].strategy_name
-        inst = InstanceDisplay(
-            instance_id=iid,
-            strategy_name=strategy_name,
-            status=InstanceStatus.QUEUED,
-            branch_name=data.get("branch_name", ""),
-        )
-        self.state.current_run.instances[iid] = inst
-        self.state.current_run.total_instances += 1
+        inst = self.state.current_run.instances.get(iid)
+        if not inst:
+            inst = InstanceDisplay(
+                instance_id=iid,
+                strategy_name=strategy_name,
+                status=InstanceStatus.QUEUED,
+                branch_name=data.get("branch_name", ""),
+            )
+            self.state.current_run.instances[iid] = inst
+        # Keep total_instances in sync with unique instances only
+        self.state.current_run.total_instances = len(self.state.current_run.instances)
         # Best-effort grouping by strategy name when available
         if sid and self.state.current_run and sid in self.state.current_run.strategies:
             strat = self.state.current_run.strategies[sid]
@@ -244,6 +247,8 @@ class EventProcessor:
                 if iid not in strat.instance_ids:
                     strat.instance_ids.append(iid)
                     strat.total_instances += 1
+        # Keep total_instances accurate
+        self.state.current_run.total_instances = len(self.state.current_run.instances)
 
     def _handle_task_completed(self, event: Dict[str, Any]) -> None:
         self._ensure_current_run()
@@ -257,6 +262,48 @@ class EventProcessor:
             art = data.get("artifact", {})
             if art.get("branch_final"):
                 inst.branch_name = art.get("branch_final")
+            # Persist completion time and duration if start known
+            try:
+                ts = event.get("timestamp") or event.get("ts")
+                inst.completed_at = self._parse_timestamp(ts) or inst.completed_at
+                if inst.started_at and inst.completed_at:
+                    # Calculate in seconds (monotonic best-effort)
+                    start = inst.started_at
+                    end = inst.completed_at
+                    try:
+                        if end.tzinfo != start.tzinfo:
+                            end = end.replace(tzinfo=start.tzinfo)
+                    except Exception:
+                        pass
+                    inst.duration_seconds = max(0.0, (end - start).total_seconds())
+            except Exception:
+                pass
+            # Capture metrics from canonical payload
+            metrics = data.get("metrics", {})
+            if metrics:
+                try:
+                    tc = metrics.get("total_cost")
+                    inst.cost = float(tc) if isinstance(tc, (int, float)) else inst.cost
+                except Exception:
+                    pass
+                try:
+                    tt = metrics.get("total_tokens")
+                    if isinstance(tt, (int, float)):
+                        inst.total_tokens = int(tt)
+                except Exception:
+                    pass
+                # Optional in/out tokens
+                try:
+                    it = metrics.get("input_tokens")
+                    ot = metrics.get("output_tokens")
+                    if isinstance(it, (int, float)):
+                        inst.input_tokens = int(it)
+                    if isinstance(ot, (int, float)):
+                        inst.output_tokens = int(ot)
+                except Exception:
+                    pass
+        # Keep total_instances accurate
+        self.state.current_run.total_instances = len(self.state.current_run.instances)
 
     def _handle_task_progress(self, event: Dict[str, Any]) -> None:
         self._ensure_current_run()
@@ -307,6 +354,8 @@ class EventProcessor:
         if inst:
             inst.status = InstanceStatus.FAILED
             inst.error = data.get("message")
+        # Keep total_instances accurate
+        self.state.current_run.total_instances = len(self.state.current_run.instances)
 
     def _handle_task_interrupted(self, event: Dict[str, Any]) -> None:
         self._ensure_current_run()
@@ -323,6 +372,8 @@ class EventProcessor:
             self.state.current_run.active_instances = max(
                 0, self.state.current_run.active_instances - 1
             )
+        # Keep total_instances accurate
+        self.state.current_run.total_instances = len(self.state.current_run.instances)
 
     # Run-level event handlers
 
@@ -387,8 +438,9 @@ class EventProcessor:
                 self.state.current_run.started_at = strategy.started_at
         except Exception:
             pass
+        # Log with the canonical 'name' when present
         logger.info(
-            f"Created strategy {strategy_id} ({data.get('strategy_name', 'unknown')})"
+            f"Created strategy {strategy_id} ({strategy.strategy_name or data.get('name','unknown')})"
         )
 
     def _handle_strategy_completed(self, event: Dict[str, Any]) -> None:
@@ -433,17 +485,19 @@ class EventProcessor:
             logger.warning(f"No instance_id in event: {event}")
             return
 
-        instance = InstanceDisplay(
-            instance_id=instance_id,
-            strategy_name=data.get("strategy", "unknown"),
-            status=InstanceStatus.QUEUED,
-            branch_name=data.get("branch_name"),
-            last_updated=self._parse_timestamp(event.get("timestamp"))
-            or datetime.now(),
-        )
-
-        self.state.current_run.instances[instance_id] = instance
-        self.state.current_run.total_instances += 1
+        # Avoid double-creating when canonical task.scheduled already handled it
+        if instance_id not in self.state.current_run.instances:
+            instance = InstanceDisplay(
+                instance_id=instance_id,
+                strategy_name=data.get("strategy", "unknown"),
+                status=InstanceStatus.QUEUED,
+                branch_name=data.get("branch_name"),
+                last_updated=self._parse_timestamp(event.get("timestamp"))
+                or datetime.now(),
+            )
+            self.state.current_run.instances[instance_id] = instance
+        # Keep total_instances accurate
+        self.state.current_run.total_instances = len(self.state.current_run.instances)
 
         # Add instance to strategy tracking
         strategy_name = data.get("strategy", "unknown")
@@ -637,13 +691,15 @@ class EventProcessor:
                 branch_name=data.get("branch_name"),
             )
             self.state.current_run.instances[instance_id] = inst
-            self.state.current_run.total_instances += 1
         else:
             # Update strategy name/branch if missing
             if inst.strategy_name == "unknown" and data.get("strategy_name"):
                 inst.strategy_name = data.get("strategy_name")
             if not inst.branch_name and data.get("branch_name"):
                 inst.branch_name = data.get("branch_name")
+
+        # Keep total_instances accurate
+        self.state.current_run.total_instances = len(self.state.current_run.instances)
 
         # Add to strategy grouping if possible
         strategy_name = data.get("strategy_name")

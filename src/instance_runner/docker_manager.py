@@ -307,7 +307,7 @@ class DockerManager:
                     require_ro = (str(import_policy).lower() == "never")
                     try:
                         import os as _os
-                        review_mode_env = _os.environ.get("ORCHESTRATOR_RUNNER__REVIEW_WORKSPACE_MODE", "rw").lower()
+                        review_mode_env = _os.environ.get("ORCHESTRATOR_RUNNER__REVIEW_WORKSPACE_MODE", "ro").lower()
                         require_ro = require_ro and (review_mode_env == "ro")
                     except Exception:
                         pass
@@ -411,7 +411,7 @@ class DockerManager:
                 selinux_mode = "z"
 
             # Review workspace RO mode setting via env (default rw)
-            review_mode = os.environ.get("ORCHESTRATOR_RUNNER__REVIEW_WORKSPACE_MODE", "rw").lower()
+            review_mode = os.environ.get("ORCHESTRATOR_RUNNER__REVIEW_WORKSPACE_MODE", "ro").lower()
 
 
             # Build mounts explicitly to avoid SDK ambiguity with volumes

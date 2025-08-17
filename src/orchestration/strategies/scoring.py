@@ -88,7 +88,12 @@ class ScoringStrategy(Strategy):
 
 ORIGINAL TASK: {prompt}"""
 
-        scoring_task = {"prompt": review_prompt, "base_branch": generation_result.branch_name}
+        scoring_task = {
+            "prompt": review_prompt,
+            "base_branch": generation_result.branch_name,
+            # Review/scoring tasks should not create branches; run read-only when configured
+            "import_policy": "never",
+        }
         scoring_handle = await ctx.run(scoring_task, key=ctx.key(*prefix, "score", generation_handle.instance_id, "attempt-1"))
         scoring_result = await ctx.wait(scoring_handle)
 

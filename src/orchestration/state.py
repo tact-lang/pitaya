@@ -56,6 +56,7 @@ class StrategyExecution:
     started_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     completed_at: Optional[datetime] = None
     results: List[InstanceResult] = field(default_factory=list)
+    total_instances: int = 0
 
 
 @dataclass
@@ -126,6 +127,18 @@ class RunState:
                     "interrupted_at": (
                         info.interrupted_at.isoformat() if info.interrupted_at else None
                     ),
+                    "result": (
+                        {
+                            "success": bool(info.result.success),
+                            "branch_name": info.result.branch_name,
+                            "has_changes": bool(info.result.has_changes),
+                            "metrics": info.result.metrics or {},
+                            "status": info.result.status,
+                            "session_id": info.result.session_id,
+                        }
+                        if info.result is not None
+                        else None
+                    ),
                 }
                 for id, info in self.instances.items()
             },
@@ -140,6 +153,7 @@ class RunState:
                     "completed_at": (
                         strat.completed_at.isoformat() if strat.completed_at else None
                     ),
+                    "total_instances": getattr(strat, "total_instances", 0),
                 }
                 for id, strat in self.strategies.items()
             },
@@ -195,6 +209,20 @@ class RunState:
                     datetime.fromisoformat(info_data["interrupted_at"]) if info_data.get("interrupted_at") else None
                 ),
             )
+            # Rehydrate minimal result if present
+            try:
+                r = info_data.get("result")
+                if r:
+                    state.instances[id].result = InstanceResult(
+                        success=bool(r.get("success", False)),
+                        branch_name=r.get("branch_name"),
+                        has_changes=bool(r.get("has_changes", False)),
+                        metrics=r.get("metrics") or {},
+                        session_id=r.get("session_id"),
+                        status=str(r.get("status") or ("success" if r.get("success") else "failed")),
+                    )
+            except Exception:
+                pass
 
         # Restore strategies
         for id, strat_data in data.get("strategies", {}).items():
@@ -210,6 +238,7 @@ class RunState:
                     if strat_data["completed_at"]
                     else None
                 ),
+                total_instances=int(strat_data.get("total_instances", 0)),
             )
 
         return state
@@ -478,6 +507,10 @@ class StateManager:
                 "state.task_registered",
                 {"key": key, "fingerprint": fingerprint},
             )
+        try:
+            logger.debug(f"state.register_task: key={key} fp={fingerprint[:8]}...")
+        except Exception:
+            pass
 
     def update_instance_state(
         self,
@@ -495,14 +528,45 @@ class StateManager:
             return
 
         old_state = info.state
+        # Assign new state for downstream logic, but keep old_state for comparisons
         info.state = state
 
         if state == InstanceStatus.RUNNING and not info.started_at:
             info.started_at = datetime.now(timezone.utc)
 
         elif state == InstanceStatus.INTERRUPTED:
-            # Mark interruption without completing
-            info.interrupted_at = datetime.now(timezone.utc)
+            # Only act on a true transition into INTERRUPTED
+            if old_state != InstanceStatus.INTERRUPTED:
+                info.interrupted_at = datetime.now(timezone.utc)
+                # Emit canonical task.interrupted immediately when durable key exists
+                try:
+                    if self.event_bus and getattr(self.event_bus, "persist_path", None):
+                        # Find durable key and strategy_execution_id
+                        key = (info.metadata or {}).get("key")
+                        if key:
+                            sid = None
+                            for s_id, strat in self.current_state.strategies.items():
+                                if instance_id in strat.instance_ids:
+                                    sid = s_id
+                                    break
+                            run_id = self.current_state.run_id
+                            self.event_bus.emit_canonical(
+                                type="task.interrupted",
+                                run_id=run_id,
+                                strategy_execution_id=sid,
+                                key=key,
+                                payload={"key": key, "instance_id": instance_id},
+                            )
+                            # Force flush to avoid losing the event on abrupt shutdown
+                            try:
+                                self.event_bus.flush_pending()
+                            except Exception:
+                                pass
+                except Exception:
+                    pass
+            # Persist minimal result if provided (helps resume/summary)
+            if result is not None:
+                info.result = result
 
         elif state in (InstanceStatus.COMPLETED, InstanceStatus.FAILED):
             # Only set completed_at once
@@ -527,7 +591,7 @@ class StateManager:
                 self.current_state.total_cost += cost
                 self.current_state.total_tokens += tokens
 
-        # Emit state change event
+        # Emit state change event (idempotent; consumers can de-dupe if old==new)
         if self.event_bus:
             event_data = {
                 "instance_id": instance_id,
@@ -535,13 +599,11 @@ class StateManager:
                 "new_state": state.value,
             }
 
-            if state == InstanceStatus.RUNNING:
+            if state == InstanceStatus.RUNNING and info.started_at:
                 event_data["started_at"] = info.started_at.isoformat()
-            elif state == InstanceStatus.INTERRUPTED:
-                event_data["interrupted_at"] = (
-                    info.interrupted_at.isoformat() if info.interrupted_at else datetime.now(timezone.utc).isoformat()
-                )
-            elif state in (InstanceStatus.COMPLETED, InstanceStatus.FAILED):
+            elif state == InstanceStatus.INTERRUPTED and info.interrupted_at:
+                event_data["interrupted_at"] = info.interrupted_at.isoformat()
+            elif state in (InstanceStatus.COMPLETED, InstanceStatus.FAILED) and info.completed_at:
                 event_data["completed_at"] = info.completed_at.isoformat()
                 if result:
                     event_data["branch_name"] = result.branch_name
@@ -551,6 +613,12 @@ class StateManager:
             self.event_bus.emit(
                 "state.instance_updated", event_data, instance_id=instance_id
             )
+        try:
+            logger.debug(
+                f"state.update_instance_state: iid={instance_id} {old_state.value}->{state.value}"
+            )
+        except Exception:
+            pass
 
         asyncio.create_task(self._maybe_snapshot())
 
@@ -566,6 +634,48 @@ class StateManager:
             self.event_bus.emit(
                 "state.instance_updated",
                 {"instance_id": instance_id, "session_id": session_id, "new_state": info.state.value, "old_state": info.state.value},
+                instance_id=instance_id,
+            )
+
+    def update_instance_metadata(self, instance_id: str, patch: Dict[str, Any]) -> None:
+        """Merge metadata fields for an instance and emit a state update event.
+
+        This is used to surface resume diagnostics and control flags (e.g., reuse_container).
+        """
+        if not self.current_state:
+            return
+        info = self.current_state.instances.get(instance_id)
+        if not info:
+            return
+        try:
+            info.metadata = {**(info.metadata or {}), **(patch or {})}
+        except Exception:
+            # Best-effort merge
+            info.metadata = patch or {}
+        if self.event_bus:
+            self.event_bus.emit(
+                "state.instance_updated",
+                {"instance_id": instance_id, "metadata": info.metadata, "new_state": info.state.value, "old_state": info.state.value},
+                instance_id=instance_id,
+            )
+
+    def update_instance_container_name(self, instance_id: str, container_name: str) -> None:
+        """Update container name for an instance (e.g., fresh resume renaming)."""
+        if not self.current_state:
+            return
+        info = self.current_state.instances.get(instance_id)
+        if not info:
+            return
+        info.container_name = container_name
+        if self.event_bus:
+            self.event_bus.emit(
+                "state.instance_updated",
+                {
+                    "instance_id": instance_id,
+                    "container_name": container_name,
+                    "new_state": info.state.value,
+                    "old_state": info.state.value,
+                },
                 instance_id=instance_id,
             )
 

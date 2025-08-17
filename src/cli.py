@@ -1647,9 +1647,7 @@ Examples:
             if shutdown_task:
                 tasks.append(shutdown_task)
 
-            done, pending = await asyncio.wait(
-                tasks, return_when=asyncio.FIRST_COMPLETED
-            )
+            done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
 
             # Check if shutdown was requested
             shutdown_requested = False
@@ -1791,6 +1789,24 @@ Examples:
         except KeyboardInterrupt:
             # This should rarely be reached now due to signal handler
             # But keep it for safety
+            return 130
+        except KeyboardInterrupt:
+            # Ensure graceful shutdown on Ctrl+C in TUI path
+            self.console.print("\n[yellow]Interrupted by user[/yellow]")
+            if self.orchestrator:
+                try:
+                    await self.orchestrator.shutdown()
+                except Exception:
+                    pass
+            if not args.resume and not args.resume_fresh:
+                # Show resume command if we have a run id
+                rid = run_id
+                if rid:
+                    self.console.print("\n[blue]To resume this run:[/blue]")
+                    self.console.print(f"  orchestrator --resume {rid}")
+                    self.console.print(
+                        f"  orchestrator --resume-fresh {rid}  # With fresh containers\n"
+                    )
             return 130
         except (OrchestratorError, DockerError, ValidationError) as e:
             self.console.print(f"[red]Error: {e}[/red]")

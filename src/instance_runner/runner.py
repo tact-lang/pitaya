@@ -81,6 +81,7 @@ async def run_instance(
     container_name: Optional[str] = None,
     model: str = "sonnet",
     session_id: Optional[str] = None,
+    operator_resume: bool = False,
     session_group_key: Optional[str] = None,
     event_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
     timeout_seconds: int = 3600,
@@ -202,6 +203,7 @@ async def run_instance(
             container_name=container_name,
             model=model,
             session_id=current_session_id,
+            operator_resume=operator_resume,
             session_group_key=session_group_key,
             event_callback=event_callback,
             timeout_seconds=timeout_seconds,
@@ -270,6 +272,7 @@ async def _run_instance_attempt(
     container_name: str,
     model: str,
     session_id: Optional[str],
+    operator_resume: bool,
     session_group_key: Optional[str],
     event_callback: Optional[Callable[[Dict[str, Any]], None]],
     timeout_seconds: int,
@@ -389,6 +392,7 @@ async def _run_instance_attempt(
                 run_id=run_id,
                 strategy_execution_id=strategy_execution_id,
                 container_name=container_name,
+                reuse_if_exists=operator_resume,
             )
             logger.info(f"Workspace prepared at: {workspace_dir}")
 
@@ -526,6 +530,7 @@ async def _run_instance_attempt(
                 ),
                 system_prompt=system_prompt,
                 append_system_prompt=append_system_prompt,
+                operator_resume=operator_resume,
                 max_turns=max_turns,
             )
 

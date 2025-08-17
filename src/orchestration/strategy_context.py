@@ -145,6 +145,13 @@ class StrategyContext:
         policy: Optional[Dict[str, Any]] = None,
     ) -> Handle:
         """Schedule a durable task and return a handle."""
+        try:
+            if getattr(self._orchestrator, "event_bus", None):
+                self._orchestrator.event_bus.emit(
+                    "strategy.debug", {"op": "run_start", "key": key, "task_keys": sorted(list(task.keys()))}
+                )
+        except Exception:
+            pass
         # Compute canonical fingerprint (JCS-like sorted JSON) with nulls dropped
         canonical = {
             "schema_version": "1",
@@ -194,6 +201,11 @@ class StrategyContext:
             self._orchestrator.state_manager.register_task(key, fingerprint, encoded_to_use)
         except ValueError as e:
             # KeyConflictDifferentFingerprint
+            if getattr(self._orchestrator, "event_bus", None):
+                self._orchestrator.event_bus.emit(
+                    "strategy.debug",
+                    {"op": "key_conflict", "key": key, "fingerprint": fingerprint, "error": str(e)},
+                )
             raise
 
         # Derive model and prompt
@@ -232,6 +244,14 @@ class StrategyContext:
             },
             key=key,
         )
+        try:
+            if getattr(self._orchestrator, "event_bus", None):
+                self._orchestrator.event_bus.emit(
+                    "strategy.debug",
+                    {"op": "run_spawned", "key": key, "iid": instance_id},
+                )
+        except Exception:
+            pass
 
         # Emit canonical scheduled event
         if getattr(self._orchestrator, "event_bus", None):

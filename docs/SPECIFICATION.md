@@ -227,7 +227,7 @@ Events flow unidirectionally upward:
 - Orchestration writes strategy-level events (strategy.started, strategy.completed) and maps runner events to the public task lifecycle.
 - TUI consumes events to update displays
 
-Note: Orchestration may ingest runner events for live state and diagnostics, but ONLY canonical `task.*` and `strategy.*` events are written to `events.jsonl`. Runner events are routed to `runner.jsonl` and are not part of the public file contract.
+Note: Orchestration may ingest runner events for live state and diagnostics, but ONLY canonical `task.*` and `strategy.*` events are written to `events.jsonl`. Runner events are routed to `runner.jsonl` (one line per `instance.*` event) and are not part of the public file contract. A single writer per run writes both files under `logs/<run_id>/`.
 
 The event system uses append-only file storage (`events.jsonl`) with monotonic byte offsets for position tracking. A single writer task computes the `start_offset` (byte position before writing the line), appends the JSON line, and flushes according to the configured flush policy (interval-based batching by default, or per-event with `--safe-fsync=per_event`). The event records this `start_offset`. Components can request events from a specific `start_offset` for recovery after disconnection.
 
@@ -241,8 +241,7 @@ The event system uses append-only file storage (`events.jsonl`) with monotonic b
 
 **Event Envelope**
 
-- Public events in `events.jsonl`: `task.scheduled`, `task.started`, `task.completed`, `task.failed`, `task.interrupted`, `strategy.started`, `strategy.completed`, and `strategy.rand`. See the “Minimum Payload Fields” section for the canonical schema and required payload fields. The public namespace is `task.*` and `strategy.*`; additional `strategy.*` event types MAY exist but MUST have normative schemas.
- - Public events in `events.jsonl`: `task.scheduled`, `task.started`, `task.progress`, `task.completed`, `task.failed`, `task.interrupted`, `strategy.started`, `strategy.completed`, and `strategy.rand`. See the “Minimum Payload Fields” section for the canonical schema and required payload fields. The public namespace is `task.*` and `strategy.*`; additional event types MAY exist but MUST have normative schemas.
+- Public events in `events.jsonl`: `task.scheduled`, `task.started`, `task.progress`, `task.completed`, `task.failed`, `task.interrupted`, `strategy.started`, `strategy.completed`, and `strategy.rand`. See the “Minimum Payload Fields” section for the canonical schema and required payload fields. The public namespace is `task.*` and `strategy.*`; additional event types MAY exist but MUST have normative schemas.
 - Envelope fields are authoritative for `ts`, `run_id`, and `strategy_execution_id`. Payloads MUST NOT duplicate these.
 - Each event includes `{id, type, ts, run_id, strategy_execution_id, key?, start_offset, payload}`.
   - For `task.*` events, `key` is REQUIRED.
@@ -316,7 +315,7 @@ TUI and summaries MUST use the same criteria to avoid ambiguity.
   - Default `interval`: batch and fsync every `events.flush_policy.interval_ms` or `max_batch`.
   - Optional `per_event`: fsync after each event; slower but safest.
 - Truncated last line rule: readers MUST skip any unterminated last line until a newline appears.
-- Snapshots (`state.json`) persist a durable offset reference. Implementations MAY store either the `start_offset` of the last applied event or the file position immediately after it ("next offset"). On recovery, readers MUST resume from a position that guarantees replay of only events not yet applied.
+- Snapshots (`state.json`) persist a durable offset reference. Implementations MAY store either the `start_offset` of the last applied event or the file position immediately after it ("next offset"; named `last_event_offset` in this implementation). On recovery, readers MUST resume from a position that guarantees replay of only events not yet applied.
 - Timestamp queries: `get_events_since(ts)` MUST locate the first event with `ts ≥ T` (by scanning or index) and return from that event’s `start_offset` to avoid partial-line reads. If `ts` refers to an event that was written but not yet fsynced (writer crash window), readers MUST start from the last durable `start_offset` ≤ that event. Snapshots (`state.json.last_event_start_offset`) MUST reference only fsynced offsets.
 - Sanitization: Before writing any record to `events.jsonl`, orchestration MUST pass the entire event object (envelope + payload) through the recursive sanitizer to redact secrets.
 
@@ -992,12 +991,32 @@ The Orchestration component provides five essential interfaces:
 
 **State Management**: The `get_current_state()` function returns a complete snapshot of the system: running tasks, active strategies, aggregate metrics. This enables the TUI to display current status without tracking individual events. State includes derived data like "5 of 10 tasks complete" for progress displays.
 
-**Event System**: The `subscribe()` function sets up file watching on `events.jsonl` to receive real-time events. Orchestration writes the canonical public events (`task.scheduled|started|completed|failed|interrupted` and `strategy.started|completed`) — see the “Minimum Payload Fields” section for the canonical schema. Runner-specific events are kept in `runner.jsonl` and are not part of the public file contract. The runner NEVER writes public `task.*`/`strategy.*` events; orchestration emits them, and `task.completed` is written only after `run_instance()` returns. Exactly one writer per run is enforced by `events.jsonl.lock` (see Event Log Contract). This decoupling means TUI never directly calls Instance Runner. Even in-process components use file watching for consistency.
+**Event System**: The `subscribe()` function sets up file watching on `events.jsonl` to receive real-time events. Orchestration writes the canonical public events (`task.scheduled|started|progress|completed|failed|interrupted` and `strategy.started|completed`) — see the “Minimum Payload Fields” section for the canonical schema. Runner-specific events are kept in `runner.jsonl` and are not part of the public file contract. The runner NEVER writes public `task.*`/`strategy.*` events; orchestration emits them, and `task.completed` is written only after `run_instance()` returns. Exactly one writer per run is enforced by `events.jsonl.lock` (see Event Log Contract). This decoupling means TUI never directly calls Instance Runner. Even in-process components use file watching for consistency.
+
+Shutdown/Interruption Semantics (normative): When the operator interrupts the run (e.g., Ctrl+C), orchestration MUST:
+
+- Transition all RUNNING tasks to `INTERRUPTED` in state, capturing `interrupted_at`.
+- Emit a canonical `task.interrupted { key, instance_id }` for each such task immediately upon transition and synchronously flush pending events to disk to ensure durability before process exit.
+- For each strategy execution that has not yet produced any successful `task.completed`, emit a canonical `strategy.completed { status: "canceled", reason: "operator_interrupt" }` and flush pending events.
+- Stop any still-running containers in parallel as part of graceful shutdown. Implementations SHOULD use a short stop timeout (≤1s) to avoid the Docker default 10s grace period (PID 1 ignores SIGTERM by default). A management override MAY be provided (e.g., `ORCHESTRATOR_SHUTDOWN_STOP_TIMEOUT_S`).
 
 **Event History**: The `get_events_since()` function retrieves historical events from `events.jsonl` starting at a given `start_offset` (byte position before the line) or timestamp. Accepts run_id, offset/timestamp, optional event type filters, and result limit. The events file is never rotated during an active run; rotation/archival may occur only after the run completes. Implementations MAY scan the file if no index is present; indexing is optional but recommended for long runs.
 Timestamp to offset (normative): When called with a timestamp, the implementation MUST locate the first record with `ts ≥ T` (by scanning or via an index) and begin returning events from that record’s `start_offset`.
 
 **Run Resumption**: The `resume_run()` function restores an interrupted run from saved state. It loads the state snapshot, replays events, verifies container existence, checks plugin capabilities, and continues execution from where it left off. Supports both session-based resume and fresh restart options.
+
+Resumption behavior (normative):
+
+- Re-open previously terminal strategy executions that require continuation (clear `completed_at`, set state to `running`). Orchestration SHOULD emit a canonical `strategy.started { name, params, resumed: true }` for each re-opened strategy to prime consumers that attach after the initial run.
+- Backfill canonical terminal events for any terminal tasks that are missing from `events.jsonl` (exactly once per task): emit a synthetic `task.completed|task.failed|task.interrupted` with the correct payload, preserving idempotency.
+- Enqueue only `QUEUED`, `RUNNING`, or `INTERRUPTED` tasks for execution and preserve parallelism gating via the same executor/queue. Already-terminal tasks are NOT re-enqueued.
+- Downstream scheduling MUST be per-candidate: as each generation task completes, dependent scoring/review tasks are scheduled immediately (no batch barrier across candidates).
+- Fresh resume option (`--resume-fresh`) MUST clear `resume_session_id`, set `reuse_container=false`, and assign a new container name; otherwise orchestration SHOULD attempt session resume when the plugin advertises `supports_resume=true` and the original container exists.
+
+Completion and summary (normative):
+
+- On successful resumption to completion, set the run’s `completed_at` to the final completion time (not the initial interruption time) and write a `run.completed` management event for local consumers.
+- The `results/summary.json` status MUST be `"interrupted"` if and only if at least one task’s final state is `INTERRUPTED`; otherwise it MUST be `"completed"`. For resumed runs that finish successfully, the top-level `completed_at` MUST reflect the final completion time after resumption.
 
 These APIs follow a key principle: make simple things simple, complex things possible. Running a basic strategy is one function call, but power users can subscribe to detailed events for monitoring.
 
@@ -1305,7 +1324,7 @@ Determinism note: `import_conflict_policy="suffix"` breaks strict determinism of
 
 **Workspace Cleanup**: After successful import, the temporary workspace is immediately deleted to free disk space. Failed instances retain their workspaces according to the retention policy, allowing post-mortem analysis of what the AI agent attempted.
 
-Workspaces are not used for resume; they exist solely for debugging and import. Resume relies on persistent session volumes and container state.
+Workspaces are reused on resume when available. The orchestrator reattaches the previous isolated git workspace path (derived deterministically from `run_id` and container name) instead of re-cloning from the base. This preserves uncommitted filesystem state across interruption and resume, so agents can continue exactly where they left off. If the workspace is missing or invalid, the system falls back to a fresh clone. A separate `--resume-fresh` mode forces a new workspace for that instance.
 
 **Audit Trail**: Each import operation is logged with:
 
@@ -1374,6 +1393,7 @@ results/
 - Aggregate metrics (total cost, duration, tokens)
 - Task-level details and outcomes
 - Strategy-specific results
+ - Top-level `status` where `"interrupted"` indicates at least one task ended `INTERRUPTED` at run end; otherwise `"completed"`. On resumed runs that reach completion, `completed_at` reflects the final end-of-run time.
  - Optional: `provenance_excerpt` for each imported artifact (latest orchestrator note line) for quick audit
 
 **Metrics Export**: Time-series data in CSV format:
@@ -2209,7 +2229,7 @@ Resume capability preserves work across interruptions while keeping control expl
 
 1. Stop all running containers (preserving their state), regardless of `finalize` settings
 2. Save current orchestration state snapshot
-3. Set all RUNNING tasks to `INTERRUPTED` and persist `interrupted_at`
+3. Set all RUNNING tasks to `INTERRUPTED` and persist `interrupted_at`; emit canonical `task.interrupted` for tasks with a durable key
 4. Display resume command
 5. Exit quickly (typically under 10 seconds for 20 containers)
 
@@ -2253,15 +2273,17 @@ No automatic detection of previous runs. No "found interrupted run, continue?" p
 
 - **Interrupted instances** (including those inferred after a crash):
   - If container exists AND plugin supports resume: Resume from saved session
-  - If container exists BUT plugin doesn't support resume: Mark as `cannot_resume`
-  - If container missing BUT workspace exists: Mark as `container_missing`
-  - If both container and workspace missing: Mark as `artifacts_missing`
+  - If container exists BUT plugin doesn't support resume: Record diagnostic `resume_diagnostic=cannot_resume` in state metadata
+  - If container missing BUT workspace exists: Record diagnostic `resume_diagnostic=container_missing` in state metadata
+  - If both container and workspace missing: Record diagnostic `resume_diagnostic=artifacts_missing` in state metadata
 
 - **Queued instances**: Start normally
 
 Override rule (normative): On resume, orchestration MUST override any `resume_session_id` present in a task input with the most recent persisted `session_id` from `state.json` before calling the runner. This prevents races with later session updates.
 
-Diagnostic note: The isolated workspace is never used for resume; only the container/session state matters. Any references to `workspace` presence in statuses (e.g., `artifacts_missing`) are diagnostic for post‑mortem only and MUST NOT trigger resume logic from the workspace.
+Execution scope (v1): Resume re-enters strategy code so downstream phases (e.g., scoring/review) can be scheduled as each generation completes. Durable task keys and fingerprint checks ensure idempotency: re-entry MUST NOT duplicate already-registered work. Only tasks that were previously registered (QUEUED/RUNNING/INTERRUPTED) or deterministically rescheduled by strategy re-entry will execute; no speculative replay of arbitrary past code occurs.
+
+Diagnostic note: The isolated workspace is a first-class resume artifact. On resume, the runner reuses the prior workspace when present and valid, preserving uncommitted changes. If the workspace is missing or invalid, resume proceeds with a fresh clone (files from the prior attempt will not be present in that case). Status diagnostics MAY still reference workspace presence for post‑mortem analysis.
 
 **Immediate Finalization on Resume**
 
@@ -2270,6 +2292,12 @@ Diagnostic note: The isolated workspace is never used for resume; only the conta
 Notes on Sessions:
 
 - Each instance's `session_id` MUST be persisted in `state.json`. Resume MUST rely on this persisted `session_id` rather than event replay to determine resumability. If event replay does occur and includes newer `session_id` updates, those MUST overwrite the in-memory value before any resume checks.
+ - When resuming a task (operator-initiated resume), the runner MUST pass the session identifier to the tool's CLI resume flag and MUST NOT re-send the original prompt. The session state drives continuation; no duplicate prompt text is provided on resume.
+
+Resume knobs:
+
+- `--resume-fresh` MUST re-run incomplete instances with fresh containers (new container name, `reuse_container=false`, and no session). Branch naming remains unchanged. Implementations MAY append a short suffix to the container name for uniqueness (e.g., `_r<short>`).
+- Implementations MAY store `reuse_container` in per-instance metadata to drive container reuse on subsequent runs.
 
 Special cases:
 

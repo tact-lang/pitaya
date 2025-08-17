@@ -182,6 +182,7 @@ class Orchestrator:
         self._shutdown = True
 
         # Mark any running instances as interrupted before cancelling tasks
+        interrupted_ids: list[str] = []
         if self.state_manager and self.state_manager.current_state:
             try:
                 for instance in list(self.state_manager.current_state.instances.values()):
@@ -190,6 +191,7 @@ class Orchestrator:
                             instance_id=instance.instance_id,
                             state=InstanceStatus.INTERRUPTED,
                         )
+                        interrupted_ids.append(instance.instance_id)
             except Exception as e:
                 logger.warning(f"Failed to mark running instances as interrupted: {e}")
 
@@ -225,7 +227,14 @@ class Orchestrator:
                             instance_info.container_name
                         )
                         if container:
-                            await docker_mgr.stop_container(container)
+                            # Use a short timeout to avoid the 10s default wait on PID1 SIGTERM
+                            # Allow env override ORCHESTRATOR_SHUTDOWN_STOP_TIMEOUT_S (default 1)
+                            try:
+                                import os as _os
+                                tmo = int(_os.environ.get("ORCHESTRATOR_SHUTDOWN_STOP_TIMEOUT_S", "1"))
+                            except Exception:
+                                tmo = 1
+                            await docker_mgr.stop_container(container, timeout=max(0, tmo))
                             logger.info(
                                 f"Stopped container {instance_info.container_name}"
                             )
@@ -249,6 +258,43 @@ class Orchestrator:
             except Exception:
                 pass
 
+        # Note: canonical task.interrupted is emitted by StateManager.update_instance_state
+
+        # Emit strategy canceled completions (canonical) when applicable
+        try:
+            if self.state_manager and self.state_manager.current_state and self.event_bus:
+                run_id = self.state_manager.current_state.run_id
+                for sid, strat in self.state_manager.current_state.strategies.items():
+                    # Skip strategies already completed/failed
+                    if getattr(strat, "completed_at", None):
+                        continue
+                    # Determine if any instance succeeded (COMPLETED)
+                    inst_ids = list(strat.instance_ids)
+                    any_success = False
+                    for iid in inst_ids:
+                        info = self.state_manager.current_state.instances.get(iid)
+                        if info and info.state == InstanceStatus.COMPLETED:
+                            any_success = True
+                            break
+                    status = "success" if any_success else "canceled"
+                    payload = {"status": status}
+                    if status == "canceled":
+                        payload["reason"] = "operator_interrupt"
+                    logger.debug(f"shutdown: emit strategy.completed sid={sid} status={status}")
+                    self.event_bus.emit_canonical(
+                        type="strategy.completed",
+                        run_id=run_id,
+                        strategy_execution_id=sid,
+                        payload=payload,
+                    )
+                # Flush pending canonical events to ensure durability
+                try:
+                    self.event_bus.flush_pending()
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
         # Close event bus
         if self.event_bus:
             self.event_bus.close()
@@ -256,6 +302,10 @@ class Orchestrator:
         # Save final state
         if self.state_manager:
             await self.state_manager.save_snapshot()
+            try:
+                await self.state_manager.stop_periodic_snapshots()
+            except Exception:
+                pass
 
     async def run_strategy(
         self,
@@ -396,10 +446,16 @@ class Orchestrator:
 
                             self.event_bus.emit("strategy.completed", {"strategy_id": strat_id, "result_count": len(res), "branch_names": [r.branch_name for r in res if r.branch_name]})
                             # Canonical completion with normative status semantics
-                            status = "success" if any(getattr(r, "success", False) for r in (res or [])) else "failed"
-                            payload = {"status": status}
-                            if status == "failed":
-                                payload["reason"] = "no_successful_tasks"
+                            any_success = any(getattr(r, "success", False) for r in (res or []))
+                            # On operator shutdown with no success, classify as canceled
+                            if not any_success and self._shutdown:
+                                status = "canceled"
+                                payload = {"status": status, "reason": "operator_interrupt"}
+                            else:
+                                status = "success" if any_success else "failed"
+                                payload = {"status": status}
+                                if status == "failed":
+                                    payload["reason"] = "no_successful_tasks"
                             self.event_bus.emit_canonical(
                                 type="strategy.completed",
                                 run_id=run_id,
@@ -497,10 +553,15 @@ class Orchestrator:
                 )
 
                 self.event_bus.emit("strategy.completed", {"strategy_id": strategy_id, "result_count": len(results), "branch_names": [r.branch_name for r in results if r.branch_name]})
-                status = "success" if any(getattr(r, "success", False) for r in (results or [])) else "failed"
-                payload = {"status": status}
-                if status == "failed":
-                    payload["reason"] = "no_successful_tasks"
+                any_success = any(getattr(r, "success", False) for r in (results or []))
+                if not any_success and self._shutdown:
+                    status = "canceled"
+                    payload = {"status": status, "reason": "operator_interrupt"}
+                else:
+                    status = "success" if any_success else "failed"
+                    payload = {"status": status}
+                    if status == "failed":
+                        payload["reason"] = "no_successful_tasks"
                 self.event_bus.emit_canonical(
                     type="strategy.completed",
                     run_id=run_id,
@@ -578,7 +639,7 @@ class Orchestrator:
             Instance ID for tracking
         """
         logger.info(
-            f"spawn_instance called: strategy={strategy_name}, prompt={prompt[:30]}..."
+            f"spawn_instance: strategy={strategy_name} sid={strategy_execution_id} key={(metadata or {}).get('key','-')}"
         )
 
         # Check disk space before starting (spec: validate before instances)
@@ -625,6 +686,9 @@ class Orchestrator:
         else:
             container_name = f"orchestrator_{run_id_val}_s{sidx}_i{instance_index}"
             branch_name = f"{strategy_name}_{run_id_val}_{sidx}_{instance_index}"
+        logger.debug(
+            f"spawn_instance: iid={instance_id} container={container_name} branch={branch_name}"
+        )
 
         # Register instance only if this durable key wasn't seen before
         if instance_id not in self.state_manager.current_state.instances:
@@ -637,6 +701,7 @@ class Orchestrator:
                 container_name=container_name,
                 metadata=metadata,
             )
+            logger.debug(f"spawn_instance: registered iid={instance_id}")
 
         # Add instance to strategy
         if (
@@ -647,14 +712,57 @@ class Orchestrator:
             if instance_id not in inst_list:
                 inst_list.append(instance_id)
 
-        # Only enqueue if not already enqueued/known
+        # Ensure a future exists for this instance and enqueue if needed
+        info = self.state_manager.current_state.instances.get(instance_id)
+        if info is None:
+            # Should not happen: registered above
+            info = InstanceInfo(
+                instance_id=instance_id,
+                strategy_name=strategy_name,
+                prompt=prompt,
+                base_branch=base_branch,
+                branch_name=branch_name,
+                container_name=container_name,
+                state=InstanceStatus.QUEUED,
+                metadata=metadata or {},
+            )
+            self.state_manager.current_state.instances[instance_id] = info
+
         if instance_id not in self._instance_futures:
-            future = asyncio.Future()
-            self._instance_futures[instance_id] = future
-            logger.info(f"Queueing instance {instance_id} for execution")
-            await self._instance_queue.put(instance_id)
-            self.event_bus.emit("instance.queued", {"instance_id": instance_id, "strategy": strategy_name, "branch_name": branch_name}, instance_id=instance_id)
-            # Canonical task.scheduled already emitted in StrategyContext.run; no-op for spawn_instance without key
+            # If the instance is already terminal, create an already-completed future
+            if info.state in (InstanceStatus.COMPLETED, InstanceStatus.FAILED):
+                fut = asyncio.Future()
+                # Synthesize minimal result if missing (e.g., on resume after reload)
+                if not info.result:
+                    from ..shared import InstanceResult as _IR
+                    info.result = _IR(
+                        success=(info.state == InstanceStatus.COMPLETED),
+                        branch_name=info.branch_name,
+                        has_changes=False,
+                        metrics={},
+                        session_id=info.session_id,
+                        status=("success" if info.state == InstanceStatus.COMPLETED else "failed"),
+                    )
+                fut.set_result(info.result)
+                self._instance_futures[instance_id] = fut
+                logger.debug(f"spawn_instance: iid={instance_id} already terminal ({info.state.value}); returning completed future")
+            elif info.state == InstanceStatus.INTERRUPTED:
+                # Create a pending future; resume_run will enqueue it if resumable
+                self._instance_futures[instance_id] = asyncio.Future()
+                logger.debug(f"spawn_instance: iid={instance_id} interrupted; pending future created (enqueue deferred to resume)")
+            else:
+                # QUEUED or RUNNING: create future and ensure it's enqueued
+                future = asyncio.Future()
+                self._instance_futures[instance_id] = future
+                # If not already queued/running in executor, enqueue
+                logger.info(f"spawn_instance: queue iid={instance_id} for execution")
+                await self._instance_queue.put(instance_id)
+                self.event_bus.emit(
+                    "instance.queued",
+                    {"instance_id": instance_id, "strategy": strategy_name, "branch_name": branch_name},
+                    instance_id=instance_id,
+                )
+                # Canonical task.scheduled already emitted in StrategyContext.run; no-op here
 
         logger.info(f"Instance {instance_id} queued successfully")
         return instance_id
@@ -734,6 +842,7 @@ class Orchestrator:
             instance_id=instance_id,
             state=InstanceStatus.RUNNING,
         )
+        logger.debug(f"_execute_instance: iid={instance_id} -> RUNNING model={(info.metadata or {}).get('model','-')} key={(info.metadata or {}).get('key','-')}")
 
         # Emit instance.started event for TUI and canonical mapping when key available
         self.event_bus.emit("instance.started", {"strategy": info.strategy_name, "prompt": info.prompt, "model": info.metadata.get("model", "sonnet"), "branch_name": info.branch_name}, instance_id=instance_id)
@@ -850,6 +959,7 @@ class Orchestrator:
                     break
 
             # Run the instance
+            logger.info(f"_execute_instance: starting run_instance iid={instance_id} container={info.container_name}")
             result = await run_instance(
                 prompt=info.prompt,
                 repo_path=self.state_manager.current_state.repo_path,
@@ -862,6 +972,7 @@ class Orchestrator:
                 container_name=info.container_name,
                 model=info.metadata.get("model", "sonnet"),
                 session_id=(info.session_id or (info.metadata or {}).get("resume_session_id")),
+                operator_resume=bool((info.metadata or {}).get("operator_resume", False)),
                 event_callback=event_callback,
                 timeout_seconds=3600,  # Default 1 hour, could be made configurable
                 container_limits=self.container_limits,
@@ -872,7 +983,9 @@ class Orchestrator:
                 skip_empty_import=bool((info.metadata or {}).get("skip_empty_import", True)),
                 network_egress=(info.metadata or {}).get("network_egress"),
                 max_turns=(info.metadata or {}).get("max_turns"),
+                reuse_container=bool((info.metadata or {}).get("reuse_container", True)),
             )
+            logger.info(f"_execute_instance: run_instance finished iid={instance_id} success={result.success} status={getattr(result,'status',None)}")
 
             # Populate strategy-specific metadata on the result per spec
             try:
@@ -898,6 +1011,7 @@ class Orchestrator:
                 state=new_state,
                 result=result,
             )
+            logger.debug(f"_execute_instance: iid={instance_id} terminal={new_state.value}")
 
             # Emit canonical terminal events when key is present
             if task_key:
@@ -939,6 +1053,7 @@ class Orchestrator:
                         except Exception:
                             truncated_flag = False
                             rel_path = ""
+                    logger.debug(f"emit task.completed key={task_key} iid={instance_id} branch={result.branch_name} has_changes={result.has_changes}")
                     self.event_bus.emit_canonical(
                         type="task.completed",
                         run_id=self.state_manager.current_state.run_id,
@@ -954,15 +1069,23 @@ class Orchestrator:
                             "final_message_path": rel_path,
                         },
                     )
-                elif new_state == InstanceStatus.INTERRUPTED:
-                    self.event_bus.emit_canonical(
-                        type="task.interrupted",
-                        run_id=self.state_manager.current_state.run_id,
-                        strategy_execution_id=strategy_execution_id,
-                        key=task_key,
-                        payload={"key": task_key, "instance_id": instance_id},
-                    )
-                else:
+                elif new_state != InstanceStatus.INTERRUPTED:
+                    logger.debug(f"emit task.failed key={task_key} iid={instance_id} err={result.error_type}:{result.error}")
+                    # Map internal error types to the spec's closed set
+                    _map = {
+                        "docker": "docker",
+                        "git": "git",
+                        "timeout": "timeout",
+                        "auth": "auth",
+                        "session_corrupted": "session_corrupted",
+                        "claude": "api",
+                        "orchestration": "unknown",
+                        "validation": "unknown",
+                        "system": "unknown",
+                        "unexpected": "unknown",
+                    }
+                    etype = (result.error_type or "unknown").lower()
+                    mapped_type = _map.get(etype, etype if etype in {"docker","api","network","git","timeout","session_corrupted","auth","unknown"} else "unknown")
                     self.event_bus.emit_canonical(
                         type="task.failed",
                         run_id=self.state_manager.current_state.run_id,
@@ -971,7 +1094,7 @@ class Orchestrator:
                         payload={
                             "key": task_key,
                             "instance_id": instance_id,
-                            "error_type": result.error_type or "unknown",
+                            "error_type": mapped_type,
                             "message": result.error or "",
                             "network_egress": (info.metadata or {}).get("network_egress"),
                         },
@@ -1196,88 +1319,295 @@ class Orchestrator:
         if not saved_state:
             raise ValueError(f"No saved state found for run {run_id}")
 
-        # Build tasks according to resume policy
+        # Prime repo_path for StrategyContext.spawn_instance on re-entry
+        try:
+            self.repo_path = saved_state.repo_path
+        except Exception:
+            pass
+        try:
+            # Log instance state counts for diagnostics
+            counts = {"queued":0, "running":0, "interrupted":0, "completed":0, "failed":0}
+            for iid, info in self.state_manager.current_state.instances.items():
+                k = info.state.value
+                counts[k] = counts.get(k,0)+1
+            logger.info(f"resume_run: instances total={len(self.state_manager.current_state.instances)} counts={counts}")
+        except Exception:
+            pass
+
+        # Backfill missing canonical terminal events for already-terminal instances
+        try:
+            # Collect instance_ids that already have terminal canonical events in the log
+            term_types = {"task.completed", "task.failed", "task.interrupted"}
+            seen_terminals: set[str] = set()
+            try:
+                events, _ = self.event_bus.get_events_since(offset=0, event_types=term_types)
+            except Exception:
+                events = []
+            for ev in events or []:
+                payload = ev.get("payload") or {}
+                iid = payload.get("instance_id") or ev.get("instance_id")
+                if iid:
+                    seen_terminals.add(str(iid))
+
+            # Emit synthetic terminal events for terminal instances missing from the log
+            for iid, info in list(self.state_manager.current_state.instances.items()):
+                try:
+                    task_key = (info.metadata or {}).get("key")
+                    if not task_key:
+                        continue
+                    if info.state.value not in ("completed", "failed", "interrupted"):
+                        continue
+                    if iid in seen_terminals:
+                        continue
+                    # Find strategy execution id for envelope
+                    strategy_execution_id = None
+                    for sid, strat in self.state_manager.current_state.strategies.items():
+                        if iid in strat.instance_ids:
+                            strategy_execution_id = sid
+                            break
+                    if info.state.value == "completed":
+                        res = info.result
+                        if not res:
+                            continue
+                        artifact = {
+                            "type": "branch",
+                            "branch_planned": info.branch_name,
+                            "branch_final": res.branch_name,
+                            "base": info.base_branch,
+                            "commit": getattr(res, "commit", None) or "",
+                            "has_changes": bool(res.has_changes),
+                            "duplicate_of_branch": getattr(res, "duplicate_of_branch", None),
+                            "dedupe_reason": getattr(res, "dedupe_reason", None),
+                        }
+                        logger.debug(f"backfill: task.completed iid={iid} key={task_key}")
+                        self.event_bus.emit_canonical(
+                            type="task.completed",
+                            run_id=run_id,
+                            strategy_execution_id=strategy_execution_id,
+                            key=task_key,
+                            payload={
+                                "key": task_key,
+                                "instance_id": iid,
+                                "artifact": artifact,
+                                "metrics": res.metrics or {},
+                                "final_message": (res.final_message or ""),
+                                "final_message_truncated": False,
+                                "final_message_path": "",
+                            },
+                        )
+                    elif info.state.value == "failed":
+                        res = info.result
+                        logger.debug(f"backfill: task.failed iid={iid} key={task_key}")
+                        self.event_bus.emit_canonical(
+                            type="task.failed",
+                            run_id=run_id,
+                            strategy_execution_id=strategy_execution_id,
+                            key=task_key,
+                            payload={
+                                "key": task_key,
+                                "instance_id": iid,
+                                "error_type": (res.error_type if res else "unknown"),
+                                "message": (res.error if res else ""),
+                                "network_egress": (info.metadata or {}).get("network_egress"),
+                            },
+                        )
+                    else:  # interrupted
+                        logger.debug(f"backfill: task.interrupted iid={iid} key={task_key}")
+                        self.event_bus.emit_canonical(
+                            type="task.interrupted",
+                            run_id=run_id,
+                            strategy_execution_id=strategy_execution_id,
+                            key=task_key,
+                            payload={"key": task_key, "instance_id": iid},
+                        )
+                except Exception:
+                    # best-effort backfill
+                    pass
+        except Exception:
+            pass
+
+        # Re-open strategies that were marked terminal due to interruption so we can re-enter
+        try:
+            for sid, strat in list(self.state_manager.current_state.strategies.items()):
+                # If strategy was marked completed/failed but there is work to resume or continue, set to running
+                # Heuristic: if any instance exists for this strategy (regardless of state), we allow re-entry
+                if getattr(strat, "completed_at", None) is not None:
+                    strat.completed_at = None
+                    old = strat.state
+                    strat.state = "running"
+                    # Emit state update event
+                    logger.info(f"Re-opening strategy {sid} for resume re-entry (was {old})")
+                    if self.event_bus:
+                        self.event_bus.emit(
+                            "state.strategy_updated",
+                            {"strategy_id": sid, "old_state": old, "new_state": "running"},
+                        )
+                        # Also emit a canonical strategy.started with a 'resumed' hint for downstream consumers
+                        try:
+                            self.event_bus.emit_canonical(
+                                type="strategy.started",
+                                run_id=run_id,
+                                strategy_execution_id=sid,
+                                payload={
+                                    "name": strat.strategy_name,
+                                    "params": strat.config or {},
+                                    "resumed": True,
+                                },
+                            )
+                        except Exception:
+                            pass
+        except Exception:
+            pass
+
+        # Start periodic snapshots during resume for liveness
+        await self.state_manager.start_periodic_snapshots()
+
+        # Respect resource gating by using the executor queue
         from ..shared import InstanceStatus as _IS
         from ..instance_runner.plugins import AVAILABLE_PLUGINS
         plugin = AVAILABLE_PLUGINS["claude-code"]()
-        resume_tasks: list[asyncio.Task] = []
-        cannot_resume_count = 0
-
-        # Docker client to check container existence
         from ..instance_runner.docker_manager import DockerManager
         docker_manager = DockerManager()
 
+        scheduled_ids: list[str] = []
+        cannot_resume_count = 0
+
+        # Helper to enqueue existing instance IDs
+        async def _enqueue(iid: str) -> None:
+            if iid not in self._instance_futures:
+                self._instance_futures[iid] = asyncio.Future()
+            await self._instance_queue.put(iid)
+
         for iid, info in saved_state.instances.items():
-            if info.state in (_IS.RUNNING, _IS.INTERRUPTED):
-                if force_fresh:
-                    resume_tasks.append(
-                        asyncio.create_task(self._run_instance_from_saved_state(info))
-                    )
-                else:
-                    can_resume = False
-                    try:
-                        if info.session_id and plugin.capabilities.supports_resume:
-                            await asyncio.get_event_loop().run_in_executor(
-                                None,
-                                lambda: docker_manager.client.containers.get(info.container_name),
-                            )
-                            can_resume = True
-                    except Exception:
-                        can_resume = False
-
-                    if can_resume:
-                        async def do_resume(inst) -> InstanceResult:
-                            return await run_instance(
-                                prompt=inst.prompt,
-                                repo_path=saved_state.repo_path,
-                                base_branch=inst.base_branch,
-                                branch_name=inst.branch_name,
-                                run_id=saved_state.run_id,
-                                strategy_execution_id=None,
-                                instance_id=inst.instance_id,
-                                container_name=inst.container_name,
-                                model=inst.metadata.get("model", "sonnet"),
-                                session_id=inst.session_id,
-                                event_callback=lambda e: self.event_bus.emit(e.get("type", "instance.event"), e.get("data", {}), instance_id=inst.instance_id),
-                                timeout_seconds=3600,
-                                container_limits=self.container_limits,
-                                auth_config=self.auth_config,
-                                reuse_container=True,
-                                finalize=True,
-                                import_policy=(inst.metadata or {}).get("import_policy", "auto"),
-                                import_conflict_policy=(inst.metadata or {}).get("import_conflict_policy", "fail"),
-                                skip_empty_import=bool((inst.metadata or {}).get("skip_empty_import", True)),
-                            )
-                        resume_tasks.append(asyncio.create_task(do_resume(info)))
+            try:
+                # Resume or re-run only RUNNING/INTERRUPTED; start queued normally
+                if info.state in (_IS.RUNNING, _IS.INTERRUPTED):
+                    if force_fresh:
+                        # Use fresh container: clear session, forbid reuse, new container name
+                        self.state_manager.update_instance_session_id(iid, None)
+                        # mark reuse flag off and drop provided resume_session_id
+                        meta_patch = {"reuse_container": False, "resume_session_id": None}
+                        # generate a new container name suffix
+                        try:
+                            new_name = f"{info.container_name}_r{uuid.uuid4().hex[:4]}"
+                            # Update container name in state and emit an update
+                            self.state_manager.update_instance_container_name(iid, new_name)
+                            meta_patch["container_name_override"] = new_name
+                        except Exception:
+                            pass
+                        self.state_manager.update_instance_metadata(iid, meta_patch)
+                        # Move to queued for visibility
+                        self.state_manager.update_instance_state(iid, _IS.QUEUED)
+                        await _enqueue(iid)
+                        scheduled_ids.append(iid)
+                        logger.info(f"resume_run: scheduled fresh iid={iid} (new container) for execution")
                     else:
-                        self.state_manager.update_instance_state(
-                            instance_id=info.instance_id,
-                            state=_IS.FAILED,
-                            result=InstanceResult(
-                                success=False,
-                                error="cannot_resume",
-                                error_type="cannot_resume",
-                                branch_name=info.branch_name,
-                                status="failed",
-                            ),
-                        )
-                        cannot_resume_count += 1
+                        # Resume only if container exists and plugin supports resume
+                        can_resume = False
+                        if info.session_id and plugin.capabilities.supports_resume:
+                            try:
+                                await asyncio.get_event_loop().run_in_executor(
+                                    None, lambda: docker_manager.client.containers.get(info.container_name)
+                                )
+                                can_resume = True
+                            except Exception:
+                                can_resume = False
+                        if can_resume:
+                            # Ensure reuse flag remains True
+                            self.state_manager.update_instance_metadata(iid, {"reuse_container": True, "operator_resume": True})
+                            self.state_manager.update_instance_state(iid, _IS.QUEUED)
+                            await _enqueue(iid)
+                            scheduled_ids.append(iid)
+                            logger.info(f"resume_run: scheduled resume iid={iid} container={info.container_name}")
+                        else:
+                            # Record diagnostic classification without inflating failures
+                            diag = "container_missing" if info.session_id else "cannot_resume"
+                            self.state_manager.update_instance_metadata(iid, {"resume_diagnostic": diag})
+                            # Keep state as INTERRUPTED; do not convert to FAILED
+                            cannot_resume_count += 1
+                            logger.warning(f"resume_run: cannot_resume iid={iid} reason={diag}")
+                elif info.state == _IS.QUEUED:
+                    await _enqueue(iid)
+                    scheduled_ids.append(iid)
+                    logger.info(f"resume_run: scheduled queued iid={iid}")
+            except Exception as e:
+                logger.debug(f"Resume scheduling error for {iid}: {e}")
 
-        # Wait for any re-run tasks
-        resumed_results = await asyncio.gather(*resume_tasks, return_exceptions=True) if resume_tasks else []
-        all_results = [r for r in resumed_results if r and not isinstance(r, Exception)]
+        # Do NOT block on all scheduled instances here; allow strategy re-entry to await
+        # them and schedule downstream work (e.g., scoring) as each completes.
+        if scheduled_ids:
+            logger.info(f"resume_run: enqueued {len(scheduled_ids)} instance(s) for resume")
 
-        # Finalize state and save results
-        self.state_manager.current_state.completed_at = datetime.now(timezone.utc)
+        # Re-enter strategies immediately to allow downstream stages (e.g., scoring) to run
+        reentry_results: list[InstanceResult] = []
+        try:
+            from .strategies import AVAILABLE_STRATEGIES as _STRATS
+            prompt = self.state_manager.current_state.prompt
+            base_branch = self.state_manager.current_state.base_branch
+            for sid, strat_exec in list(self.state_manager.current_state.strategies.items()):
+                # Skip if already completed
+                if getattr(strat_exec, "completed_at", None):
+                    continue
+                logger.info(f"Re-entering strategy {strat_exec.strategy_name} sid={sid}")
+                sname = strat_exec.strategy_name
+                if sname not in _STRATS:
+                    continue
+                strat_cls = _STRATS[sname]
+                strat = strat_cls()
+                # Reuse original config captured in state
+                try:
+                    strat.set_config_overrides(strat_exec.config or {})
+                except Exception:
+                    pass
+                # Build context with the same execution id
+                ctx = StrategyContext(self, sname, sid)
+                try:
+                    res = await strat.execute(prompt=prompt, base_branch=base_branch, ctx=ctx)
+                except Exception as e:
+                    logger.error(f"Strategy re-entry failed for {sname}: {e}")
+                    res = []
+                # Update strategy state and emit canonical completion
+                state_value = "completed" if any(getattr(r, "success", False) for r in (res or [])) else "failed"
+                self.state_manager.update_strategy_state(strategy_id=sid, state=state_value, results=res)
+                status = "success" if state_value == "completed" else "failed"
+                payload = {"status": status}
+                if status == "failed":
+                    payload["reason"] = "no_successful_tasks"
+                try:
+                    self.event_bus.emit_canonical(type="strategy.completed", run_id=run_id, strategy_execution_id=sid, payload=payload)
+                except Exception:
+                    pass
+                if res:
+                    reentry_results.extend(res)
+        except Exception as e:
+            logger.debug(f"Strategy re-entry skipped due to error: {e}")
+
+        # Mark run completion time for accurate summaries and save snapshot/results
+        try:
+            if self.state_manager and self.state_manager.current_state:
+                self.state_manager.current_state.completed_at = datetime.now(timezone.utc)
+        except Exception:
+            pass
         await self.state_manager.save_snapshot()
-        await self._save_results(run_id, all_results)
+        # Prefer strategy-level results as the authoritative output; avoid mixing instance-level results
+        final_results: list[InstanceResult] = []
+        try:
+            for sid, strat in self.state_manager.current_state.strategies.items():
+                if strat.results:
+                    final_results.extend(strat.results)
+        except Exception:
+            pass
+        # Fallback: if no strategy results were recorded (unexpected), use reentry_results
+        if not final_results:
+            final_results = reentry_results
+        await self._save_results(run_id, final_results)
 
         self.event_bus.emit(
             "run.completed",
-            {"run_id": run_id, "resumed": True, "cannot_resume": cannot_resume_count, "total_results": len(all_results)},
+            {"run_id": run_id, "resumed": True, "cannot_resume": cannot_resume_count, "total_results": len(final_results)},
         )
 
-        return all_results
+        return final_results
 
     async def _run_instance_from_saved_state(self, instance_info) -> InstanceResult:
         """
@@ -1395,9 +1725,17 @@ class Orchestrator:
                 return
 
             # Prepare summary data
+            # Run is considered interrupted if any instance ended in INTERRUPTED
+            try:
+                any_interrupted = any(
+                    (i.state == InstanceStatus.INTERRUPTED)
+                    for i in self.state_manager.current_state.instances.values()
+                )
+            except Exception:
+                any_interrupted = False
             summary_data = {
                 "run_id": run_id,
-                "status": "completed",
+                "status": ("interrupted" if any_interrupted else "completed"),
                 "started_at": state.started_at.isoformat(),
                 "completed_at": (
                     state.completed_at.isoformat() if state.completed_at else None

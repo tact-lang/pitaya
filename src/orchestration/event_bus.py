@@ -60,6 +60,8 @@ class EventBus:
 
         # Persistence file handle and offset tracking
         self._persist_file: Optional[TextIO] = None
+        # Separate file for runner-level events (instance.*), per spec
+        self._runner_file: Optional[TextIO] = None
         self._current_offset = 0
         self._lock_file: Optional[TextIO] = None
         self._run_id = run_id
@@ -105,6 +107,12 @@ class EventBus:
 
             # Open file in binary append mode to track byte offsets precisely
             self._persist_file = open(self.persist_path, "ab", buffering=0)
+            # Open runner.jsonl alongside for instance.* events (best-effort)
+            try:
+                runner_path = self.persist_path.parent / "runner.jsonl"
+                self._runner_file = open(runner_path, "ab", buffering=0)
+            except Exception:
+                self._runner_file = None
             # Start flusher for interval policy
             if self._flush_policy == "interval":
                 try:
@@ -144,6 +152,15 @@ class EventBus:
         self.event_counts[event_type] += 1
 
         # Do not persist legacy events to events.jsonl; canonical-only per spec
+        # Persist runner-level events to runner.jsonl for diagnostics (best-effort)
+        try:
+            if self._runner_file and isinstance(event_type, str) and event_type.startswith("instance."):
+                line = (json.dumps(event, separators=(",", ":")) + "\n").encode("utf-8")
+                self._runner_file.write(line)
+                # Flush quickly to surface live diagnostics
+                self._runner_file.flush()
+        except Exception:
+            pass
 
         # Notify subscribers
         self._notify_subscribers(event)
@@ -229,6 +246,12 @@ class EventBus:
         }
         self.events.append(mirror)
         self._notify_subscribers(mirror)
+        try:
+            logger.debug(
+                f"canonical.emit: type={type} key={key or '-'} sid={strategy_execution_id or '-'} ts={ts}"
+            )
+        except Exception:
+            pass
 
     def _sanitize(self, obj: Any) -> Any:
         """Redact sensitive fields recursively (best-effort)."""
@@ -258,8 +281,42 @@ class EventBus:
             self._persist_file.flush()
             os.fsync(self._persist_file.fileno())
             self._current_offset += len(line)
+            try:
+                logger.debug(
+                    f"canonical.persist: type={record.get('type')} key={record.get('key','-')} start={start_offset} bytes={len(line)}"
+                )
+            except Exception:
+                pass
         except Exception as e:
             logger.error(f"Failed to persist canonical event: {e}")
+
+    def flush_pending(self) -> None:
+        """Synchronously flush any pending canonical events (best-effort).
+
+        Ensures events are written and fsynced to disk even when using interval policy.
+        Safe to call during shutdown or immediately after critical emissions.
+        """
+        try:
+            if not self._persist_file:
+                return
+            # Drain pending list without awaiting the async lock (best-effort)
+            pending = []
+            try:
+                if self._pending_canonical:
+                    pending = list(self._pending_canonical)
+                    self._pending_canonical.clear()
+            except Exception:
+                pending = []
+            for record, payload in pending:
+                self._write_canonical_immediate(record, payload)
+            # Final fsync barrier
+            try:
+                self._persist_file.flush()
+                os.fsync(self._persist_file.fileno())
+            except Exception:
+                pass
+        except Exception as e:
+            logger.debug(f"flush_pending error: {e}")
 
     async def _flush_loop(self) -> None:
         """Periodic flusher for interval policy."""
