@@ -51,6 +51,7 @@ async def run_instance(
     session_group_key: Optional[str] = None,
     network_egress: Optional[str] = None,
     max_turns: Optional[int] = None,
+    model_mapping_checksum: Optional[str] = None,
 ) -> InstanceResult:
     """
     Execute a single AI coding instance in an isolated environment.
@@ -125,6 +126,7 @@ async def run_instance(
         skip_empty_import=skip_empty_import,
         network_egress=network_egress,
         max_turns=max_turns,
+        model_mapping_checksum=model_mapping_checksum,
     )
 
 

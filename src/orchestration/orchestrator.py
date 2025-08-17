@@ -65,6 +65,8 @@ class Orchestrator:
         event_buffer_size: int = 10000,
         container_retention_failed_hours: int = 24,
         container_retention_success_hours: int = 2,
+        runner_timeout_seconds: int = 3600,
+        default_network_egress: str = "online",
     ):
         """
         Initialize orchestrator.
@@ -87,6 +89,15 @@ class Orchestrator:
         self.event_buffer_size = event_buffer_size
         self.container_retention_failed_hours = container_retention_failed_hours
         self.container_retention_success_hours = container_retention_success_hours
+        self.runner_timeout_seconds = max(1, int(runner_timeout_seconds))
+        self.default_network_egress = str(default_network_egress or "online").lower()
+        # Load model mapping checksum for handshake (single-process still validates equality)
+        try:
+            from ..utils.model_mapping import load_model_mapping
+            _map, _cs = load_model_mapping()
+            self._models_checksum = _cs
+        except Exception:
+            self._models_checksum = None
 
         # Log auth config for debugging
         if self.auth_config:
@@ -1118,7 +1129,7 @@ class Orchestrator:
                 session_id=(info.session_id or (info.metadata or {}).get("resume_session_id")),
                 operator_resume=bool((info.metadata or {}).get("operator_resume", False)),
                 event_callback=event_callback,
-                timeout_seconds=3600,  # Default 1 hour, could be made configurable
+                timeout_seconds=self.runner_timeout_seconds,
                 container_limits=self.container_limits,
                 auth_config=self.auth_config,
                 retry_config=self.retry_config,
@@ -1128,6 +1139,7 @@ class Orchestrator:
                 network_egress=(info.metadata or {}).get("network_egress"),
                 max_turns=(info.metadata or {}).get("max_turns"),
                 reuse_container=bool((info.metadata or {}).get("reuse_container", True)),
+                model_mapping_checksum=self._models_checksum,
             )
             logger.info(f"_execute_instance: run_instance finished iid={instance_id} success={result.success} status={getattr(result,'status',None)}")
 

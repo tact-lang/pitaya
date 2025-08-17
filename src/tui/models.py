@@ -228,8 +228,8 @@ class TUIState:
     # Current run being displayed
     current_run: Optional[RunDisplay] = None
 
-    # Event tracking
-    last_event_offset: int = 0
+    # Event tracking (byte position before the last applied event's start)
+    last_event_start_offset: int = 0
     events_processed: int = 0
 
     # Display state

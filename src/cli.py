@@ -109,12 +109,18 @@ Examples:
             help="Number of parallel strategy executions (default: 1)",
         )
 
-        # Model options
+        # Model options (load from models.yaml mapping if available)
+        try:
+            from .utils.model_mapping import load_model_mapping
+            _mapping, _checksum = load_model_mapping()
+            _model_choices = sorted(list(_mapping.keys())) or ["sonnet", "haiku", "opus"]
+        except Exception:
+            _model_choices = ["sonnet", "haiku", "opus"]
         parser.add_argument(
             "--model",
-            choices=["sonnet", "opus", "haiku"],
+            choices=_model_choices,
             default=os.environ.get("ORCHESTRATOR_DEFAULT_MODEL", "sonnet"),
-            help="Claude model to use (default: env ORCHESTRATOR_DEFAULT_MODEL or 'sonnet')",
+            help="Model alias to use (validated via models.yaml)",
         )
 
         # Repository options
@@ -155,12 +161,17 @@ Examples:
             help="Authentication mode to use (default: auto-detect based on available credentials)",
         )
 
+        # Proxy settings (map to env and runner network egress)
+        parser.add_argument("--proxy-http", help="HTTP proxy URL (sets HTTP_PROXY)")
+        parser.add_argument("--proxy-https", help="HTTPS proxy URL (sets HTTPS_PROXY)")
+        parser.add_argument("--no-proxy", help="Comma-separated NO_PROXY hosts (sets NO_PROXY)")
+
         # Resource limits
         parser.add_argument(
             "--max-parallel",
             type=int,
-            default=20,
-            help="Max parallel instances (default: 20)",
+            default=None,
+            help="Max parallel instances (default: auto = floor(host_cpu/runner.cpu), clamped [2,20])",
         )
         parser.add_argument(
             "--timeout",
@@ -192,6 +203,16 @@ Examples:
         )
         parser.add_argument(
             "--show-run", metavar="RUN_ID", help="Show details of a specific run"
+        )
+        parser.add_argument(
+            "--prune",
+            action="store_true",
+            help="Prune old logs/results according to retention settings",
+        )
+        parser.add_argument(
+            "--prune-dry-run",
+            action="store_true",
+            help="Show what would be pruned without deleting",
         )
         parser.add_argument(
             "--clean-containers",
@@ -227,12 +248,28 @@ Examples:
         parser.add_argument("--debug", action="store_true", help="Enable debug logging")
         # Convenience alias: --json implies --no-tui --output json
         parser.add_argument("--json", action="store_true", help="Output JSON events (implies --no-tui)")
-        # Allow-dirty working tree for preflight
-        parser.add_argument("--allow-dirty", action="store_true", help="Allow running with a dirty working tree")
+        # Working tree cleanliness behavior (spec: warn by default; enforce with flag)
+        parser.add_argument(
+            "--require-clean-wt",
+            action="store_true",
+            help="Require a clean working tree (error if dirty)",
+        )
+        # Back-compat alias: --allow-dirty (now the default; retained as no-op)
+        parser.add_argument(
+            "--allow-dirty",
+            action="store_true",
+            help="Deprecated (default behavior). Dirty working tree only warns.",
+        )
         parser.add_argument(
             "--http-port",
             type=int,
             help="Enable HTTP server on specified port for multi-UI support",
+        )
+        # Session volume scope safety switch (normative; requires explicit consent)
+        parser.add_argument(
+            "--allow-global-session-volume",
+            action="store_true",
+            help="Allow global session volume scope (shares Claude session across runs)",
         )
 
         # Diagnostics
@@ -454,14 +491,17 @@ Examples:
             self.console.print(f"[red]Error checking git repository: {e}[/red]")
             return False
 
-        # 3b. Check working tree is clean unless --allow-dirty
+        # 3b. Check working tree cleanliness (warn by default; enforce with --require-clean-wt)
         try:
             import subprocess
             dirty_cmd = ["git", "-C", str(repo_path), "status", "--porcelain"]
             result = subprocess.run(dirty_cmd, capture_output=True, text=True)
-            if result.returncode == 0 and result.stdout.strip() and not getattr(args, "allow_dirty", False):
-                self.console.print("[red]Working tree has uncommitted changes. Commit/stash or use --allow-dirty.[/red]")
-                return False
+            if result.returncode == 0 and result.stdout.strip():
+                if getattr(args, "require_clean_wt", False):
+                    self.console.print("[red]Working tree has uncommitted changes. Use --require-clean-wt only on clean trees.[/red]")
+                    return False
+                else:
+                    self.console.print("[yellow]Warning: Working tree has uncommitted changes. Proceeding is safe (imports touch refs only). Use --require-clean-wt to enforce cleanliness.[/yellow]")
         except (subprocess.SubprocessError, OSError) as e:
             self.console.print(f"[red]Error checking working tree: {e}[/red]")
             return False
@@ -818,6 +858,91 @@ Examples:
                 self.console.print_exception()
             return 1
 
+    async def run_prune(self, args: argparse.Namespace) -> int:
+        """Prune old runs from logs/results according to retention settings."""
+        try:
+            # Load settings
+            env_config = load_env_config()
+            dotenv_config = load_dotenv_config()
+            defaults = get_default_config()
+            full_config = merge_config({}, env_config, dotenv_config, {}, defaults)
+            logs_dir = full_config.get("logs_dir", Path("./logs"))
+            results_dir = Path("./results")
+            events_ret_days = int(full_config.get("events", {}).get("retention_days", 30))
+            events_grace_days = int(full_config.get("events", {}).get("retention_grace_days", 7))
+            res_ret_days = full_config.get("results", {}).get("retention_days", None)
+            dry = bool(getattr(args, "prune_dry_run", False))
+            import shutil
+            from datetime import datetime, timedelta
+            now = datetime.utcnow()
+            cutoff_events = now - timedelta(days=(events_ret_days + events_grace_days))
+
+            # Prune logs/run_* by completed_at cutoff
+            removed_logs = 0
+            logs_dir_path = Path(logs_dir)
+            if logs_dir_path.exists():
+                for run_dir in logs_dir_path.iterdir():
+                    if not run_dir.is_dir() or not run_dir.name.startswith("run_"):
+                        continue
+                    # Determine completed_at
+                    completed = None
+                    state_file = run_dir / "state.json"
+                    if state_file.exists():
+                        try:
+                            data = json.loads(state_file.read_text())
+                            ca = data.get("completed_at")
+                            if ca:
+                                completed = datetime.fromisoformat(ca.replace("Z", "+00:00"))
+                        except Exception:
+                            pass
+                    if not completed:
+                        # Fallback to directory mtime
+                        try:
+                            completed = datetime.utcfromtimestamp(run_dir.stat().st_mtime)
+                        except Exception:
+                            continue
+                    if completed < cutoff_events:
+                        if dry:
+                            self.console.print(f"[dry-run] Would remove logs: {run_dir}")
+                        else:
+                            shutil.rmtree(run_dir, ignore_errors=True)
+                            removed_logs += 1
+
+            # Prune results if retention configured
+            removed_results = 0
+            if res_ret_days is not None:
+                try:
+                    cutoff_results = now - timedelta(days=int(res_ret_days))
+                except Exception:
+                    cutoff_results = None
+                if cutoff_results is not None and results_dir.exists():
+                    for run_dir in results_dir.iterdir():
+                        if not run_dir.is_dir() or not run_dir.name.startswith("run_"):
+                            continue
+                        try:
+                            ts = datetime.utcfromtimestamp(run_dir.stat().st_mtime)
+                        except Exception:
+                            continue
+                        if ts < cutoff_results:
+                            if dry:
+                                self.console.print(f"[dry-run] Would remove results: {run_dir}")
+                            else:
+                                shutil.rmtree(run_dir, ignore_errors=True)
+                                removed_results += 1
+
+            if not dry:
+                self.console.print(
+                    f"Pruned {removed_logs} log run(s) and {removed_results} result run(s)."
+                )
+            else:
+                self.console.print("Dry-run complete.")
+            return 0
+        except Exception as e:
+            self.console.print(f"[red]Prune failed: {e}[/red]")
+            if args.debug:
+                self.console.print_exception()
+            return 1
+
     def _display_detailed_results(
         self, results: List["InstanceResult"], run_id: str, state: Optional[Any] = None
     ) -> None:
@@ -1111,6 +1236,10 @@ Examples:
         if args.list_runs:
             return await self.run_list_runs(args)
 
+        # Handle prune mode
+        if args.prune:
+            return await self.run_prune(args)
+
         # Handle show-run mode
         if args.show_run:
             return await self.run_show_run(args)
@@ -1162,6 +1291,14 @@ Examples:
             cli_config.setdefault("runner", {})["oauth_token"] = args.oauth_token
         if hasattr(args, "api_key") and args.api_key:
             cli_config.setdefault("runner", {})["api_key"] = args.api_key
+
+        # Apply proxy flags to environment early so downstream components observe them
+        if getattr(args, "proxy_http", None):
+            os.environ["HTTP_PROXY"] = args.proxy_http
+        if getattr(args, "proxy_https", None):
+            os.environ["HTTPS_PROXY"] = args.proxy_https
+        if getattr(args, "no_proxy", None):
+            os.environ["NO_PROXY"] = args.no_proxy
 
         # Merge configurations with proper precedence: CLI > env > .env > file > defaults
         full_config = merge_config(
@@ -1229,9 +1366,36 @@ Examples:
                 )
             self.console.print("  - Built-in defaults")
 
+        # Respect global session volume consent by setting env for runner
+        if getattr(args, "allow_global_session_volume", False):
+            os.environ["ORCHESTRATOR_ALLOW_GLOBAL_SESSION_VOLUME"] = "1"
+            os.environ.setdefault("ORCHESTRATOR_RUNNER__SESSION_VOLUME_SCOPE", "global")
+
+        # Resolve 'auto' for max_parallel per spec
+        if isinstance(max_parallel, str) and max_parallel.lower() == "auto":
+            try:
+                host_cpu = max(1, os.cpu_count() or 1)
+                per_container = max(1, int(container_limits.cpu_count))
+                computed = max(2, min(20, host_cpu // per_container))
+                max_parallel_val = computed
+            except Exception:
+                max_parallel_val = 20
+        else:
+            try:
+                max_parallel_val = int(max_parallel)
+            except Exception:
+                max_parallel_val = 20
+
+        # If proxies were provided, default runner.network_egress to 'proxy' so containers inherit proxy envs
+        try:
+            if (getattr(args, "proxy_http", None) or getattr(args, "proxy_https", None)):
+                full_config.setdefault("runner", {})["network_egress"] = "proxy"
+        except Exception:
+            pass
+
         # Create orchestrator
         self.orchestrator = Orchestrator(
-            max_parallel_instances=int(max_parallel),
+            max_parallel_instances=max_parallel_val,
             state_dir=Path(state_dir),
             logs_dir=Path(logs_dir),
             container_limits=container_limits,
@@ -1241,6 +1405,8 @@ Examples:
             event_buffer_size=int(full_config.get("orchestration", {}).get("event_buffer_size", 10000)),
             container_retention_failed_hours=int(full_config.get("orchestration", {}).get("container_retention_failed", 86400) // 3600 if isinstance(full_config.get("orchestration", {}).get("container_retention_failed", 86400), int) else 24),
             container_retention_success_hours=int(full_config.get("orchestration", {}).get("container_retention_success", 7200) // 3600 if isinstance(full_config.get("orchestration", {}).get("container_retention_success", 7200), int) else 2),
+            runner_timeout_seconds=int(full_config.get("runner", {}).get("timeout", 3600)),
+            default_network_egress=str(full_config.get("runner", {}).get("network_egress", "online")),
         )
 
         # Initialize orchestrator

@@ -83,8 +83,8 @@ class RunState:
     completed_instances: int = 0
     failed_instances: int = 0
 
-    # Event tracking
-    last_event_offset: int = 0
+    # Event tracking (byte position before the last applied event)
+    last_event_start_offset: int = 0
 
     # Durable task registry: key -> {fingerprint:str}
     tasks: Dict[str, Dict[str, Any]] = field(default_factory=dict)
@@ -105,7 +105,7 @@ class RunState:
             "total_instances": self.total_instances,
             "completed_instances": self.completed_instances,
             "failed_instances": self.failed_instances,
-            "last_event_offset": self.last_event_offset,
+            "last_event_start_offset": self.last_event_start_offset,
             "instances": {
                 id: {
                     "instance_id": info.instance_id,
@@ -179,7 +179,7 @@ class RunState:
             total_instances=data.get("total_instances", 0),
             completed_instances=data.get("completed_instances", 0),
             failed_instances=data.get("failed_instances", 0),
-            last_event_offset=data.get("last_event_offset", 0),
+            last_event_start_offset=data.get("last_event_start_offset", 0),
         )
 
         # Restore instances
@@ -331,7 +331,7 @@ class StateManager:
                     with open(path) as f:
                         data = json.load(f)
                     self.current_state = RunState.from_dict(data)
-                    last_offset = self.current_state.last_event_offset
+                    last_offset = self.current_state.last_event_start_offset
                     logger.info(
                         f"Loaded state snapshot for run {run_id} from {path} at offset {last_offset}"
                     )
@@ -370,7 +370,7 @@ class StateManager:
                 # Apply canonical + state events for recovery
                 if all_events:
                     await self.rebuild_from_events(all_events)
-                    self.current_state.last_event_offset = next_offset
+                    self.current_state.last_event_start_offset = next_offset
                     logger.info(f"Applied {len(all_events)} events to recover state")
                 else:
                     logger.info("No new events to apply since snapshot")
@@ -761,12 +761,8 @@ class StateManager:
             return
 
         try:
-            # Ensure last_event_offset reflects current event bus position for recovery
-            if self.event_bus and getattr(self.event_bus, "_current_offset", None) is not None:
-                try:
-                    self.current_state.last_event_offset = int(self.event_bus._current_offset)
-                except Exception:
-                    pass
+            # Preserve last_event_start_offset as updated from applied events; do not
+            # overwrite it with the writer's current file size.
             run_dir = self.state_dir / self.current_state.run_id
             await asyncio.to_thread(run_dir.mkdir, parents=True, exist_ok=True)
 
@@ -880,6 +876,14 @@ class StateManager:
             ts = datetime.fromisoformat(ts_str.replace("Z", "+00:00")) if ts_str else None
         except Exception:
             ts = None
+
+        # Track last applied event start_offset when present (normative)
+        try:
+            so = event.get("start_offset")
+            if isinstance(so, int):
+                self.current_state.last_event_start_offset = so
+        except Exception:
+            pass
 
         if event_type == "state.run_initialized":
             # This would typically create a new state, but during replay

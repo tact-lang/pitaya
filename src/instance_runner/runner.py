@@ -100,6 +100,7 @@ async def run_instance(
     skip_empty_import: bool = True,
     network_egress: Optional[str] = None,
     max_turns: Optional[int] = None,
+    model_mapping_checksum: Optional[str] = None,
 ) -> InstanceResult:
     """
     Execute a single AI coding instance in Docker.
@@ -156,15 +157,24 @@ async def run_instance(
     # Use plugin's default image if not specified
     if docker_image is None:
         docker_image = plugin.docker_image
-    # Defensive model validation (via models.yaml mapping, fallback to defaults)
+    # Defensive model validation and resolution (via models.yaml mapping)
+    resolved_model_id = model
     try:
         from ..utils.model_mapping import load_model_mapping
         mapping, _checksum = load_model_mapping()
+        # Optional handshake: ensure checksum matches orchestrator's view
+        if model_mapping_checksum and _checksum != model_mapping_checksum:
+            raise ValidationError(
+                "models.yaml checksum mismatch between orchestration and runner"
+            )
         allowed_models = set(mapping.keys())
+        if model not in allowed_models:
+            raise ValidationError(f"Unknown model: {model}. Allowed: {sorted(allowed_models)}")
+        resolved_model_id = mapping.get(model, model)
     except Exception:
         allowed_models = {"sonnet", "opus", "haiku"}
-    if model not in allowed_models:
-        raise ValidationError(f"Unknown model: {model}. Allowed: {sorted(allowed_models)}")
+        if model not in allowed_models:
+            raise ValidationError(f"Unknown model: {model}. Allowed: {sorted(allowed_models)}")
 
     # Validate plugin environment
     # Convert AuthConfig to dict for plugin
@@ -207,6 +217,7 @@ async def run_instance(
             instance_id=instance_id,
             container_name=container_name,
             model=model,
+            resolved_model_id=resolved_model_id,
             session_id=current_session_id,
             operator_resume=operator_resume,
             session_group_key=session_group_key,
@@ -276,6 +287,7 @@ async def _run_instance_attempt(
     instance_id: str,
     container_name: str,
     model: str,
+    resolved_model_id: Optional[str],
     session_id: Optional[str],
     operator_resume: bool,
     session_group_key: Optional[str],
@@ -472,6 +484,8 @@ async def _run_instance_attempt(
                         network_egress=(network_egress or "online"),
                         event_callback=event_callback,
                         task_key=task_key,
+                        plugin_name=getattr(plugin, "name", "claude-code"),
+                        resolved_model_id=resolved_model_id,
                     ),
                     timeout=60,
                 )
@@ -518,9 +532,12 @@ async def _run_instance_attempt(
                 pass
 
             # Phase 4: AI Tool Execution
-            logger.info(f"Executing {plugin.name} with model {model}")
+            logger.info(
+                f"Executing {plugin.name} with model {(resolved_model_id or model)} (alias={model})"
+            )
             emit_event(
-                "instance.claude_starting", {"model": model, "session_id": session_id}
+                "instance.claude_starting",
+                {"model": model, "model_id": (resolved_model_id or model), "session_id": session_id},
             )
 
             # Execute via plugin interface
@@ -528,7 +545,7 @@ async def _run_instance_attempt(
                 docker_manager=docker_manager,
                 container=container,
                 prompt=prompt,
-                model=model,
+                model=(resolved_model_id or model),
                 session_id=session_id,
                 timeout_seconds=timeout_seconds,
                 event_callback=lambda event: emit_event(
@@ -603,30 +620,18 @@ async def _run_instance_attempt(
                 },
             )
 
-            # Write runner-local completion record including workspace path
+            # Emit runner-internal completion (persisted by event bus to runner.jsonl) BEFORE cleanup
             try:
-                if log_path:
-                    from pathlib import Path as _P
-                    _p = _P(log_path)
-                    _p.parent.mkdir(parents=True, exist_ok=True)
-                    with open(_p, "a", encoding="utf-8") as fh:
-                        import json as _json
-                        fh.write(
-                            _json.dumps(
-                                {
-                                    "type": "runner.instance.completed",
-                                    "timestamp": datetime.now(timezone.utc).isoformat(),
-                                    "instance_id": instance_id,
-                                    "workspace_path": str(workspace_dir) if workspace_dir else None,
-                                    "branch_name": branch_name,
-                                    "duration_seconds": duration,
-                                },
-                                ensure_ascii=False,
-                            )
-                            + "\n"
-                        )
+                emit_event(
+                    "runner.instance.completed",
+                    {
+                        "instance_id": instance_id,
+                        "workspace_path": str(workspace_dir) if workspace_dir else None,
+                        "branch_imported": final_branch,
+                        "duration_seconds": duration,
+                    },
+                )
             except Exception:
-                # Best-effort; do not fail the run if logging fails
                 pass
 
             # Now clean up workspace for successful instances

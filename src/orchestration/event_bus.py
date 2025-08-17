@@ -171,20 +171,29 @@ class EventBus:
         # Do not persist legacy events to events.jsonl; canonical-only per spec
         # Persist runner-level events to runner.jsonl for diagnostics (best-effort)
         try:
-            if self._runner_file and isinstance(event_type, str) and event_type.startswith("instance."):
+            if self._runner_file and isinstance(event_type, str) and (event_type.startswith("instance.") or event_type.startswith("runner.")):
                 line = (json.dumps(event, separators=(",", ":")) + "\n").encode("utf-8")
-                # Enqueue for background flushing to avoid blocking the event loop
-                self._runner_queue.append(line)
-                if not self._runner_writer_task or self._runner_writer_task.done():
+                # For critical runner completion records, write synchronously to ensure durability before cleanup
+                if event_type == "runner.instance.completed":
                     try:
-                        self._runner_writer_task = asyncio.create_task(self._runner_flush_loop())
-                    except RuntimeError:
-                        # If no running loop yet, write synchronously as fallback
+                        self._runner_file.write(line)
+                        self._runner_file.flush()
+                        os.fsync(self._runner_file.fileno())
+                    except Exception as e:
+                        logger.debug(f"runner.completed sync write error: {e}")
+                else:
+                    # Enqueue for background flushing to avoid blocking the event loop
+                    self._runner_queue.append(line)
+                    if not self._runner_writer_task or self._runner_writer_task.done():
                         try:
-                            self._runner_file.write(line)
-                            self._runner_file.flush()
-                        except Exception:
-                            pass
+                            self._runner_writer_task = asyncio.create_task(self._runner_flush_loop())
+                        except RuntimeError:
+                            # If no running loop yet, write synchronously as fallback
+                            try:
+                                self._runner_file.write(line)
+                                self._runner_file.flush()
+                            except Exception:
+                                pass
         except Exception:
             pass
 

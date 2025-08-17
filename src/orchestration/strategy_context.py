@@ -240,6 +240,8 @@ class StrategyContext:
                 )
         except Exception:
             pass
+        # Provide default network_egress from orchestrator when task doesn't set it
+        _default_egress = getattr(self._orchestrator, "default_network_egress", "online")
         instance_id = await self._orchestrator.spawn_instance(
             prompt=prompt,
             repo_path=self._orchestrator.repo_path,
@@ -256,7 +258,7 @@ class StrategyContext:
                 "import_conflict_policy": task.get("import_conflict_policy", "fail"),
                 "skip_empty_import": bool(task.get("skip_empty_import", True)),
                 "resume_session_id": task.get("resume_session_id"),
-                "network_egress": task.get("network_egress", "online"),
+                "network_egress": task.get("network_egress", _default_egress),
                 "max_turns": task.get("max_turns"),
             },
             key=key,

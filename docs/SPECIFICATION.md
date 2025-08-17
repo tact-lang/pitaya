@@ -22,6 +22,8 @@ The tool transforms single-threaded AI coding into a parallel, strategy-driven p
 
 **RunnerResult** - The runner-level output from a completed task containing: branch artifact info, token usage, cost, execution time, and final message. Strategy-specific scoring/selection metadata lives in orchestration, not in runner results.
 
+**TaskResult (public API)** - Exposed via canonical events (`task.*`, `strategy.*`). V1 does not require a separate typed "TaskResult" structure beyond the canonical event schema. External consumers observe results through the event stream; internal orchestration may use an implementation type (e.g., `InstanceResult`).
+
 **Orchestration Run** - A complete execution of the orchestrator with a chosen strategy. Identified by a unique run ID, it tracks all scheduled tasks, aggregate metrics, and final results.
 
 **Event Stream** - Real-time runner events (internal) and canonical task/strategy events written by orchestration. The TUI consumes the public `task.*` and `strategy.*` events for monitoring.
@@ -1670,7 +1672,7 @@ Implementation notes (current TUI):
 
 These were omitted as they required deeper Claude Code integration than available through the event stream.
 
-# 6. Cross-Cutting Concerns
+# 6. Cross‑Cutting Concerns
 
 ## 6.1 Configuration System
 
@@ -2446,3 +2448,49 @@ Native Windows note: If running outside WSL, enable Windows long‑path support 
 - Python 3.11+
 - 8GB RAM minimum, 16GB recommended for parallel execution
 - 20GB free disk space for Docker images and temporary workspaces
+### 3.5 Container Environment (normative)
+
+Runner MUST set the following environment variables inside the container for observability and correlation:
+
+- `TASK_KEY`: Durable task key used by orchestration
+- `SESSION_GROUP_KEY`: Session group key used to scope the home volume
+- `KHASH`: `short8(sha256(task_key))` or empty when unavailable
+- `GHASH`: `short8(sha256(session_group_key or fallback))`
+
+On Linux with SELinux enabled, the workspace bind mount MUST be labeled with `:z` (and `:z,ro` when review workspace mode is read-only). The home directory MUST be a named Docker volume scoped as documented (per-run by default).
+### 2.5 Resume Semantics (normative)
+
+On resumption of an interrupted run, orchestration MUST:
+
+- Recover state from the latest snapshot and apply canonical events since the recorded offset
+- Backfill canonical terminal events for terminal tasks missing from the log (best-effort)
+- Re-enter all strategy executions concurrently (not serially) so downstream stages (e.g., scoring) can proceed independently as soon as prerequisites complete
+
+Resumption MUST respect resource gates (queue and semaphore) but MUST NOT serialize strategy re-entry.
+## 6.1 Operational Controls
+
+The following environment variables and behaviors are normative in V1:
+
+- Events flush policy:
+  - `ORCHESTRATOR_EVENTS__FLUSH_POLICY = interval|per_event` (default: interval)
+  - `ORCHESTRATOR_EVENTS__FLUSH_INTERVAL_MS` (default: 50)
+  - `ORCHESTRATOR_EVENTS__FLUSH_MAX_BATCH` (default: 256)
+  In interval mode, implementations MUST batch and fsync off-thread; per-event mode MAY fsync synchronously.
+
+- Final message truncation:
+  - `ORCHESTRATOR_EVENTS__MAX_FINAL_MESSAGE_BYTES` (default: 65536)
+  If truncated, implementations MUST set `final_message_truncated=true` and write the full message to a run-relative path under `logs/<run_id>/` in `task.completed`.
+
+- Events retention (pruning):
+  - `ORCHESTRATOR_EVENTS__RETENTION_DAYS` (default: 30)
+  - `ORCHESTRATOR_EVENTS__RETENTION_GRACE_DAYS` (default: 7)
+  Implementations MAY prune `events.jsonl` and `runner.jsonl` for terminal runs older than the retention + grace window.
+
+- Adaptive parallelism:
+  - `ORCHESTRATOR_ADAPTIVE_PARALLELISM=1` enables auto-scaling when the max parallel instances is at its default. Implementations SHOULD detect cgroup CPU quota on Linux and warn when configured parallelism oversubscribes host CPUs.
+
+- Error classification mapping:
+  - When `network_egress=offline`, failures SHOULD be classified as `task.failed.error_type="network"` unless canceled.
+
+- Model mapping handshake:
+  - A shared `models.yaml` mapping MUST be loaded at runtime. A checksum MAY be emitted for distributed deployments. For single-process deployments, checksum emission is OPTIONAL (SHOULD).

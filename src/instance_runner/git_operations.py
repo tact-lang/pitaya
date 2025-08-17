@@ -355,7 +355,7 @@ class GitOperations:
             dedupe_reason: Optional[str] = None
             duplicate_of_branch: Optional[str] = None
 
-            # If branch exists, idempotent pre-check: identical heads → treat as success (by_commit or same_task_provenance)
+            # If branch exists, idempotent pre-check: identical heads → treat as success (same_task_provenance or resume-with-note)
             if branch_exists:
                 br_head_cmd = ["git", "-C", str(repo_path), "rev-parse", f"refs/heads/{branch_name}"]
                 rc, br_head_out = await self._run_command(br_head_cmd)
@@ -365,6 +365,15 @@ class GitOperations:
                     if note_rc == 0 and task_key and (f"task_key={task_key}" in note_out):
                         dedupe_reason = "same_task_provenance"
                     else:
+                        # Treat as resume of the same task: append provenance now under the lock
+                        try:
+                            _ts = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+                            note_lines = [
+                                f"task_key={task_key}; run_id={run_id}; strategy_execution_id={strategy_execution_id}; branch={branch_name}; ts={_ts}"
+                            ]
+                            await self._run_command(["git", "-C", str(repo_path), "notes", "--ref=orchestrator", "add", "-f", "-m", "\n".join(note_lines), workspace_head])
+                        except Exception:
+                            pass
                         dedupe_reason = "by_commit"
                     logger.info("Branch already matches workspace HEAD; idempotent success")
                     return {"has_changes": "true", "target_branch": branch_name, "commit": workspace_head, "duplicate_of_branch": duplicate_of_branch, "dedupe_reason": dedupe_reason}

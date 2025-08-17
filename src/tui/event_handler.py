@@ -1100,7 +1100,7 @@ class AsyncEventStream:
 
                 # Update position for polling to continue from here
                 self._last_position = f.tell()
-                self.event_processor.state.last_event_offset = self._last_position
+                self.event_processor.state.last_event_start_offset = self._last_position
                 logger.info(
                     f"Read {lines_read} existing events, new position: {self._last_position}"
                 )
@@ -1220,7 +1220,7 @@ class AsyncEventStream:
                                 pass
 
                             # Update state
-                            self.event_processor.state.last_event_offset = (
+                            self.event_processor.state.last_event_start_offset = (
                                 self._last_position
                             )
                             # Update previous size

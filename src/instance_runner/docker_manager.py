@@ -213,6 +213,9 @@ class DockerManager:
         network_egress: str = "online",
         event_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
         task_key: Optional[str] = None,
+        *,
+        plugin_name: Optional[str] = None,
+        resolved_model_id: Optional[str] = None,
     ) -> Container:
         """
         Create a Docker container for instance execution.
@@ -396,14 +399,25 @@ class DockerManager:
                 sidx = "0"
                 iidx = "0"
 
-            # Named volume for Claude home as per spec (GHASH over session_group_key)
-            import hashlib
-            group_basis = (session_group_key or (instance_id or container_name or "")).encode("utf-8", errors="ignore")
-            ghash = hashlib.sha256(group_basis).hexdigest()[:8]
+            # Named volume for Claude home as per spec (GHASH)
+            import hashlib, json as _json
+            eff_sgk = session_group_key or (task_key or instance_id or container_name or "")
+            # Scope: default run; allow global only with explicit env opt-in
+            import os as _os
+            scope = (_os.environ.get("ORCHESTRATOR_RUNNER__SESSION_VOLUME_SCOPE") or "run").lower()
+            allow_global = (_os.environ.get("ORCHESTRATOR_ALLOW_GLOBAL_SESSION_VOLUME") or "0").lower() in ("1","true","yes")
+            if scope == "global" and allow_global:
+                payload = {"session_group_key": eff_sgk, "plugin": (plugin_name or ""), "model": (resolved_model_id or "")}
+                enc = _json.dumps(payload, separators=(",", ":"), sort_keys=True)
+                ghash = hashlib.sha256(enc.encode("utf-8", errors="ignore")).hexdigest()[:8]
+                volume_name = f"orc_home_g{ghash}"
+            else:
+                payload = {"session_group_key": eff_sgk}
+                enc = _json.dumps(payload, separators=(",", ":"), sort_keys=True)
+                ghash = hashlib.sha256(enc.encode("utf-8", errors="ignore")).hexdigest()[:8]
+                volume_name = f"orc_home_{(run_id or 'norun')}_g{ghash}"
             # KHASH based on durable task key if provided
             khash = hashlib.sha256((task_key or "").encode("utf-8", errors="ignore")).hexdigest()[:8] if task_key else ""
-            # Scope by run unless configured global (handled by caller via session_group_key contents)
-            volume_name = f"orc_home_{(run_id or 'norun')}_g{ghash}"
 
             # Platform detection for SELinux flag
             import platform

@@ -356,7 +356,8 @@ def get_default_config() -> Dict[str, Any]:
             "tmpfs_size_mb": 512,
         },
         "orchestration": {
-            "max_parallel_instances": 20,
+            # Spec default: auto => max(2, min(20, floor(host_cpu / runner.container_cpu)))
+            "max_parallel_instances": "auto",
             "snapshot_interval": 30,  # seconds
             "event_buffer_size": 10000,
             "container_retention_failed": 86400,  # 24 hours

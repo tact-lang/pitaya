@@ -261,7 +261,7 @@ class TUIDisplay:
                         mode,
                         insts,
                         self.state.events_processed,
-                        self.state.last_event_offset,
+                        self.state.last_event_start_offset,
                         stats.get("queue_size", -1),
                         stats.get("lines_enqueued", -1),
                         stats.get("lines_processed", -1),
@@ -347,7 +347,7 @@ class TUIDisplay:
 
                 # Update offset
                 offset = new_offset
-                self.state.last_event_offset = offset
+                self.state.last_event_start_offset = offset
                 logger.debug(
                     f"http_poll events={len(events)} new_offset={new_offset} dur_ms={(t1 - t0)*1000:.2f}"
                 )
