@@ -62,6 +62,16 @@ class EventBus:
         self._persist_file: Optional[TextIO] = None
         # Separate file for runner-level events (instance.*), per spec
         self._runner_file: Optional[TextIO] = None
+        # Buffered writer state for runner.jsonl to avoid event-loop blocking
+        self._runner_queue: deque[bytes] = deque()
+        self._runner_writer_task: Optional[asyncio.Task] = None
+        try:
+            import os as _os
+            self._runner_flush_interval_ms = max(2, int(_os.environ.get("ORCHESTRATOR_EVENTS__RUNNER_FLUSH_INTERVAL_MS", "10")))
+            self._runner_flush_max_batch = max(1, int(_os.environ.get("ORCHESTRATOR_EVENTS__RUNNER_FLUSH_MAX_BATCH", "512")))
+        except Exception:
+            self._runner_flush_interval_ms = 10
+            self._runner_flush_max_batch = 512
         self._current_offset = 0
         self._lock_file: Optional[TextIO] = None
         self._run_id = run_id
@@ -72,13 +82,20 @@ class EventBus:
         self._file_watchers: List[asyncio.Task] = []
 
         # Flush policy (default interval-based per spec)
-        # Env overrides: ORCHESTRATOR_EVENTS__FLUSH_POLICY=interval|per_event, ORCHESTRATOR_EVENTS__FLUSH_INTERVAL_MS
+        # Env overrides:
+        #   ORCHESTRATOR_EVENTS__FLUSH_POLICY=interval|per_event
+        #   ORCHESTRATOR_EVENTS__FLUSH_INTERVAL_MS
+        #   ORCHESTRATOR_EVENTS__FLUSH_MAX_BATCH (interval mode batch size)
         import os as _os
         self._flush_policy = (_os.environ.get("ORCHESTRATOR_EVENTS__FLUSH_POLICY") or "interval").lower()
         try:
             self._flush_interval_ms = max(5, int(_os.environ.get("ORCHESTRATOR_EVENTS__FLUSH_INTERVAL_MS", "50")))
         except Exception:
             self._flush_interval_ms = 50
+        try:
+            self._flush_max_batch = max(1, int(_os.environ.get("ORCHESTRATOR_EVENTS__FLUSH_MAX_BATCH", "256")))
+        except Exception:
+            self._flush_max_batch = 256
         self._pending_canonical: List[Tuple[Dict[str, Any], Dict[str, Any]]] = []  # (envelope record without start_offset/payload, payload)
         self._pending_lock = asyncio.Lock()
         self._flusher_task: Optional[asyncio.Task] = None
@@ -156,23 +173,67 @@ class EventBus:
         try:
             if self._runner_file and isinstance(event_type, str) and event_type.startswith("instance."):
                 line = (json.dumps(event, separators=(",", ":")) + "\n").encode("utf-8")
-                self._runner_file.write(line)
-                # Flush quickly to surface live diagnostics
-                self._runner_file.flush()
+                # Enqueue for background flushing to avoid blocking the event loop
+                self._runner_queue.append(line)
+                if not self._runner_writer_task or self._runner_writer_task.done():
+                    try:
+                        self._runner_writer_task = asyncio.create_task(self._runner_flush_loop())
+                    except RuntimeError:
+                        # If no running loop yet, write synchronously as fallback
+                        try:
+                            self._runner_file.write(line)
+                            self._runner_file.flush()
+                        except Exception:
+                            pass
         except Exception:
             pass
+
+    async def _runner_flush_loop(self) -> None:
+        """Background flush loop for runner.jsonl writes.
+
+        Drains a small batch every few milliseconds and writes it off-thread
+        in a single call to minimize event-loop blocking.
+        """
+        try:
+            while self._runner_file is not None:
+                # If nothing to write, sleep briefly
+                if not self._runner_queue:
+                    await asyncio.sleep(self._runner_flush_interval_ms / 1000.0)
+                    # Double-check before continuing
+                    if not self._runner_queue:
+                        continue
+                # Drain a batch
+                batch: list[bytes] = []
+                for _ in range(min(self._runner_flush_max_batch, len(self._runner_queue))):
+                    try:
+                        batch.append(self._runner_queue.popleft())
+                    except IndexError:
+                        break
+                if not batch:
+                    continue
+                blob = b"".join(batch)
+                try:
+                    # Perform write + flush off-thread
+                    await asyncio.to_thread(self._runner_file.write, blob)
+                    await asyncio.to_thread(self._runner_file.flush)
+                except Exception as e:
+                    logger.debug(f"runner.flush error: {e}")
+        except asyncio.CancelledError:
+            return
 
         # Notify subscribers
         self._notify_subscribers(event)
 
-        # Enrich debug logging with brief context to aid troubleshooting
+        # Optional verbose debug logging for troubleshooting; disabled by default to
+        # avoid event-loop contention due to heavy logging under high event rates.
         try:
-            keys = ",".join(sorted(list(data.keys()))) if isinstance(data, dict) else "-"
-            iid = instance_id or event.get("instance_id") or "-"
-            logger.debug(f"Emitted event: {event_type} (iid={iid}, keys={keys})")
+            import os as _os
+            if (_os.environ.get("ORCHESTRATOR_EVENTS__VERBOSE_DEBUG") or "").lower() in ("1","true","yes"):
+                keys = ",".join(sorted(list(data.keys()))) if isinstance(data, dict) else "-"
+                iid = instance_id or event.get("instance_id") or "-"
+                logger.debug(f"Emitted event: {event_type} (iid={iid}, keys={keys})")
         except Exception:
-            # Fallback to original single-line message if anything goes wrong
-            logger.debug(f"Emitted event: {event_type}")
+            pass
 
     def _utc_ts_ms_z(self) -> str:
         """Return UTC ISO-8601 timestamp with milliseconds and trailing Z."""
@@ -247,9 +308,11 @@ class EventBus:
         self.events.append(mirror)
         self._notify_subscribers(mirror)
         try:
-            logger.debug(
-                f"canonical.emit: type={type} key={key or '-'} sid={strategy_execution_id or '-'} ts={ts}"
-            )
+            import os as _os
+            if (_os.environ.get("ORCHESTRATOR_EVENTS__VERBOSE_DEBUG") or "").lower() in ("1","true","yes"):
+                logger.debug(
+                    f"canonical.emit: type={type} key={key or '-'} sid={strategy_execution_id or '-'} ts={ts}"
+                )
         except Exception:
             pass
 
@@ -282,9 +345,11 @@ class EventBus:
             os.fsync(self._persist_file.fileno())
             self._current_offset += len(line)
             try:
-                logger.debug(
-                    f"canonical.persist: type={record.get('type')} key={record.get('key','-')} start={start_offset} bytes={len(line)}"
-                )
+                import os as _os
+                if (_os.environ.get("ORCHESTRATOR_EVENTS__VERBOSE_DEBUG") or "").lower() in ("1","true","yes"):
+                    logger.debug(
+                        f"canonical.persist: type={record.get('type')} key={record.get('key','-')} start={start_offset} bytes={len(line)}"
+                    )
             except Exception:
                 pass
         except Exception as e:
@@ -319,22 +384,68 @@ class EventBus:
             logger.debug(f"flush_pending error: {e}")
 
     async def _flush_loop(self) -> None:
-        """Periodic flusher for interval policy."""
+        """Periodic flusher for interval policy.
+
+        Avoids blocking the event loop with per-event fsync by batching writes
+        and offloading the actual file I/O to a background thread.
+        """
         try:
             while self._persist_file and self._flush_policy == "interval":
                 await asyncio.sleep(self._flush_interval_ms / 1000.0)
                 try:
+                    # Drain a batch under lock, then write it out off-thread
                     async with self._pending_lock:
                         if not self._pending_canonical:
                             continue
-                        # Write all pending in order
-                        for record, payload in self._pending_canonical:
-                            self._write_canonical_immediate(record, payload)
-                        self._pending_canonical.clear()
+                        batch = self._pending_canonical[: self._flush_max_batch]
+                        del self._pending_canonical[: self._flush_max_batch]
+                    # Perform a single batched write + fsync off-thread
+                    await asyncio.to_thread(self._write_canonical_batch, batch)
                 except Exception as e:
                     logger.error(f"Error in event flusher: {e}")
         except asyncio.CancelledError:
             return
+
+    def _write_canonical_batch(self, batch: list[tuple[dict, dict]]) -> None:
+        """Write a batch of canonical events in one I/O operation.
+
+        Each entry in batch is (record_without_payload, payload). This method
+        computes start_offset per line, appends payload, writes all lines at
+        once, flushes, fsyncs once, and advances the current offset.
+        """
+        if not self._persist_file or not batch:
+            return
+        try:
+            base = self._current_offset
+            lines: list[bytes] = []
+            offset = base
+            for record, payload in batch:
+                # Compute start_offset for this record
+                record_with_payload = {
+                    **record,
+                    "start_offset": offset,
+                    "payload": self._sanitize(payload),
+                }
+                line = (json.dumps(record_with_payload, separators=(",", ":")) + "\n").encode("utf-8")
+                lines.append(line)
+                offset += len(line)
+            # Write all lines at once
+            self._persist_file.write(b"".join(lines))
+            # Single flush/fsync barrier for the entire batch
+            self._persist_file.flush()
+            os.fsync(self._persist_file.fileno())
+            # Advance current offset
+            self._current_offset = offset
+            try:
+                import os as _os
+                if (_os.environ.get("ORCHESTRATOR_EVENTS__VERBOSE_DEBUG") or "").lower() in ("1","true","yes"):
+                    logger.debug(
+                        f"canonical.persist.batch: count={len(lines)} start={base} bytes={sum(len(l) for l in lines)}"
+                    )
+            except Exception:
+                pass
+        except Exception as e:
+            logger.error(f"Failed to persist canonical batch: {e}")
 
     def _notify_subscribers(self, event: Dict[str, Any]) -> None:
         """Notify all relevant subscribers of an event."""
@@ -491,8 +602,15 @@ class EventBus:
                     while True:
                         if limit and len(events) >= limit:
                             break
+                        pos_before = f.tell()
                         line = f.readline()
                         if not line:
+                            break
+                        if not line.endswith(b"\n"):
+                            try:
+                                f.seek(pos_before)
+                            except Exception:
+                                pass
                             break
                         try:
                             event = json.loads(line.decode("utf-8").strip())
@@ -641,6 +759,24 @@ class EventBus:
         try:
             if self._flusher_task and not self._flusher_task.done():
                 self._flusher_task.cancel()
+        except Exception:
+            pass
+        # Stop runner writer and drain queue
+        try:
+            if self._runner_writer_task and not self._runner_writer_task.done():
+                self._runner_writer_task.cancel()
+        except Exception:
+            pass
+        try:
+            if self._runner_file and self._runner_queue:
+                # Drain synchronously
+                try:
+                    blob = b"".join(self._runner_queue)
+                    self._runner_queue.clear()
+                    self._runner_file.write(blob)
+                    self._runner_file.flush()
+                except Exception:
+                    pass
         except Exception:
             pass
         try:

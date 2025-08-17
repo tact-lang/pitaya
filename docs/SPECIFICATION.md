@@ -238,6 +238,7 @@ The event system uses append-only file storage (`events.jsonl`) with monotonic b
 - Readers MUST tolerate a truncated final line (e.g., during a crash) by skipping it until a terminating newline appears.
 - Writers MUST be single-process per run (single-writer model), emit UTF-8 JSON per line, and flush according to the configured flush policy (interval-based batching by default; per-event when explicitly configured). The event carries the `start_offset` (byte position before the record was written). Implementations MAY expose this via CLI flag (e.g., `--safe-fsync=per_event`) or environment variable (e.g., `ORCHESTRATOR_EVENTS__FLUSH_POLICY=per_event`).
   The single-writer invariant is enforced by an OS lockfile `events.jsonl.lock` (see Event Log Contract below).
+  Implementations MAY also bound the number of events flushed per interval by a configured batch size for latency control (see `events.flush_policy.max_batch`).
 
 **Event Envelope**
 
@@ -313,6 +314,7 @@ TUI and summaries MUST use the same criteria to avoid ambiguity.
 - Exactly one writer per run: enforced by `logs/<run_id>/events.jsonl.lock` held for the run duration (OS-level exclusive lock).
 - Writer computes `start_offset` as the byte position before writing each line, appends UTF‑8 JSON + `\n`, and flushes per configured policy:
   - Default `interval`: batch and fsync every `events.flush_policy.interval_ms` or `max_batch`.
+  - `max_batch` is configurable (default 256) via environment variable `ORCHESTRATOR_EVENTS__FLUSH_MAX_BATCH`.
   - Optional `per_event`: fsync after each event; slower but safest.
 - Truncated last line rule: readers MUST skip any unterminated last line until a newline appears.
 - Snapshots (`state.json`) persist a durable offset reference. Implementations MAY store either the `start_offset` of the last applied event or the file position immediately after it ("next offset"; named `last_event_offset` in this implementation). On recovery, readers MUST resume from a position that guarantees replay of only events not yet applied.
@@ -1740,7 +1742,7 @@ ORCHESTRATOR_DEFAULT_MODEL=sonnet
 
 **Configuration Merging**: Complex deep merge with recursive dictionary merging for nested configurations. Arrays are replaced, not merged.
 
-**Model Mapping (normative)**: Friendly model names MUST resolve via a single shared mapping file `models.yaml`. Both orchestration and runner load from this single file. At process start, each component computes a checksum (e.g., SHA‑256) of the loaded `models.yaml`. Orchestration MUST pass its checksum to the runner (e.g., via environment/config), and the runner MUST fail fast if its checksum does not match. Any divergence or failure to load the same mapping is a configuration error.
+**Model Mapping (normative)**: Friendly model names MUST resolve via a single shared mapping file `models.yaml`. Both orchestration and runner load from this single file. At process start, each component computes a checksum (e.g., SHA‑256) of the loaded `models.yaml`. Orchestration SHOULD pass its checksum to the runner (e.g., via environment/config), and the runner SHOULD fail fast if its checksum does not match. In single‑process deployments where both layers share the same address space and loader, checksum equality is implicit and an explicit handshake MAY be skipped. Any divergence or failure to load the same mapping in multi‑process deployments is a configuration error.
 
 ### 6.1.1 Default Values Catalog (normative)
 

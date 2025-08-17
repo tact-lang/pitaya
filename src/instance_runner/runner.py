@@ -156,8 +156,13 @@ async def run_instance(
     # Use plugin's default image if not specified
     if docker_image is None:
         docker_image = plugin.docker_image
-    # Defensive model validation (also validated by orchestration)
-    allowed_models = {"sonnet", "opus", "haiku"}
+    # Defensive model validation (via models.yaml mapping, fallback to defaults)
+    try:
+        from ..utils.model_mapping import load_model_mapping
+        mapping, _checksum = load_model_mapping()
+        allowed_models = set(mapping.keys())
+    except Exception:
+        allowed_models = {"sonnet", "opus", "haiku"}
     if model not in allowed_models:
         raise ValidationError(f"Unknown model: {model}. Allowed: {sorted(allowed_models)}")
 
@@ -466,6 +471,7 @@ async def _run_instance_attempt(
                         plugin=plugin,
                         network_egress=(network_egress or "online"),
                         event_callback=event_callback,
+                        task_key=task_key,
                     ),
                     timeout=60,
                 )

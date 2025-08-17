@@ -142,14 +142,51 @@ class Orchestrator:
 
         # Adjust parallelism adaptively if beneficial
         try:
-            import os
+            import os, math
             host_cpu = max(1, os.cpu_count() or 1)
+            # cgroup-aware effective CPUs (best-effort)
+            try:
+                import platform
+                from pathlib import Path as _P
+                if platform.system() == "Linux":
+                    cpu_max = _P("/sys/fs/cgroup/cpu.max")
+                    if cpu_max.exists():
+                        parts = cpu_max.read_text().strip().split()
+                        if len(parts) >= 2 and parts[0] != "max":
+                            quota = float(parts[0])
+                            period = float(parts[1]) or 100000.0
+                            eff = int(math.ceil(quota / period))
+                            if eff > 0:
+                                host_cpu = eff
+                    else:
+                        q = _P("/sys/fs/cgroup/cpu/cpu.cfs_quota_us")
+                        p = _P("/sys/fs/cgroup/cpu/cpu.cfs_period_us")
+                        if q.exists() and p.exists():
+                            quota = float(q.read_text().strip() or "0")
+                            period = float(p.read_text().strip() or "100000")
+                            if quota > 0 and period > 0:
+                                eff = int(math.ceil(quota / period))
+                                if eff > 0:
+                                    host_cpu = eff
+            except Exception:
+                pass
             per_container = max(1, int(self.container_limits.cpu_count))
             adaptive = max(2, min(20, host_cpu // per_container))
-            if self.max_parallel_instances == 20 and adaptive != 20:
-                logger.info(f"Adaptive parallelism: host_cpu={host_cpu}, per_container={per_container} -> setting max_parallel_instances={adaptive}")
+            # Only apply adaptive change when explicitly enabled via env
+            use_adapt = os.environ.get("ORCHESTRATOR_ADAPTIVE_PARALLELISM", "0").lower() in ("1","true","yes")
+            if use_adapt and self.max_parallel_instances == 20 and adaptive != 20:
+                logger.info(f"Adaptive parallelism: host_cpu={host_cpu}, per_container={per_container} -> max_parallel_instances={adaptive}")
                 self.max_parallel_instances = adaptive
                 self._resource_pool = asyncio.Semaphore(self.max_parallel_instances)
+            else:
+                if self.max_parallel_instances == 20 and adaptive != 20:
+                    logger.info(f"Adaptive parallelism recommendation: host_cpu={host_cpu}, per_container={per_container} -> suggested max_parallel_instances={adaptive} (set ORCHESTRATOR_ADAPTIVE_PARALLELISM=1 to apply)")
+            # Oversubscription warning
+            try:
+                if (self.max_parallel_instances * per_container) > host_cpu:
+                    logger.warning(f"Configured parallelism may oversubscribe CPU: max_parallel_instances={self.max_parallel_instances}, per_container_cpu={per_container}, host_cpu={host_cpu}")
+            except Exception:
+                pass
         except Exception as e:
             logger.debug(f"Adaptive parallelism calc failed: {e}")
 
@@ -649,12 +686,30 @@ class Orchestrator:
             # _check_disk_space already logs validation errors; re-raise to stop spawn
             raise
 
-        # Generate instance ID
+        # Generate instance ID (normative stable 16-hex over JCS-like canonical JSON)
+        import hashlib, json as _json
+        def _drop_nulls(o):
+            if isinstance(o, dict):
+                return {k: _drop_nulls(v) for k, v in o.items() if v is not None}
+            elif isinstance(o, list):
+                return [_drop_nulls(v) for v in o if v is not None]
+            return o
+        def _short16_from(obj: dict) -> str:
+            enc = _json.dumps(_drop_nulls(obj), ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+            return hashlib.sha256(enc.encode("utf-8")).hexdigest()[:16]
         if key:
-            import hashlib
-            instance_id = hashlib.sha256(f"{self.state_manager.current_state.run_id}|{strategy_execution_id}|{key}".encode("utf-8")).hexdigest()[:8]
+            instance_id = _short16_from({
+                "run_id": self.state_manager.current_state.run_id,
+                "strategy_execution_id": strategy_execution_id,
+                "key": key,
+            })
         else:
-            instance_id = str(uuid.uuid4())[:8]
+            synthetic = f"i:{instance_index}"
+            instance_id = _short16_from({
+                "run_id": self.state_manager.current_state.run_id,
+                "strategy_execution_id": strategy_execution_id,
+                "key": synthetic,
+            })
 
         # Get strategy execution index from state
         strategy_exec = self.state_manager.current_state.strategies.get(
@@ -746,6 +801,56 @@ class Orchestrator:
                 fut.set_result(info.result)
                 self._instance_futures[instance_id] = fut
                 logger.debug(f"spawn_instance: iid={instance_id} already terminal ({info.state.value}); returning completed future")
+                # Emit canonical terminal event immediately to avoid apparent 'stalled scheduled' in UI
+                try:
+                    task_key = (info.metadata or {}).get("key")
+                    if task_key and self.event_bus:
+                        sid_env = None
+                        for sid, strat in self.state_manager.current_state.strategies.items():
+                            if instance_id in strat.instance_ids:
+                                sid_env = sid
+                                break
+                        if info.state == InstanceStatus.COMPLETED:
+                            artifact = {
+                                "type": "branch",
+                                "branch_planned": info.branch_name,
+                                "branch_final": info.result.branch_name,
+                                "base": info.base_branch,
+                                "commit": getattr(info.result, "commit", None) or "",
+                                "has_changes": bool(getattr(info.result, "has_changes", False)),
+                                "duplicate_of_branch": getattr(info.result, "duplicate_of_branch", None),
+                                "dedupe_reason": getattr(info.result, "dedupe_reason", None),
+                            }
+                            self.event_bus.emit_canonical(
+                                type="task.completed",
+                                run_id=self.state_manager.current_state.run_id,
+                                strategy_execution_id=sid_env,
+                                key=task_key,
+                                payload={
+                                    "key": task_key,
+                                    "instance_id": instance_id,
+                                    "artifact": artifact,
+                                    "metrics": info.result.metrics or {},
+                                    "final_message": info.result.final_message or "",
+                                    "final_message_truncated": False,
+                                    "final_message_path": "",
+                                },
+                            )
+                        elif info.state == InstanceStatus.FAILED:
+                            self.event_bus.emit_canonical(
+                                type="task.failed",
+                                run_id=self.state_manager.current_state.run_id,
+                                strategy_execution_id=sid_env,
+                                key=task_key,
+                                payload={
+                                    "key": task_key,
+                                    "instance_id": instance_id,
+                                    "error_type": info.result.error_type or "unknown",
+                                    "message": info.result.error or "",
+                                },
+                            )
+                except Exception as _e:
+                    logger.debug(f"spawn_instance: terminal backfill emit failed: {_e}")
             elif info.state == InstanceStatus.INTERRUPTED:
                 # Create a pending future; resume_run will enqueue it if resumable
                 self._instance_futures[instance_id] = asyncio.Future()
@@ -802,16 +907,24 @@ class Orchestrator:
             try:
                 # Get next instance from queue (with timeout to check shutdown)
                 try:
-                    logger.debug("Waiting for instance from queue...")
+                    logger.debug("executor: waiting for instance from queue (qsize=%s)", self._instance_queue.qsize())
                     instance_id = await asyncio.wait_for(
                         self._instance_queue.get(), timeout=1.0
                     )
-                    logger.info(f"Got instance {instance_id} from queue")
+                    logger.info(f"executor: dequeued instance {instance_id}")
                 except asyncio.TimeoutError:
                     continue
 
                 # Acquire resource slot
                 async with self._resource_pool:
+                    try:
+                        logger.debug(
+                            "executor: acquired slot (active=%d/%d)",
+                            len(self._active_instances),
+                            self.max_parallel_instances,
+                        )
+                    except Exception:
+                        pass
                     if self._shutdown:
                         break
 
@@ -820,6 +933,20 @@ class Orchestrator:
 
                     # Execute instance
                     try:
+                        # Emit canonical debug with key
+                        try:
+                            info = self.state_manager.current_state.instances.get(instance_id)
+                            key = (info.metadata or {}).get("key") if info else None
+                            if key and self.event_bus:
+                                self.event_bus.emit_canonical(
+                                    type="strategy.debug",
+                                    run_id=self.state_manager.current_state.run_id,
+                                    strategy_execution_id=next((sid for sid, strat in self.state_manager.current_state.strategies.items() if instance_id in strat.instance_ids), None),
+                                    key=key,
+                                    payload={"op": "executor_start", "instance_id": instance_id},
+                                )
+                        except Exception:
+                            pass
                         await self._execute_instance(instance_id)
                     finally:
                         self._active_instances.remove(instance_id)
@@ -857,6 +984,7 @@ class Orchestrator:
             )
 
         # Create event callback (forward and capture session_id for resume)
+        last_active_write = {"t": 0.0}
         def event_callback(event: Dict[str, Any]) -> None:
             data = event.get("data", {})
             sid = data.get("session_id")
@@ -873,14 +1001,30 @@ class Orchestrator:
                         self._inst_container_id[instance_id] = str(cid)
             except Exception:
                 pass
-            # Update last-active file for cleanup logic
+            # Update last-active file for cleanup logic; throttle and offload to thread
             try:
                 cid = self._inst_container_id.get(instance_id)
                 if cid:
-                    from pathlib import Path as _P
-                    p = _P(f"/tmp/orchestrator_status/{cid}.active")
-                    p.parent.mkdir(parents=True, exist_ok=True)
-                    p.write_text(datetime.now(timezone.utc).isoformat())
+                    import time as _time
+                    now = _time.time()
+                    if (now - last_active_write["t"]) >= 0.5:
+                        last_active_write["t"] = now
+                        def _write_last_active():
+                            from pathlib import Path as _P
+                            p = _P(f"/tmp/orchestrator_status/{cid}.active")
+                            try:
+                                p.parent.mkdir(parents=True, exist_ok=True)
+                            except Exception:
+                                pass
+                            try:
+                                p.write_text(datetime.now(timezone.utc).isoformat())
+                            except Exception:
+                                pass
+                        try:
+                            loop = asyncio.get_running_loop()
+                            loop.run_in_executor(None, _write_last_active)
+                        except Exception:
+                            _write_last_active()
             except Exception:
                 pass
             # Forward runner-level events to in-memory bus for local diagnostics
@@ -1029,9 +1173,9 @@ class Orchestrator:
                     # Final message truncation per spec
                     import os as _os
                     try:
-                        max_bytes = int(_os.environ.get("ORCHESTRATOR_EVENTS__MAX_FINAL_MESSAGE_BYTES", "16384"))
+                        max_bytes = int(_os.environ.get("ORCHESTRATOR_EVENTS__MAX_FINAL_MESSAGE_BYTES", "65536"))
                     except Exception:
-                        max_bytes = 16384
+                        max_bytes = 65536
                     full_msg = result.final_message or ""
                     msg_bytes = full_msg.encode("utf-8", errors="ignore")
                     truncated_flag = False
@@ -1086,6 +1230,12 @@ class Orchestrator:
                     }
                     etype = (result.error_type or "unknown").lower()
                     mapped_type = _map.get(etype, etype if etype in {"docker","api","network","git","timeout","session_corrupted","auth","unknown"} else "unknown")
+                    # Offline egress failures → classify as network per spec
+                    try:
+                        if (info.metadata or {}).get("network_egress") == "offline" and mapped_type != "canceled":
+                            mapped_type = "network"
+                    except Exception:
+                        pass
                     self.event_bus.emit_canonical(
                         type="task.failed",
                         run_id=self.state_manager.current_state.run_id,
@@ -1539,19 +1689,21 @@ class Orchestrator:
             logger.info(f"resume_run: enqueued {len(scheduled_ids)} instance(s) for resume")
 
         # Re-enter strategies immediately to allow downstream stages (e.g., scoring) to run
+        # IMPORTANT: Run strategy re-entry concurrently to avoid serializing downstream work
         reentry_results: list[InstanceResult] = []
         try:
             from .strategies import AVAILABLE_STRATEGIES as _STRATS
             prompt = self.state_manager.current_state.prompt
             base_branch = self.state_manager.current_state.base_branch
-            for sid, strat_exec in list(self.state_manager.current_state.strategies.items()):
+
+            async def _reenter_one(sid: str, strat_exec) -> list[InstanceResult]:
                 # Skip if already completed
                 if getattr(strat_exec, "completed_at", None):
-                    continue
-                logger.info(f"Re-entering strategy {strat_exec.strategy_name} sid={sid}")
+                    return []
                 sname = strat_exec.strategy_name
                 if sname not in _STRATS:
-                    continue
+                    return []
+                logger.info(f"Re-entering strategy {sname} sid={sid}")
                 strat_cls = _STRATS[sname]
                 strat = strat_cls()
                 # Reuse original config captured in state
@@ -1574,11 +1726,24 @@ class Orchestrator:
                 if status == "failed":
                     payload["reason"] = "no_successful_tasks"
                 try:
-                    self.event_bus.emit_canonical(type="strategy.completed", run_id=run_id, strategy_execution_id=sid, payload=payload)
+                    self.event_bus.emit_canonical(
+                        type="strategy.completed",
+                        run_id=run_id,
+                        strategy_execution_id=sid,
+                        payload=payload,
+                    )
                 except Exception:
                     pass
-                if res:
-                    reentry_results.extend(res)
+                return res or []
+
+            tasks: list[asyncio.Task] = []
+            for sid, strat_exec in list(self.state_manager.current_state.strategies.items()):
+                tasks.append(asyncio.create_task(_reenter_one(sid, strat_exec)))
+            if tasks:
+                results_lists = await asyncio.gather(*tasks, return_exceptions=True)
+                for res in results_lists:
+                    if isinstance(res, list):
+                        reentry_results.extend(res)
         except Exception as e:
             logger.debug(f"Strategy re-entry skipped due to error: {e}")
 

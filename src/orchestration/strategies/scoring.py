@@ -74,7 +74,8 @@ class ScoringStrategy(Strategy):
         prefix = [cfg.key_prefix] if cfg.key_prefix else []
 
         gen_task = {"prompt": prompt, "base_branch": base_branch, "model": cfg.model}
-        generation_handle = await ctx.run(gen_task, key=ctx.key(*prefix, "gen"))
+        gen_key = ctx.key(*prefix, "gen")
+        generation_handle = await ctx.run(gen_task, key=gen_key)
         generation_result = await ctx.wait(generation_handle)
 
         # If generation failed, the strategy fails
@@ -94,7 +95,8 @@ ORIGINAL TASK: {prompt}"""
             # Review/scoring tasks should not create branches; run read-only when configured
             "import_policy": "never",
         }
-        scoring_handle = await ctx.run(scoring_task, key=ctx.key(*prefix, "score", generation_handle.instance_id, "attempt-1"))
+        score_key = ctx.key(*prefix, "score", generation_handle.instance_id, "attempt-1")
+        scoring_handle = await ctx.run(scoring_task, key=score_key)
         scoring_result = await ctx.wait(scoring_handle)
 
         # Extract score from the reviewer's output

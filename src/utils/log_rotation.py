@@ -178,6 +178,39 @@ async def setup_log_rotation_task(
                 except Exception as e:
                     logger.warning(f"Error during log rotation: {e}")
 
+                # Prune events logs for terminal runs beyond retention/grace windows
+                try:
+                    import os
+                    from datetime import timedelta
+                    retention_days = int(os.environ.get("ORCHESTRATOR_EVENTS__RETENTION_DAYS", "30"))
+                    grace_days = int(os.environ.get("ORCHESTRATOR_EVENTS__RETENTION_GRACE_DAYS", "7"))
+                    if retention_days > 0:
+                        cutoff = datetime.now(timezone.utc) - timedelta(days=retention_days)
+                        # Only prune runs that ended before (now - retention) and also older than grace
+                        grace_cutoff = datetime.now(timezone.utc) - timedelta(days=grace_days)
+                        for run_dir in logs_dir.glob("run_*"):
+                            if not run_dir.is_dir():
+                                continue
+                            # Parse timestamp from folder name
+                            try:
+                                name = run_dir.name
+                                ts = name[4:19]
+                                started = datetime.strptime(ts, "%Y%m%d_%H%M%S").replace(tzinfo=timezone.utc)
+                            except Exception:
+                                continue
+                            if started < cutoff and started < grace_cutoff:
+                                ev = run_dir / "events.jsonl"
+                                rn = run_dir / "runner.jsonl"
+                                try:
+                                    if ev.exists():
+                                        ev.unlink()
+                                    if rn.exists():
+                                        rn.unlink()
+                                except Exception:
+                                    pass
+                except Exception as e:
+                    logger.debug(f"Events retention pruning skipped: {e}")
+
                 # Sleep until next run
                 await asyncio.sleep(interval_hours * 3600)
 

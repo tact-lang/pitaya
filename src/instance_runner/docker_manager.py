@@ -212,6 +212,7 @@ class DockerManager:
         import_policy: str = "auto",
         network_egress: str = "online",
         event_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
+        task_key: Optional[str] = None,
     ) -> Container:
         """
         Create a Docker container for instance execution.
@@ -399,6 +400,8 @@ class DockerManager:
             import hashlib
             group_basis = (session_group_key or (instance_id or container_name or "")).encode("utf-8", errors="ignore")
             ghash = hashlib.sha256(group_basis).hexdigest()[:8]
+            # KHASH based on durable task key if provided
+            khash = hashlib.sha256((task_key or "").encode("utf-8", errors="ignore")).hexdigest()[:8] if task_key else ""
             # Scope by run unless configured global (handled by caller via session_group_key contents)
             volume_name = f"orc_home_{(run_id or 'norun')}_g{ghash}"
 
@@ -414,20 +417,26 @@ class DockerManager:
             review_mode = os.environ.get("ORCHESTRATOR_RUNNER__REVIEW_WORKSPACE_MODE", "ro").lower()
 
 
-            # Build mounts explicitly to avoid SDK ambiguity with volumes
-            mounts = [
-                # Bind mount for workspace
-                Mount(
-                    target="/workspace",
-                    source=normalize_path_for_docker(workspace_dir),
-                    type="bind",
-                    read_only=(import_policy == "never" and review_mode == "ro"),
-                ),
-                # Named volume for node home (session persistence)
-                Mount(target="/home/node", source=volume_name, type="volume"),
-            ]
+            # Decide workspace mount strategy
+            mounts: List[Mount] = []
+            volumes: Dict[str, Dict[str, str]] = {}
+            ws_source = normalize_path_for_docker(workspace_dir)
+            ws_ro = (import_policy == "never" and review_mode == "ro")
             if selinux_mode:
-                logger.debug("SELinux detected; docker-py Mount API does not support ':z' directly. Documenting limitation.")
+                # Use volumes mapping to apply ':z' (and 'ro' when needed)
+                mode = "z,ro" if ws_ro else "z"
+                volumes[ws_source] = {"bind": "/workspace", "mode": mode}
+            else:
+                mounts.append(
+                    Mount(
+                        target="/workspace",
+                        source=ws_source,
+                        type="bind",
+                        read_only=ws_ro,
+                    )
+                )
+            # Named volume for node home (session persistence)
+            mounts.append(Mount(target="/home/node", source=volume_name, type="volume"))
             try:
                 logger.info(
                     f"Mounts prepared: workspace={mounts[0].source} -> /workspace (ro={mounts[0].read_only}), home=volume:{volume_name} -> /home/node"
@@ -474,12 +483,20 @@ class DockerManager:
                     "GIT_AUTHOR_EMAIL": "agent@orchestrator.local",
                     "GIT_COMMITTER_NAME": "AI Agent",
                     "GIT_COMMITTER_EMAIL": "agent@orchestrator.local",
+                    # Normative envs for in-container awareness/debugging
+                    "TASK_KEY": task_key or "",
+                    "SESSION_GROUP_KEY": session_group_key or "",
+                    "KHASH": khash,
+                    "GHASH": ghash,
                 },
                 # Resource limits will be applied via supported keys below
                 "mem_limit": f"{memory_gb}g",
                 "memswap_limit": f"{memory_swap_gb}g",
                 "auto_remove": False,  # Keep containers for debugging/resume
             }
+            # Apply workspace volumes mapping when needed (SELinux)
+            if volumes:
+                config["volumes"] = volumes
 
             # Enforce network egress policy
             try:
@@ -495,6 +512,24 @@ class DockerManager:
                     config["environment"].update(extra_env)
                 except Exception:
                     pass
+            # Provide normative env hints inside the container for debugging/compliance
+            try:
+                import hashlib, json as _json
+                eff_sgk = session_group_key or (task_key or instance_id or container_name)
+                # KHASH short8 over TASK_KEY
+                durable = (task_key or (instance_id or ""))
+                khash = hashlib.sha256(str(durable).encode("utf-8", errors="ignore")).hexdigest()[:8]
+                # GHASH run-scope short8 over JCS({"session_group_key": EFFECTIVE_SGK})
+                payload = _json.dumps({"session_group_key": eff_sgk}, separators=(",", ":"), sort_keys=True)
+                ghash = hashlib.sha256(payload.encode("utf-8", errors="ignore")).hexdigest()[:8]
+                config["environment"].update({
+                    "TASK_KEY": str(durable),
+                    "SESSION_GROUP_KEY": str(eff_sgk),
+                    "KHASH": khash,
+                    "GHASH": ghash,
+                })
+            except Exception:
+                pass
             # Proxy egress support: pass host proxy envs when requested
             try:
                 if str(network_egress).lower() == "proxy":
@@ -756,7 +791,14 @@ class DockerManager:
 
                         except json.JSONDecodeError:
                             # Some lines might not be JSON (e.g., error messages)
-                            logger.debug(f"Non-JSON output: {line}")
+                            # Avoid spamming synchronous debug logs on the event loop.
+                            # Enable via ORCHESTRATOR_RUNNER__VERBOSE_PARSER=1 if needed.
+                            try:
+                                import os as _os
+                                if (_os.environ.get("ORCHESTRATOR_RUNNER__VERBOSE_PARSER") or "").lower() in ("1","true","yes"):
+                                    logger.debug(f"Non-JSON output: {line}")
+                            except Exception:
+                                pass
 
             # Run parser with timeout
             try:

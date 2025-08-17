@@ -223,6 +223,23 @@ class StrategyContext:
 
         # Spawn instance with durable key metadata
         self._instance_counter += 1
+        # Emit canonical debug event for scheduling request
+        try:
+            if getattr(self._orchestrator, "event_bus", None) and getattr(self._orchestrator.state_manager, "current_state", None):
+                self._orchestrator.event_bus.emit_canonical(
+                    type="strategy.debug",
+                    run_id=self._orchestrator.state_manager.current_state.run_id,
+                    strategy_execution_id=self._strategy_execution_id,
+                    key=key,
+                    payload={
+                        "op": "run_request",
+                        "key": key,
+                        "kind": ("score" if "/score/" in key else "gen"),
+                        "fingerprint": fingerprint[:16],
+                    },
+                )
+        except Exception:
+            pass
         instance_id = await self._orchestrator.spawn_instance(
             prompt=prompt,
             repo_path=self._orchestrator.repo_path,
@@ -269,6 +286,21 @@ class StrategyContext:
                 },
             )
 
+        try:
+            if getattr(self._orchestrator, "event_bus", None) and getattr(self._orchestrator.state_manager, "current_state", None):
+                self._orchestrator.event_bus.emit_canonical(
+                    type="strategy.debug",
+                    run_id=self._orchestrator.state_manager.current_state.run_id,
+                    strategy_execution_id=self._strategy_execution_id,
+                    key=key,
+                    payload={
+                        "op": "run_enqueued",
+                        "key": key,
+                        "instance_id": instance_id,
+                    },
+                )
+        except Exception:
+            pass
         return Handle(key=key, instance_id=instance_id, scheduled_at=time.monotonic())
 
     async def wait(self, handle: Handle) -> InstanceResult:

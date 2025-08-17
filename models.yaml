@@ -1,0 +1,4 @@
+models:
+  sonnet: sonnet
+  haiku: haiku
+  opus: opus
