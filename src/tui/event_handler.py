@@ -55,6 +55,37 @@ class EventProcessor:
         """
         self.state = state
         self._event_handlers = self._setup_handlers()
+        # Last-N public messages per instance for details pane
+        from collections import defaultdict, deque
+        self._messages = defaultdict(lambda: deque(maxlen=10))
+        self._max_messages = 10
+
+    def set_details_messages(self, n: int) -> None:
+        try:
+            n = max(1, int(n))
+        except Exception:
+            n = 10
+        # Rebuild deques with new maxlen
+        from collections import deque
+        new = {}
+        for iid, dq in self._messages.items():
+            nd = deque(dq, maxlen=n)
+            new[iid] = nd
+        self._messages = new
+        self._max_messages = n
+
+    def _append_msg(self, iid: str, text: str) -> None:
+        try:
+            if not iid:
+                return
+            dq = self._messages.get(iid)
+            if dq is None:
+                from collections import deque
+                dq = deque(maxlen=self._max_messages)
+                self._messages[iid] = dq
+            self._messages[iid].append(text)
+        except Exception:
+            pass
 
     def _setup_handlers(self) -> Dict[str, Callable]:
         """Setup event type to handler mapping."""
@@ -247,8 +278,21 @@ class EventProcessor:
                 if iid not in strat.instance_ids:
                     strat.instance_ids.append(iid)
                     strat.total_instances += 1
+            # Append public message
+            model = (event.get("data", {}) or {}).get("model")
+            base = (event.get("data", {}) or {}).get("base_branch")
+            parts = ["started"]
+            if model:
+                parts.append(f"model={model}")
+            if base:
+                parts.append(f"base={base}")
+            self._append_msg(iid, " ".join(parts))
         # Keep total_instances accurate
         self.state.current_run.total_instances = len(self.state.current_run.instances)
+        try:
+            self.state.last_updated_instance_id = iid
+        except Exception:
+            pass
 
     def _handle_task_completed(self, event: Dict[str, Any]) -> None:
         self._ensure_current_run()
@@ -302,8 +346,36 @@ class EventProcessor:
                         inst.output_tokens = int(ot)
                 except Exception:
                     pass
+            # Capture final message info
+            try:
+                fm = data.get("final_message")
+                if isinstance(fm, str):
+                    inst.final_message = fm
+                inst.final_message_truncated = bool(data.get("final_message_truncated"))
+                fmp = data.get("final_message_path")
+                if isinstance(fmp, str) and fmp:
+                    inst.final_message_path = fmp
+            except Exception:
+                pass
+            # Append public message
+            art = data.get("artifact", {}) or {}
+            branch = art.get("branch_final") or art.get("branch_planned")
+            dur = metrics.get("duration_seconds") or data.get("duration_seconds")
+            toks = metrics.get("total_tokens")
+            parts = ["completed"]
+            if dur is not None:
+                parts.append(f"time={dur}")
+            if toks is not None:
+                parts.append(f"tok={toks}")
+            if branch:
+                parts.append(f"branch={branch}")
+            self._append_msg(iid, " ".join(parts))
         # Keep total_instances accurate
         self.state.current_run.total_instances = len(self.state.current_run.instances)
+        try:
+            self.state.last_updated_instance_id = iid
+        except Exception:
+            pass
 
     def _handle_task_progress(self, event: Dict[str, Any]) -> None:
         self._ensure_current_run()
@@ -343,6 +415,23 @@ class EventProcessor:
             if friendly:
                 inst.current_activity = friendly
         inst.last_updated = datetime.now()
+        # Append progress message (phase/activity/tool)
+        phase = data.get("phase")
+        activity = data.get("activity")
+        tool = data.get("tool")
+        msg = None
+        if activity:
+            msg = f"progress activity={activity}"
+        elif phase:
+            msg = f"progress phase={phase}"
+        if tool:
+            msg = (msg + f" tool={tool}") if msg else f"progress tool={tool}"
+        if msg:
+            self._append_msg(iid, msg)
+        try:
+            self.state.last_updated_instance_id = iid
+        except Exception:
+            pass
 
     def _handle_task_failed(self, event: Dict[str, Any]) -> None:
         self._ensure_current_run()
@@ -354,6 +443,22 @@ class EventProcessor:
         if inst:
             inst.status = InstanceStatus.FAILED
             inst.error = data.get("message")
+        # Append failed message and offline egress hint (once per instance implied by de-dup in UI)
+        etype = data.get("error_type")
+        msg = (data.get("message") or "").strip().replace("\n", " ")
+        parts = ["failed"]
+        if etype:
+            parts.append(f"type={etype}")
+        if msg:
+            parts.append(f"message=\"{msg[:80]}\"")
+        # offline hint
+        if str(data.get("network_egress")) == "offline":
+            parts.append("hint=egress=offline:set runner.network_egress=online/proxy")
+        self._append_msg(iid, " ".join(parts))
+        try:
+            self.state.last_updated_instance_id = iid
+        except Exception:
+            pass
         # Keep total_instances accurate
         self.state.current_run.total_instances = len(self.state.current_run.instances)
 
@@ -368,6 +473,11 @@ class EventProcessor:
             # Terminal interrupted state
             inst.status = InstanceStatus.INTERRUPTED
             inst.last_updated = datetime.now()
+        self._append_msg(iid, "interrupted")
+        try:
+            self.state.last_updated_instance_id = iid
+        except Exception:
+            pass
             # Adjust aggregates
             self.state.current_run.active_instances = max(
                 0, self.state.current_run.active_instances - 1

@@ -29,6 +29,13 @@ class AdaptiveDisplay:
             "compact": self._render_compact,
             "dense": self._render_dense,
         }
+        self._color_scheme = "default"  # default|accessible
+
+    def set_color_scheme(self, scheme: str) -> None:
+        s = (scheme or "default").strip().lower()
+        if s not in ("default", "accessible"):
+            s = "default"
+        self._color_scheme = s
 
     def render_dashboard(self, run: RunDisplay, display_mode: str, frame_now=None) -> RenderableType:
         """
@@ -87,6 +94,18 @@ class AdaptiveDisplay:
             if not strategy_instances:
                 continue
 
+            # Order: running → queued → done; stable within groups
+            status_order = {
+                InstanceStatus.RUNNING: 0,
+                InstanceStatus.QUEUED: 1,
+                InstanceStatus.COMPLETED: 2,
+                InstanceStatus.FAILED: 2,
+                InstanceStatus.INTERRUPTED: 2,
+            }
+            strategy_instances = sorted(
+                strategy_instances,
+                key=lambda i: (status_order.get(i.status, 3), i.started_at or datetime.now())
+            )
             # Create instance panels
             instance_panels = []
             for instance in strategy_instances:
@@ -121,10 +140,18 @@ class AdaptiveDisplay:
         table.add_column("label", style="bold", width=10)
         table.add_column("value")
 
-        # Status with emoji
+        # Status with emoji + uppercase label
+        label_map = {
+            InstanceStatus.RUNNING: "RUN",
+            InstanceStatus.COMPLETED: "DONE",
+            InstanceStatus.FAILED: "FAIL",
+            InstanceStatus.QUEUED: "QUE",
+            InstanceStatus.INTERRUPTED: "INT",
+        }
         status_text = Text()
         status_text.append(instance.status.emoji + " ")
         status_text.append(instance.status.value.title(), style=instance.status.color)
+        status_text.append(f" [{label_map.get(instance.status, '').upper()}]", style="bold")
         table.add_row("Status:", status_text)
 
         # Current activity
@@ -181,14 +208,7 @@ class AdaptiveDisplay:
         except Exception:
             pass
 
-        if instance.total_tokens > 0:
-            table.add_row(
-                "Tokens:",
-                f"{instance.total_tokens:,} (↓{instance.input_tokens:,} ↑{instance.output_tokens:,})",
-            )
-
-        if instance.cost > 0:
-            table.add_row("Cost:", f"${instance.cost:.4f}")
+        # Tokens and cost are omitted in cards by default (see details/footer)
 
         # Error info
         if instance.error:
@@ -205,13 +225,23 @@ class AdaptiveDisplay:
             branch_text = Text(instance.branch_name, style="cyan")
             table.add_row("Branch:", branch_text)
 
-        # Create panel with appropriate styling
-        panel_style = {
-            InstanceStatus.RUNNING: "yellow",
-            InstanceStatus.COMPLETED: "green",
-            InstanceStatus.FAILED: "red",
-            InstanceStatus.QUEUED: "dim",
-        }.get(instance.status, "white")
+        # Create panel with appropriate styling (supports accessible scheme)
+        if self._color_scheme == "accessible":
+            panel_style = {
+                InstanceStatus.RUNNING: "bright_yellow",
+                InstanceStatus.COMPLETED: "bright_green",
+                InstanceStatus.FAILED: "bright_red",
+                InstanceStatus.QUEUED: "white",
+                InstanceStatus.INTERRUPTED: "bright_magenta",
+            }.get(instance.status, "bright_white")
+        else:
+            panel_style = {
+                InstanceStatus.RUNNING: "yellow",
+                InstanceStatus.COMPLETED: "green",
+                InstanceStatus.FAILED: "red",
+                InstanceStatus.QUEUED: "dim",
+                InstanceStatus.INTERRUPTED: "magenta",
+            }.get(instance.status, "white")
 
         return Panel(
             table,
@@ -240,8 +270,6 @@ class AdaptiveDisplay:
         table.add_column("Status", width=10)
         table.add_column("Activity", width=30)
         table.add_column("Duration", width=8)
-        table.add_column("Cost", width=10)
-        table.add_column("Tokens", width=10)
 
         # Build a fallback mapping from instance_id -> strategy name to avoid 'unknown' labels
         fallback_strategy_by_instance: dict[str, str] = {}
@@ -260,21 +288,32 @@ class AdaptiveDisplay:
             instances = list(run.instances.values())
         except Exception:
             instances = []
+        status_order = {
+            InstanceStatus.RUNNING: 0,
+            InstanceStatus.QUEUED: 1,
+            InstanceStatus.COMPLETED: 2,
+            InstanceStatus.FAILED: 2,
+            InstanceStatus.INTERRUPTED: 2,
+        }
         instances = sorted(
             instances,
-            key=lambda i: (
-                i.strategy_name,
-                0 if i.status == InstanceStatus.RUNNING else 1,
-                i.instance_id,
-            ),
+            key=lambda i: (i.strategy_name, status_order.get(i.status, 3), i.started_at or datetime.now()),
         )
 
         # Add rows
         for instance in instances:
             # Status with emoji
+            label_map = {
+                InstanceStatus.RUNNING: "RUN",
+                InstanceStatus.COMPLETED: "DONE",
+                InstanceStatus.FAILED: "FAIL",
+                InstanceStatus.QUEUED: "QUE",
+                InstanceStatus.INTERRUPTED: "INT",
+            }
             status = Text()
             status.append(instance.status.emoji + " ")
             status.append(instance.status.value, style=instance.status.color)
+            status.append(f" [{label_map.get(instance.status,'').upper()}]", style="bold")
 
             # Activity (+ staleness)
             activity = ""
@@ -319,8 +358,6 @@ class AdaptiveDisplay:
                     duration = self._format_duration(seconds_to_show)
             except Exception:
                 pass
-            cost = f"${instance.cost:.3f}" if instance.cost > 0 else "-"
-            tokens = f"{instance.total_tokens:,}" if instance.total_tokens > 0 else "-"
 
             # Strategy label with robust fallback
             strategy_label = instance.strategy_name or ""
@@ -333,37 +370,13 @@ class AdaptiveDisplay:
                 status,
                 activity,
                 duration,
-                cost,
-                tokens,
             )
 
         return Panel(table, border_style="blue", padding=(0, 1))
 
     def _render_dense(self, run: RunDisplay) -> RenderableType:
-        """
-        Render dense view for >30 instances.
-
-        Shows strategy-level summaries only:
-        - Strategy name and configuration
-        - Aggregate progress bar
-        - Success/failure counts
-        - Total cost and duration
-        """
-        # Create strategy summary table
-        table = Table(
-            title="Strategy Summary", show_header=True, header_style="bold", expand=True
-        )
-
-        # Define columns
-        table.add_column("Strategy", style="blue", width=20)
-        table.add_column("Progress", width=30)
-        table.add_column("Success", style="green", width=8)
-        table.add_column("Failed", style="red", width=8)
-        table.add_column("Active", style="yellow", width=8)
-        table.add_column("Cost", width=10)
-        table.add_column("Avg Time", width=10)
-
-        # Snapshot to avoid concurrent mutation during iteration
+        """Render dense view for >30 instances with minimal per-instance lines (phase/runtime)."""
+        panels = []
         try:
             strategies = list(run.strategies.values())
             instances_map = dict(run.instances)
@@ -371,87 +384,54 @@ class AdaptiveDisplay:
             strategies = []
             instances_map = {}
 
-        # Add strategy rows
         for strategy in strategies:
-            # Calculate strategy metrics
-            strategy_instances = [
-                instances_map[iid]
-                for iid in strategy.instance_ids
-                if iid in instances_map
-            ]
-
-            if not strategy_instances:
+            items = [instances_map[iid] for iid in strategy.instance_ids if iid in instances_map]
+            if not items:
                 continue
-
-            # Count by status
-            active = sum(1 for i in strategy_instances if i.is_active)
-            completed = sum(
-                1 for i in strategy_instances if i.status == InstanceStatus.COMPLETED
-            )
-            failed = sum(
-                1 for i in strategy_instances if i.status == InstanceStatus.FAILED
-            )
-
-            # Calculate aggregates
-            total_cost = sum(i.cost for i in strategy_instances)
-            total_duration = sum(
-                i.duration_seconds for i in strategy_instances if i.duration_seconds > 0
-            )
-            avg_duration = (
-                total_duration / len(strategy_instances) if strategy_instances else 0
-            )
-
-            # Create progress bar
-            progress = Progress(
-                SpinnerColumn(),
-                BarColumn(bar_width=20),
-                TextColumn("{task.percentage:>3.0f}%"),
-                console=None,
-                expand=False,
-            )
-
-            progress.add_task(
-                "", total=len(strategy_instances), completed=completed + failed
-            )
-
-            # Strategy name with config hint
-            strategy_name = strategy.strategy_name
-            if strategy.config:
-                # Add key config values
-                if "n" in strategy.config:
-                    strategy_name += f" (n={strategy.config['n']})"
-                elif "temperature" in strategy.config:
-                    strategy_name += f" (t={strategy.config['temperature']})"
-
-            table.add_row(
-                strategy_name,
-                progress,
-                str(completed),
-                str(failed),
-                str(active),
-                f"${total_cost:.2f}",
-                self._format_duration(avg_duration),
-            )
-
-        # Add summary panel below
-        summary_items = [
-            f"Total Instances: {run.total_instances}",
-            f"Active: {run.active_instances}",
-            f"Success Rate: {run.success_rate:.1f}%",
-            f"Total Cost: ${run.total_cost:.2f}",
-            f"Cost/Hour: ${run.cost_per_hour:.2f}",
-        ]
-
-        summary_text = " | ".join(summary_items)
-
-        return Group(
-            Panel(table, border_style="blue", padding=(0, 1)),
-            Panel(
-                Align.center(Text(summary_text, style="bold")),
-                border_style="blue",
-                padding=(0, 1),
-            ),
-        )
+            status_order = {
+                InstanceStatus.RUNNING: 0,
+                InstanceStatus.QUEUED: 1,
+                InstanceStatus.COMPLETED: 2,
+                InstanceStatus.FAILED: 2,
+                InstanceStatus.INTERRUPTED: 2,
+            }
+            items = sorted(items, key=lambda i: (status_order.get(i.status, 3), i.started_at or datetime.now()))
+            table = Table(show_header=False, expand=True, padding=(0,1))
+            table.add_column("Status", width=8)
+            table.add_column("Instance", width=10)
+            table.add_column("Phase", width=24)
+            table.add_column("Runtime", width=8)
+            table.add_column("Branch")
+            for inst in items:
+                label_map = {
+                    InstanceStatus.RUNNING: "RUN",
+                    InstanceStatus.COMPLETED: "DONE",
+                    InstanceStatus.FAILED: "FAIL",
+                    InstanceStatus.QUEUED: "QUE",
+                    InstanceStatus.INTERRUPTED: "INT",
+                }
+                status = Text(inst.status.emoji + " " + inst.status.value, style=inst.status.color)
+                status.append(f" [{label_map.get(inst.status,'').upper()}]", style="bold")
+                inst_name = inst.instance_id[:8]
+                phase = inst.current_activity or "-"
+                dur = "-"
+                try:
+                    secs = inst.duration_seconds or 0
+                    if inst.status == InstanceStatus.RUNNING and inst.started_at:
+                        now = datetime.now(inst.started_at.tzinfo) if inst.started_at.tzinfo else datetime.now()
+                        secs = max(secs, (now - inst.started_at).total_seconds())
+                    if secs > 0:
+                        dur = self._format_duration(secs)
+                except Exception:
+                    pass
+                branch = (inst.branch_name or "")
+                if branch and len(branch) > 48:
+                    branch = branch[:45] + "..."
+                table.add_row(status, inst_name, phase, dur, branch)
+            panels.append(Panel(table, title=strategy.strategy_name, border_style="blue", padding=(0,1)))
+        if not panels:
+            return Panel(Align.center(Text("No instances", style="dim")), style="dim")
+        return Group(*panels)
 
     def _format_duration(self, seconds: float) -> str:
         """Format duration for display."""

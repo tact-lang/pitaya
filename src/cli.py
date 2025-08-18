@@ -27,6 +27,7 @@ from rich.console import Console
 from .config import (
     load_env_config,
     load_dotenv_config,
+    load_global_config,
     merge_config,
     get_default_config,
 )
@@ -85,8 +86,10 @@ Examples:
 """,
         )
 
-        # Main argument - the prompt
-        parser.add_argument("prompt", nargs="?", help="Prompt for the AI coding agent")
+        # Main argument - the prompt or subcommand (doctor | config)
+        parser.add_argument("prompt", nargs="?", help="Prompt for the AI coding agent, or 'doctor'/'config'")
+        # Optional secondary token for 'config print'
+        parser.add_argument("subcommand", nargs="?", help="Subcommand for special modes (e.g., 'print' for 'config print')")
 
         # Strategy options
         parser.add_argument(
@@ -101,6 +104,13 @@ Examples:
             dest="strategy_params",
             metavar="KEY=VALUE",
             help="Set strategy-specific parameters (can be used multiple times)",
+        )
+        parser.add_argument(
+            "--set",
+            action="append",
+            dest="strategy_params",
+            metavar="KEY=VALUE",
+            help="Alias for -S to set strategy parameters",
         )
         parser.add_argument(
             "--runs",
@@ -144,10 +154,38 @@ Examples:
             help="Disable TUI and stream events to console",
         )
         parser.add_argument(
+            "--display",
+            choices=["auto", "detailed", "compact", "dense"],
+            default="auto",
+            help="Force TUI display density (default: auto)",
+        )
+        parser.add_argument(
+            "--display-details",
+            choices=["none", "right"],
+            default="none",
+            help="Show an optional details pane (default: none)",
+        )
+        parser.add_argument(
             "--output",
             choices=["streaming", "json", "quiet"],
             default="streaming",
             help="Output format when using --no-tui (default: streaming)",
+        )
+        parser.add_argument(
+            "--no-emoji",
+            action="store_true",
+            help="Disable emojis in console output",
+        )
+        parser.add_argument(
+            "--show-ids",
+            choices=["short", "full"],
+            default="short",
+            help="Identifier verbosity in streaming output (default: short)",
+        )
+        parser.add_argument(
+            "--verbose",
+            action="store_true",
+            help="Increase verbosity of streaming logs (phases like container_created, branch_imported)",
         )
 
         # Authentication mode
@@ -251,8 +289,20 @@ Examples:
             help="Logs directory (default: ./logs)",
         )
         parser.add_argument("--debug", action="store_true", help="Enable debug logging")
+        parser.add_argument("--yes", action="store_true", help="Assume yes for confirmations (non-interactive)")
         # Convenience alias: --json implies --no-tui --output json
         parser.add_argument("--json", action="store_true", help="Output JSON events (implies --no-tui)")
+        parser.add_argument(
+            "--ci-artifacts",
+            metavar="OUT_ZIP",
+            help="Create a minimal CI artifact zip (summary, branches, per-task JSON)",
+        )
+        # Enforce clean working tree if desired
+        parser.add_argument(
+            "--require-clean-wt",
+            action="store_true",
+            help="Require a clean working tree before running",
+        )
         # Working tree cleanliness behavior (spec: warn by default; enforce with flag)
         # Removed: --require-clean-wt (always warn only)
         # Protected refs overwrite gate
@@ -279,6 +329,14 @@ Examples:
         # Removed: --safe-fsync (sensible defaults used)
 
         # Removed: --docker-smoke (dev-only)
+
+        # Config print options (effective only with: orchestrator config print)
+        parser.add_argument(
+            "--redact",
+            choices=["true", "false"],
+            default="true",
+            help="For 'config print': redact secrets (default: true). Set to false only with ORC_ALLOW_UNREDACTED=1.",
+        )
 
         return parser
 
@@ -436,17 +494,26 @@ Examples:
         from pathlib import Path
         import shutil
 
+        def _try(message: str, bullets: list[str]) -> None:
+            self.console.print(f"[red]{message}[/red]")
+            if bullets:
+                self.console.print("Try:")
+                for b in bullets[:3]:
+                    self.console.print(f"  • {b}")
+
         # 1. Check repository exists
         repo_path = Path(args.repo)
         if not repo_path.exists():
-            self.console.print(
-                f"[red]Error: Repository path does not exist: {repo_path}[/red]"
+            _try(
+                f"repository not found: {repo_path}",
+                ["create repo: git init", f"verify path: {repo_path}"]
             )
             return False
 
         if not repo_path.is_dir():
-            self.console.print(
-                f"[red]Error: Repository path is not a directory: {repo_path}[/red]"
+            _try(
+                f"path is not a directory: {repo_path}",
+                ["choose a git repo directory", f"ls -la {repo_path}"]
             )
             return False
 
@@ -474,8 +541,9 @@ Examples:
                 text=True,
             )
             if result.returncode != 0:
-                self.console.print(
-                    f"[red]Error: Base branch '{args.base_branch}' does not exist[/red]"
+                _try(
+                    f"base branch not found: '{args.base_branch}'",
+                    ["fetch origin: git fetch origin --prune", "list branches: git branch --all"]
                 )
                 self.console.print("Available branches:")
                 branches_result = subprocess.run(
@@ -487,7 +555,7 @@ Examples:
                     self.console.print(branches_result.stdout)
                 return False
         except (subprocess.SubprocessError, OSError) as e:
-            self.console.print(f"[red]Error checking git repository: {e}[/red]")
+            _try("git error: failed to check repository", [str(e), "ensure git is installed"]) 
             return False
 
         # 3b. Check working tree cleanliness (warn only)
@@ -506,8 +574,9 @@ Examples:
             stat = shutil.disk_usage(str(repo_path))
             free_gb = stat.free / (1024**3)
             if free_gb < 20:
-                self.console.print(
-                    f"[red]Error: Insufficient disk space: {free_gb:.1f}GB free (20GB required)[/red]"
+                _try(
+                    f"insufficient disk space: {free_gb:.1f}GB free (<20GB)",
+                    ["free space on this volume", "change repo to a disk with more space"]
                 )
                 return False
         except OSError as e:
@@ -574,6 +643,20 @@ Examples:
     async def run_cleanup(self, args: argparse.Namespace) -> int:
         """Clean up containers and state for a specific run."""
         run_id = args.clean_containers
+        # Interactive confirmation unless --yes
+        if not args.yes:
+            if not sys.stdout.isatty():
+                self.console.print("[red]Operation requires confirmation. Re-run with --yes.[/red]")
+                # Spec: non-TTY prompts fail with error exit code (1)
+                return 1
+            self.console.print(f"[yellow]About to clean up run {run_id}. Proceed? (y/N)[/yellow] ", end="")
+            try:
+                choice = input().strip().lower()
+            except Exception:
+                choice = "n"
+            if choice not in ("y", "yes"):
+                self.console.print("Aborted.")
+                return 1
         self.console.print(f"[yellow]Cleaning up run {run_id}...[/yellow]")
 
         # Create orchestrator just for cleanup
@@ -652,6 +735,114 @@ Examples:
             return 1
         finally:
             await orchestrator.shutdown()
+
+    def _validate_full_config(self, full_config: Dict[str, Any], args: argparse.Namespace) -> bool:
+        """Validate merged config. Print compact error table when invalid.
+
+        Returns True when valid; False otherwise.
+        """
+        errors: list[tuple[str, str, str]] = []  # field, reason, example
+        def _add(field: str, reason: str, example: str = ""):
+            errors.append((field, reason, example))
+        try:
+            rt = full_config.get("runner", {}).get("timeout")
+            if not isinstance(rt, (int, float)) or int(rt) <= 0:
+                _add("runner.timeout", "must be a positive integer", "3600")
+        except Exception:
+            _add("runner.timeout", "invalid", "3600")
+        try:
+            cpu = int(full_config.get("runner", {}).get("cpu_limit", 2))
+            if cpu <= 0:
+                _add("runner.cpu_limit", "must be > 0", "2")
+        except Exception:
+            _add("runner.cpu_limit", "must be an integer", "2")
+        try:
+            mem = full_config.get("runner", {}).get("memory_limit", "4g")
+            if isinstance(mem, str):
+                val = int(mem[:-1]) if mem.lower().endswith("g") else int(mem)
+            else:
+                val = int(mem)
+            if val <= 0:
+                _add("runner.memory_limit", "must be > 0", "4g")
+        except Exception:
+            _add("runner.memory_limit", "must be number or '<n>g'", "4g")
+        try:
+            egress = str(full_config.get("runner", {}).get("network_egress", "online")).lower()
+            if egress not in {"online", "offline", "proxy"}:
+                _add("runner.network_egress", "must be online|offline|proxy", "online")
+        except Exception:
+            pass
+        try:
+            ip = str(full_config.get("import_policy", "auto")).lower()
+            if ip not in {"auto", "never", "always"}:
+                _add("import_policy", "must be auto|never|always", "auto")
+        except Exception:
+            pass
+        try:
+            icp = str(full_config.get("import_conflict_policy", "fail")).lower()
+            if icp not in {"fail", "overwrite", "suffix"}:
+                _add("import_conflict_policy", "must be fail|overwrite|suffix", "fail")
+        except Exception:
+            pass
+        try:
+            mpi = full_config.get("orchestration", {}).get("max_parallel_instances", "auto")
+            if isinstance(mpi, str) and mpi.lower() == "auto":
+                pass
+            else:
+                v = int(mpi)
+                if v <= 0:
+                    _add("orchestration.max_parallel_instances", "must be > 0 or 'auto'", "auto")
+        except Exception:
+            _add("orchestration.max_parallel_instances", "must be integer or 'auto'", "auto")
+        # Strategy exists
+        try:
+            strategy = full_config.get("strategy", args.strategy)
+            if strategy not in AVAILABLE_STRATEGIES:
+                _add("strategy", "unknown strategy", ",".join(AVAILABLE_STRATEGIES.keys()))
+        except Exception:
+            pass
+        if errors:
+            self.console.print("[red]Invalid configuration:[/red]")
+            self.console.print("field | reason | example")
+            for f, r, ex in errors:
+                self.console.print(f"{f} | {r} | {ex}")
+            return False
+        return True
+
+    async def run_clean_volumes(self, args: argparse.Namespace) -> int:
+        """Clean unreferenced session volumes older than threshold."""
+        if not args.yes:
+            if not sys.stdout.isatty():
+                self.console.print("[red]Operation requires confirmation. Re-run with --yes.[/red]")
+                # Spec: non-TTY prompts fail with error exit code (1)
+                return 1
+            self.console.print(
+                f"[yellow]Remove unreferenced session volumes older than {args.older_than}h? (y/N)[/yellow] ",
+                end="",
+            )
+            try:
+                choice = input().strip().lower()
+            except Exception:
+                choice = "n"
+            if choice not in ("y", "yes"):
+                self.console.print("Aborted.")
+                return 1
+        try:
+            from .instance_runner.docker_manager import DockerManager
+            mgr = DockerManager()
+            await mgr.initialize()
+            removed = await mgr.prune_session_volumes(older_than_hours=float(args.older_than), dry_run=bool(args.dry_run))
+            mgr.close()
+            if args.dry_run:
+                self.console.print(f"[yellow]Dry run: would remove {removed} volume(s)[/yellow]")
+            else:
+                self.console.print(f"[green]Removed {removed} volume(s)[/green]")
+            return 0
+        except Exception as e:
+            self.console.print(f"[red]Failed cleaning volumes: {e}[/red]")
+            if args.debug:
+                self.console.print_exception()
+            return 1
 
     async def run_clean_volumes(self, args: argparse.Namespace) -> int:
         """Clean up unreferenced session volumes (orc_home_*) per age threshold."""
@@ -1262,11 +1453,22 @@ Examples:
         if getattr(args, "json", False):
             args.no_tui = True
             args.output = "json"
+        # Default to headless in non-TTY/CI unless explicitly overridden
+        try:
+            if not sys.stdout.isatty() and not getattr(args, "json", False):
+                args.no_tui = True
+        except Exception:
+            pass
 
         # Validate Docker setup
         docker_valid, docker_error = validate_docker_setup()
         if not docker_valid:
-            self.console.print(f"[red]Docker Setup Error:[/red] {docker_error}")
+            # Microcopy with Try bullets
+            self.console.print("[red]cannot connect to docker daemon[/red]")
+            self.console.print("Try:")
+            self.console.print("  • start Docker Desktop / system service")
+            self.console.print("  • check $DOCKER_HOST")
+            self.console.print("  • run: docker info")
             return 1
 
         # Fast path: diagnostics smoke test
@@ -1305,6 +1507,17 @@ Examples:
 
         # Perform pre-flight checks for new runs
         if not args.resume and not args.resume_fresh:
+            if getattr(args, "require_clean_wt", False):
+                # enforce clean working tree before preflight
+                try:
+                    import subprocess as _sp
+                    status = _sp.run(["git", "-C", str(args.repo), "status", "--porcelain"], capture_output=True, text=True)
+                    if status.returncode == 0 and status.stdout.strip():
+                        self.console.print("[red]Working tree has uncommitted changes. Use --require-clean-wt=false to bypass.[/red]")
+                        return 1
+                except Exception as e:
+                    self.console.print(f"[red]Failed checking working tree: {e}[/red]")
+                    return 1
             if not await self._perform_preflight_checks(args):
                 return 1
 
@@ -1314,6 +1527,11 @@ Examples:
         # Load all configuration sources
         env_config = load_env_config()
         dotenv_config = load_dotenv_config()  # Load .env file separately
+        if dotenv_config:
+            try:
+                self.console.print("[yellow]Loaded secrets from .env (development convenience). Consider using environment variables in CI.[/yellow]")
+            except Exception:
+                print("Loaded secrets from .env (development convenience). Consider using environment variables in CI.")
         defaults = get_default_config()
 
         # Build CLI config dict from args
@@ -1346,12 +1564,94 @@ Examples:
         # Apply proxy flags to environment early so downstream components observe them
         # Proxy environment mapping removed
 
-        # Merge configurations with proper precedence: CLI > env > .env > file > defaults
+        # Merge configurations with proper precedence: CLI > env > .env > project file > global user config > defaults
+        global_config = load_global_config()
         full_config = merge_config(
-            cli_config, env_config, dotenv_config, config or {}, defaults
+            cli_config, env_config, dotenv_config, config or {}, merge_config({}, {}, {}, global_config or {}, defaults)
         )
+        # If both global locations exist, note which one is used
+        try:
+            home = Path.home()
+            preferred = home / ".orchestrator" / "config.yaml"
+            fallback = home / ".config" / "orchestrator" / "config.yaml"
+            if preferred.exists() and fallback.exists():
+                self.console.print("[dim]Using ~/.orchestrator/config.yaml (XDG fallback ignored).[/dim]")
+        except Exception:
+            pass
 
         # Removed: --safe-fsync propagation (use default interval batching)
+
+        # Print Effective Config header (redacted, truncated)
+        try:
+            def _flatten(d: dict, prefix=""):
+                out = {}
+                for k, v in (d or {}).items():
+                    key = f"{prefix}.{k}" if prefix else str(k)
+                    if isinstance(v, dict):
+                        out.update(_flatten(v, key))
+                    else:
+                        out[key] = v
+                return out
+            # sources
+            srcs = {
+                "cli": _flatten(cli_config),
+                "env": _flatten(env_config),
+                "dotenv": _flatten(dotenv_config),
+                "project": _flatten(config or {}),
+                "global": _flatten(global_config or {}),
+                "defaults": _flatten(defaults),
+            }
+            eff = _flatten(full_config)
+            # redaction
+            def _red(k, v):
+                kl = k.lower()
+                if any(s in kl for s in ("token", "key", "secret", "password", "authorization", "cookie")):
+                    return "[REDACTED]"
+                return v
+            lines = []
+            count = 0
+            for k in sorted(eff.keys()):
+                v = _red(k, eff[k])
+                # find winning source
+                src = next((name for name in ("cli","env","dotenv","project","global","defaults") if k in srcs[name]), "defaults")
+                # unify naming for display
+                disp = src
+                lines.append(f"  {k} = {v}  ({disp})")
+                count += 1
+                if count >= 20:
+                    lines.append("  … see `orchestrator config print` for full config")
+                    break
+            # Insert a concise secrets redaction note for visibility
+            lines.insert(0, "  secrets=REDACTED")
+            hdr = "Effective Config:\n" + "\n".join(lines)
+            if args.no_tui:
+                # Console: plain text, no color for CI friendliness
+                print(hdr)
+            else:
+                self.console.print(hdr)
+        except Exception:
+            pass
+
+        # Optional models.yaml drift note: only when alias missing/mismatch
+        try:
+            from .utils.model_mapping import load_model_mapping
+            mapping, checksum = load_model_mapping()
+            alias = full_config.get("model")
+            if alias:
+                if alias not in mapping:
+                    self.console.print(
+                        f"[yellow]models.yaml: alias '{alias}' not found (checksum {checksum[:8]}). Using alias as-is.[/yellow]"
+                    )
+                elif mapping.get(alias) != alias:
+                    self.console.print(
+                        f"[dim]models.yaml drift: checksum {checksum[:8]} • {alias} -> {mapping.get(alias)}[/dim]"
+                    )
+        except Exception:
+            pass
+
+        # Validate merged configuration; render compact error table on invalid
+        if not self._validate_full_config(full_config, args):
+            return 1
 
         # Configure container limits from merged config; apply --parallel preset if provided
         # Store allow flags for constructor
@@ -1473,6 +1773,13 @@ Examples:
 
         # Initialize orchestrator
         await self.orchestrator.initialize()
+        # Apply custom redaction patterns to event bus, if any
+        try:
+            red = full_config.get("logging", {}).get("redaction", {}).get("custom_patterns", [])
+            if getattr(self.orchestrator, "event_bus", None):
+                self.orchestrator.event_bus.set_custom_redaction_patterns(red if isinstance(red, list) else [])
+        except Exception:
+            pass
 
         # Server extension support removed
 
@@ -1494,97 +1801,126 @@ Examples:
 
         # Set up event subscriptions for output
         if output_mode == "streaming":
-            # Maintain mapping from instance_id -> k<8> for canonical prefixes
-            # Compute from branch_name when instance events arrive to keep parity with orchestrator naming
-            import re as _re
-            _inst_to_k8: dict[str, str] = {}
+            # Canonical public events only; compact hybrid lines
+            import hashlib as _hashlib
+            from typing import Set as _Set
 
-            # Subscribe to key events for console output with canonical prefix
-            def print_event(event):
-                event_type = event.get("type", "unknown")
-                data = event.get("data", {})
-                iid = event.get("instance_id") or data.get("instance_id") or ""
-                # Backfill k8 from branch_name when available
-                if iid and iid not in _inst_to_k8:
-                    bn = data.get("branch_name") or ""
-                    if isinstance(bn, str):
-                        m = _re.search(r"_k([0-9a-f]{8})$", bn)
-                        if m:
-                            _inst_to_k8[iid] = m.group(1)
-                # Only show canonical instance prefix when we actually have an instance context
-                if iid:
-                    inst5 = iid[:5]
-                    k8 = _inst_to_k8.get(iid, "????????")
-                    prefix = f"k{k8}/inst-{inst5}: "
-                else:
-                    prefix = ""
+            def _short8(s: str) -> str:
+                return _hashlib.sha256(s.encode("utf-8", errors="ignore")).hexdigest()[:8]
 
-                # Format event based on type
-                if event_type == "instance.started":
-                    # Suppress runner-level duplicate (has attempt/total_attempts)
-                    if any(k in data for k in ("attempt", "total_attempts")):
-                        pass
-                    else:
-                        self.console.print(f"{prefix}[blue]Starting[/blue] {data.get('prompt', '')[:80]}...")
-                elif event_type == "instance.completed":
-                    success = data.get("success", False)
-                    branch = data.get("branch_name") or "no branch (no changes)"
-                    duration = data.get("duration_seconds", 0)
-                    if success:
-                        self.console.print(f"{prefix}[green]✓ Completed:[/green] {branch} ({duration:.1f}s)")
-                    else:
-                        self.console.print(f"{prefix}[red]✗ Failed[/red]")
-                elif event_type == "instance.failed":
-                    error = data.get("error", "Unknown error")
-                    self.console.print(f"{prefix}[red]Failed:[/red] {error}")
-                elif event_type == "strategy.completed":
-                    # Strategy events are run-scoped; do not prepend instance prefix
-                    # Avoid duplicate prints from canonical mirror by only handling the
-                    # legacy event that includes result_count/branch_names.
-                    if any(k in data for k in ("result_count", "branch_names")):
-                        self.console.print("[green]Strategy completed[/green]")
-                # Container lifecycle visibility (helpful for diagnosing stalls)
-                elif event_type == "instance.container_create_entry":
-                    self.console.print(f"{prefix}[dim]docker:[/dim] preparing {data.get('container_name')} (image={data.get('image', '-')})")
-                elif event_type == "instance.container_image_check":
-                    self.console.print(f"{prefix}[dim]docker:[/dim] checking image {data.get('image')}")
-                elif event_type == "instance.container_image_check_timeout":
-                    self.console.print(f"{prefix}[red]docker:[/red] image check timed out after {data.get('timeout_s')}s")
-                elif event_type == "instance.container_create_attempt":
-                    self.console.print(f"{prefix}[dim]docker:[/dim] creating {data.get('container_name')}")
-                elif event_type == "instance.container_created":
-                    # Single source of truth from DockerManager via event_callback
-                    self.console.print(f"{prefix}[green]docker:[/green] created id={data.get('container_id')}")
-                elif event_type == "instance.container_create_timeout":
-                    self.console.print(f"{prefix}[red]docker:[/red] create timed out after {data.get('timeout_s')}s")
-                elif event_type == "instance.container_create_failed":
-                    self.console.print(f"{prefix}[red]docker:[/red] create failed: {data.get('error')}")
-                elif event_type == "instance.container_start_timeout":
-                    self.console.print(f"{prefix}[red]docker:[/red] start timed out after {data.get('timeout_s')}s")
-                elif event_type == "instance.container_start_failed":
-                    self.console.print(f"{prefix}[red]docker:[/red] start failed: {data.get('error')}")
+            no_emoji = bool(getattr(args, "no_emoji", False))
+            show_full = (getattr(args, "show_ids", "short") == "full")
+            verbose = bool(getattr(args, "verbose", False))
+            # once-per-task offline hint
+            _hint_emitted: _Set[str] = set()
 
-            # Subscribe to events
-            self.orchestrator.subscribe("instance.started", print_event)
-            self.orchestrator.subscribe("instance.completed", print_event)
-            self.orchestrator.subscribe("instance.failed", print_event)
-            self.orchestrator.subscribe("strategy.completed", print_event)
-            # Container lifecycle events
-            for et in [
-                "instance.container_create_entry",
-                "instance.container_env_preparing",
-                "instance.container_env_prepared",
-                "instance.container_create_call",
-                "instance.container_image_check",
-                "instance.container_image_check_timeout",
-                "instance.container_create_attempt",
-                "instance.container_created",
-                "instance.container_create_timeout",
-                "instance.container_create_failed",
-                "instance.container_start_timeout",
-                "instance.container_start_failed",
-            ]:
-                self.orchestrator.subscribe(et, print_event)
+            def _prefix(ev: dict) -> str:
+                sid = ev.get("strategy_execution_id") or ev.get("data", {}).get("strategy_execution_id")
+                key = ev.get("key") or ev.get("data", {}).get("key")
+                iid = ev.get("instance_id") or ev.get("data", {}).get("instance_id", "")
+                k8 = "????????"
+                if sid and key:
+                    k8 = _short8(f"{sid}|{key}")
+                inst = iid if show_full else (iid[:5] if iid else "?????")
+                return f"[k{k8}][inst-{inst}]"
+
+            def _glyph(name: str) -> str:
+                if no_emoji:
+                    return ""
+                return {
+                    "started": " ▶",
+                    "completed": " ✅",
+                    "failed": " ❌",
+                    "interrupted": " ⏸",
+                }.get(name, "")
+
+            def _fmt_time(seconds: float) -> str:
+                try:
+                    s = float(seconds)
+                except Exception:
+                    return "-"
+                if s < 60:
+                    return f"{s:.0f}s"
+                m, sec = divmod(int(s), 60)
+                h, m = divmod(m, 60)
+                return f"{h}h{m}m{sec}s" if h else f"{m}m{sec}s"
+
+            def print_event(ev: dict):
+                et = ev.get("type", "")
+                data = ev.get("data", {})
+                pre = _prefix(ev)
+                # Lifecycle only by default
+                if et == "task.scheduled":
+                    # keep minimal – often too chatty in multi-run
+                    return
+                if et == "task.started":
+                    model = data.get("model")
+                    base = data.get("base_branch")
+                    line = f"{pre}{_glyph('started')} started"
+                    if model:
+                        line += f" model={model}"
+                    if base:
+                        line += f" base={base}"
+                    print(line)
+                elif et == "task.completed":
+                    art = data.get("artifact", {}) or {}
+                    dur = data.get("metrics", {}).get("duration_seconds") or data.get("duration_seconds")
+                    cost = data.get("metrics", {}).get("total_cost")
+                    toks = data.get("metrics", {}).get("total_tokens")
+                    branch = art.get("branch_final") or art.get("branch_planned")
+                    parts = [f"{pre}{_glyph('completed')} completed"]
+                    if dur is not None:
+                        parts.append(f"time={_fmt_time(dur)}")
+                    if cost is not None:
+                        try:
+                            parts.append(f"cost=${float(cost):.2f}")
+                        except Exception:
+                            pass
+                    if toks is not None:
+                        parts.append(f"tok={toks}")
+                    if branch:
+                        parts.append(f"branch={branch}")
+                    # Truncation path hint
+                    if data.get("final_message_truncated") and data.get("final_message_path"):
+                        parts.append(f"final_message={data.get('final_message_path')}")
+                    print(" ".join(parts))
+                elif et == "task.failed":
+                    etype = data.get("error_type") or "unknown"
+                    msg = (data.get("message") or "").strip().replace("\n", " ")
+                    line = f"{pre}{_glyph('failed')} failed type={etype}"
+                    if msg:
+                        line += f" message=\"{msg[:200]}\""
+                    # offline egress hint (once per task)
+                    if str(data.get("network_egress")) == "offline":
+                        iid = data.get("instance_id") or ""
+                        if iid and iid not in _hint_emitted:
+                            _hint_emitted.add(iid)
+                            line += " hint=egress=offline:set runner.network_egress=online/proxy"
+                    print(line)
+                elif et == "task.interrupted":
+                    print(f"{pre}{_glyph('interrupted')} interrupted")
+                elif verbose and et == "task.progress":
+                    phase = data.get("phase") or data.get("activity")
+                    if phase in ("container_created", "branch_imported", "no_changes"):
+                        print(f"{pre} phase={phase}")
+
+            for t in ("task.started", "task.completed", "task.failed", "task.interrupted", "task.progress"):
+                self.orchestrator.subscribe(t, print_event)
+        elif output_mode == "json":
+            # Stream canonical public events as NDJSON (subscribe BEFORE run/resume)
+            def emit_json(ev: dict):
+                print(json.dumps(ev, separators=(",", ":")))
+            for t in (
+                "task.scheduled",
+                "task.started",
+                "task.progress",
+                "task.completed",
+                "task.failed",
+                "task.interrupted",
+                "strategy.started",
+                "strategy.completed",
+            ):
+                self.orchestrator.subscribe(t, emit_json)
 
         try:
             if args.resume:
@@ -1619,29 +1955,7 @@ Examples:
                 )
 
             # Output results based on mode
-            if output_mode == "json":
-                # Convert results to JSON-serializable format
-                if isinstance(result, list):
-                    # List of InstanceResult objects
-                    result_data = [
-                        {
-                            "session_id": r.session_id,
-                            "branch_name": r.branch_name,
-                            "success": r.success,
-                            "error": r.error,
-                            "status": r.status,
-                            "container_name": r.container_name,
-                            "has_changes": r.has_changes,
-                            "duration_seconds": r.duration_seconds,
-                            "metrics": r.metrics,
-                            "final_message": r.final_message,
-                        }
-                        for r in result
-                    ]
-                else:
-                    result_data = result
-                print(json.dumps(result_data, indent=2, default=str))
-            elif output_mode == "quiet":
+            if output_mode == "quiet":
                 # Just return code
                 pass
             else:
@@ -1665,10 +1979,35 @@ Examples:
                 else:
                     self.console.print("\n[green]Run completed[/green]")
 
+            # CI artifacts bundle if requested
+            try:
+                if getattr(args, "ci_artifacts", None):
+                    await self._create_ci_artifacts(args, run_id)
+            except Exception as e:
+                self.console.print(f"[yellow]CI artifacts creation failed: {e}[/yellow]")
+
+            # Decide exit code based on failures (spec: 3 = completed with failures)
+            exit_code = 0
+            try:
+                st = None
+                if self.orchestrator and getattr(self.orchestrator, "state_manager", None):
+                    st = self.orchestrator.state_manager.get_current_state()
+                if st:
+                    try:
+                        from .shared import InstanceStatus as _IS
+                        insts = list(st.instances.values())
+                        failed_count = sum(1 for i in insts if i.state == _IS.FAILED)
+                        if failed_count > 0:
+                            exit_code = 3
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
             # Shutdown orchestrator to stop background tasks
             await self.orchestrator.shutdown()
-            
-            return 0
+
+            return exit_code
 
         except KeyboardInterrupt:
             self.console.print("\n[yellow]Interrupted by user[/yellow]")
@@ -1685,7 +2024,7 @@ Examples:
                         )
             # Shutdown orchestrator
             await self.orchestrator.shutdown()
-            return 130
+            return 2
         except (OrchestratorError, DockerError, ValidationError) as e:
             self.console.print(f"[red]Error: {e}[/red]")
             if args.debug:
@@ -1693,6 +2032,76 @@ Examples:
             # Shutdown orchestrator
             await self.orchestrator.shutdown()
             return 1
+
+    async def _create_ci_artifacts(self, args: argparse.Namespace, run_id: str) -> None:
+        """Create minimal CI artifact zip per plan.
+
+        Contents:
+          - results/summary.json
+          - results/branches.txt
+          - results/tasks/<k8>.json (one per task, from canonical events)
+        """
+        from pathlib import Path as _P
+        import zipfile as _zip
+        import hashlib as _hashlib
+        out_zip = _P(args.ci_artifacts)
+        out_zip.parent.mkdir(parents=True, exist_ok=True)
+        base_results = _P("./results") / run_id
+        tasks_dir = base_results / "tasks"
+        tasks_dir.mkdir(parents=True, exist_ok=True)
+        events_file = args.logs_dir / run_id / "events.jsonl"
+        def _short8(s: str) -> str:
+            return _hashlib.sha256(s.encode("utf-8", errors="ignore")).hexdigest()[:8]
+        # Build per-task files from canonical events
+        if events_file.exists():
+            with open(events_file, "r", encoding="utf-8") as f:
+                for line in f:
+                    try:
+                        ev = json.loads(line)
+                    except Exception:
+                        continue
+                    t = ev.get("type")
+                    if t not in ("task.completed", "task.failed"):
+                        continue
+                    sid = ev.get("strategy_execution_id") or ""
+                    key = ev.get("key") or ""
+                    if not key:
+                        continue
+                    k8 = _short8(f"{sid}|{key}")
+                    payload = ev.get("payload") or {}
+                    # Redact any secrets by name heuristics
+                    def _redact(obj):
+                        if isinstance(obj, dict):
+                            out = {}
+                            for k, v in obj.items():
+                                kl = str(k).lower()
+                                if any(s in kl for s in ("token", "key", "secret", "password", "authorization", "cookie")):
+                                    out[k] = "[REDACTED]"
+                                else:
+                                    out[k] = _redact(v)
+                            return out
+                        if isinstance(obj, list):
+                            return [_redact(v) for v in obj]
+                        return obj
+                    data = {
+                        "type": t,
+                        "run_id": ev.get("run_id"),
+                        "strategy_execution_id": sid,
+                        "key": key,
+                        "payload": _redact(payload),
+                    }
+                    with open(tasks_dir / f"{k8}.json", "w", encoding="utf-8") as tf:
+                        json.dump(data, tf, indent=2)
+        # Write zip
+        with _zip.ZipFile(out_zip, "w", compression=_zip.ZIP_DEFLATED) as zf:
+            for rel in ("summary.json", "branches.txt"):
+                p = base_results / rel
+                if p.exists():
+                    zf.write(p, arcname=f"results/{rel}")
+            # tasks
+            if tasks_dir.exists():
+                for p in sorted(tasks_dir.glob("*.json")):
+                    zf.write(p, arcname=f"results/tasks/{p.name}")
 
     async def _run_with_tui(
         self, args: argparse.Namespace, run_id: str, full_config: Dict[str, Any]
@@ -1707,6 +2116,36 @@ Examples:
         self.tui_display = TUIDisplay(
             console=self.console, refresh_rate=rr_sec, state_poll_interval=3.0
         )
+        # Apply display density override
+        if getattr(args, "display", None) and args.display != "auto":
+            try:
+                self.tui_display.set_forced_display_mode(args.display)
+            except Exception:
+                pass
+        # Apply details pane mode
+        try:
+            self.tui_display.set_details_mode(getattr(args, "display_details", "none"))
+        except Exception:
+            pass
+        # IDs verbosity note in TUI header
+        try:
+            self.tui_display.set_ids_full(getattr(args, "show_ids", "short") == "full")
+        except Exception:
+            pass
+        # Configure details message count
+        try:
+            details_n = int(full_config.get("tui", {}).get("details_messages", 10))
+            if hasattr(self.tui_display, "set_details_messages"):
+                self.tui_display.set_details_messages(max(1, details_n))
+        except Exception:
+            pass
+        # Apply color scheme
+        try:
+            scheme = str(full_config.get("tui", {}).get("color_scheme", "default"))
+            if hasattr(self.tui_display, "adaptive_display") and hasattr(self.tui_display.adaptive_display, "set_color_scheme"):
+                self.tui_display.adaptive_display.set_color_scheme(scheme)
+        except Exception:
+            pass
 
         # Start orchestrator and TUI together
         try:
@@ -1825,7 +2264,8 @@ Examples:
                 self.console.print(
                     f"  orchestrator --resume-fresh {run_id}  # With fresh containers\n"
                 )
-                return 130
+                # Standardized interrupted exit code per spec
+                return 2
 
             # Get actual run statistics from orchestrator state
             state = self.orchestrator.get_current_state()
@@ -1936,7 +2376,22 @@ Examples:
                 else:
                     self.console.print("\n[green]Run completed[/green]")
 
-            return 0
+            # Decide exit code based on failures (spec: 3 = completed with failures)
+            try:
+                exit_code = 0
+                if state:
+                    from .shared import InstanceStatus as _IS
+                    instance_list = list(state.instances.values())
+                    failed_instances = sum(1 for i in instance_list if i.state == _IS.FAILED)
+                    if failed_instances > 0:
+                        exit_code = 3
+                else:
+                    # Fallback: infer from results list
+                    if isinstance(result, list) and any((not getattr(r, 'success', False)) for r in result):
+                        exit_code = 3
+            except Exception:
+                exit_code = 0
+            return exit_code
 
         except KeyboardInterrupt:
             # Ensure graceful shutdown on Ctrl+C in TUI path
@@ -1955,7 +2410,7 @@ Examples:
                     self.console.print(
                         f"  orchestrator --resume-fresh {rid}  # With fresh containers\n"
                     )
-            return 130
+            return 2
         except (OrchestratorError, DockerError, ValidationError) as e:
             self.console.print(f"[red]Error: {e}[/red]")
             if args.debug:
@@ -1974,7 +2429,161 @@ Examples:
         Returns:
             Exit code
         """
+        # Subcommands: doctor, config print
+        if (args.prompt or "").strip().lower() == "doctor":
+            return await self.run_doctor(args)
+        if (args.prompt or "").strip().lower() == "config" and (args.subcommand or "").strip().lower() == "print":
+            return await self.run_config_print(args)
         return await self.run_orchestrator(args)
+
+    async def run_doctor(self, args: argparse.Namespace) -> int:
+        """System checks for environment and config."""
+        ok = True
+        rows = []  # (status, title, message, tries)
+        def pass_line(title: str, msg: str = ""):
+            rows.append(("✓", title, msg, []))
+        def fail_line(title: str, msg: str, tries: list[str]):
+            nonlocal ok
+            ok = False
+            rows.append(("✗", title, msg, tries))
+        def info_line(title: str, msg: str):
+            rows.append(("i", title, msg, []))
+        # Docker
+        try:
+            from .utils.platform_utils import validate_docker_setup
+            valid, err = validate_docker_setup()
+            if valid:
+                pass_line("docker", "ok")
+            else:
+                fail_line("docker", "cannot connect to docker daemon", ["start Docker", "check $DOCKER_HOST", "run: docker info"])
+        except Exception as e:
+            fail_line("docker", str(e), ["ensure Docker installed", "run: docker info"]) 
+        # Disk
+        try:
+            import shutil as _sh
+            stat = _sh.disk_usage(str(Path.cwd()))
+            free_gb = stat.free / (1024**3)
+            if free_gb >= 20:
+                pass_line("disk", f"{free_gb:.1f}GB free")
+            else:
+                fail_line("disk", f"insufficient disk space: {free_gb:.1f}GB free (<20GB)", ["free space on this volume", "move repo to larger disk"]) 
+        except Exception as e:
+            info_line("disk", f"could not check: {e}")
+        # Repo and base branch
+        try:
+            repo = args.repo or Path.cwd()
+            if not (Path(repo) / ".git").exists():
+                fail_line("repo", f"not a git repo: {repo}", ["git init", "verify path"])
+            else:
+                import subprocess as _sp
+                base = args.base_branch or "main"
+                rc = _sp.run(["git", "-C", str(repo), "rev-parse", "--verify", base], capture_output=True)
+                if rc.returncode == 0:
+                    pass_line("base_branch", base)
+                else:
+                    fail_line("base_branch", f"not found: '{base}'", ["git fetch origin --prune", "verify branch name", "git branch --all"]) 
+        except Exception as e:
+            info_line("repo", f"check failed: {e}")
+        # Temp dir writable
+        try:
+            from .utils.platform_utils import get_temp_dir
+            td = get_temp_dir()
+            td.mkdir(parents=True, exist_ok=True)
+            test = td / "_orc_doctor.tmp"
+            test.write_text("ok")
+            test.unlink(missing_ok=True)
+            pass_line("temp", str(td))
+        except Exception as e:
+            fail_line("temp", f"not writable: {e}", ["adjust permissions", "set TMPDIR"]) 
+        # Auth
+        try:
+            env = load_env_config()
+            dotenv = load_dotenv_config()
+            if env.get("runner", {}).get("oauth_token") or dotenv.get("runner", {}).get("oauth_token") or env.get("runner", {}).get("api_key") or dotenv.get("runner", {}).get("api_key"):
+                pass_line("auth", "credentials found")
+            else:
+                fail_line("auth", "no credentials", ["set CLAUDE_CODE_OAUTH_TOKEN", "or set ANTHROPIC_API_KEY"]) 
+        except Exception:
+            pass
+        # models.yaml
+        try:
+            from .utils.model_mapping import load_model_mapping
+            mapping, cs = load_model_mapping()
+            pass_line("models.yaml", f"checksum {cs[:8]}")
+        except Exception as e:
+            info_line("models.yaml", f"warn: {e}")
+        # SELinux / WSL2 hints
+        try:
+            import platform
+            if platform.system() == "Linux":
+                info_line("selinux", "if enabled, :z labels will be applied")
+        except Exception:
+            pass
+        try:
+            from .utils.platform_utils import is_wsl
+            import platform
+            if platform.system() == "Windows" or is_wsl():
+                info_line("wsl2", "place repo in WSL filesystem for performance")
+        except Exception:
+            pass
+        # Print table-like output
+        for status, title, message, tries in rows:
+            if status in ("✓", "✗"):
+                print(f"{status} {title}: {message}")
+            else:
+                print(f"i {title}: {message}")
+            if status == "✗" and tries:
+                print("Try:")
+                for t in tries[:3]:
+                    print(f"  • {t}")
+        return 0 if ok else 1
+
+    async def run_config_print(self, args: argparse.Namespace) -> int:
+        """Print effective config with source and redaction."""
+        env = load_env_config()
+        dotenv = load_dotenv_config()
+        defaults = get_default_config()
+        global_cfg = load_global_config()
+        project_cfg = self._load_config_file(args) or {}
+        merged = merge_config({}, env, dotenv, project_cfg, merge_config({}, {}, {}, global_cfg or {}, defaults))
+        allow_unred = os.environ.get("ORC_ALLOW_UNREDACTED") == "1" and str(getattr(args, "redact", "true")).lower() == "false"
+        def _red(k, v):
+            if allow_unred:
+                return v
+            kl = k.lower()
+            if any(s in kl for s in ("token", "key", "secret", "password", "authorization", "cookie")):
+                return "[REDACTED]"
+            return v
+        def _flat(d, p=""):
+            out = {}
+            for k, v in (d or {}).items():
+                kk = f"{p}.{k}" if p else str(k)
+                if isinstance(v, dict):
+                    out.update(_flat(v, kk))
+                else:
+                    out[kk] = v
+            return out
+        # Determine source per key
+        sources = {
+            "env": _flat(env),
+            "dotenv": _flat(dotenv),
+            "project": _flat(project_cfg),
+            "global": _flat(global_cfg or {}),
+            "defaults": _flat(defaults),
+        }
+        flat = _flat(merged)
+        def _src_for(k: str) -> str:
+            for name in ("env", "dotenv", "project", "global", "defaults"):
+                if k in sources[name]:
+                    return name
+            return "defaults"
+        if getattr(args, "json", False):
+            out = {k: {"value": _red(k, v), "source": _src_for(k)} for k, v in flat.items()}
+            print(json.dumps(out, indent=2, default=str))
+            return 0
+        for k in sorted(flat.keys()):
+            print(f"{k}: {_red(k, flat[k])}  ({_src_for(k)})")
+        return 0
 
 
 def main():
@@ -2005,7 +2614,7 @@ def main():
         else:
             # On second Ctrl+C, force exit
             print("\nForce exit!")
-            os._exit(130)
+            os._exit(2)
 
     signal.signal(signal.SIGINT, signal_handler)
 
@@ -2017,7 +2626,8 @@ def main():
         exit_code = asyncio.run(cli.run(args))
         sys.exit(exit_code)
     except KeyboardInterrupt:
-        sys.exit(130)
+        # Standardized interrupted exit code per spec
+        sys.exit(2)
 
 
 if __name__ == "__main__":

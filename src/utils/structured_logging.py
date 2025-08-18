@@ -97,13 +97,13 @@ def setup_structured_logging(
     run_logs_dir = logs_dir / run_id
     run_logs_dir.mkdir(parents=True, exist_ok=True)
 
-    # Determine log level
+    # Determine console level; file logs always DEBUG per plan
     if quiet:
-        log_level = logging.ERROR
+        console_level = logging.ERROR
     elif debug:
-        log_level = logging.DEBUG
+        console_level = logging.DEBUG
     else:
-        log_level = logging.INFO
+        console_level = logging.INFO
 
     # Component mapping - which modules log to which files
     component_mapping = {
@@ -116,8 +116,8 @@ def setup_structured_logging(
     root_logger = logging.getLogger()
     root_logger.handlers = []
 
-    # Set root logger level
-    root_logger.setLevel(log_level)
+    # Set root logger level to DEBUG so file handlers capture everything
+    root_logger.setLevel(logging.DEBUG)
 
     # Create handlers for each component
     handlers = {}
@@ -127,15 +127,21 @@ def setup_structured_logging(
         file_path = run_logs_dir / log_file
         handler = logging.FileHandler(file_path, mode="a")
         handler.setFormatter(json_formatter)
-        handler.setLevel(log_level)
+        handler.setLevel(logging.DEBUG)
         handlers[log_file] = (handler, modules)
 
-    # Add console handler for headless mode
+    # Add console handler for headless mode (human-readable; files remain JSON)
     console_handler = None
+    stderr_debug_handler = None
     if no_tui and not quiet:
         console_handler = logging.StreamHandler(sys.stdout)
-        console_handler.setFormatter(json_formatter)
-        console_handler.setLevel(log_level)
+        console_handler.setFormatter(logging.Formatter("%(levelname)s %(name)s: %(message)s"))
+        console_handler.setLevel(console_level)
+        # Spec: in debug mode, stream full logs to stderr in addition to files
+        if debug:
+            stderr_debug_handler = logging.StreamHandler(sys.stderr)
+            stderr_debug_handler.setFormatter(logging.Formatter("%(levelname)s %(name)s: %(message)s"))
+            stderr_debug_handler.setLevel(logging.DEBUG)
 
     # Configure loggers for each module
     # First configure existing loggers
@@ -143,7 +149,7 @@ def setup_structured_logging(
         if logger_name.startswith("src."):
             logger = logging.getLogger(logger_name)
             logger.handlers = []
-            logger.setLevel(log_level)
+            logger.setLevel(logging.DEBUG)
             logger.propagate = False
 
             # Find the appropriate handler for this logger
@@ -156,28 +162,35 @@ def setup_structured_logging(
             # Add console handler if in headless mode
             if console_handler:
                 logger.addHandler(console_handler)
+            if stderr_debug_handler:
+                logger.addHandler(stderr_debug_handler)
 
     # Also configure future loggers by setting up parent loggers
     for log_file, (handler, modules) in handlers.items():
         for module_prefix in modules:
             parent_logger = logging.getLogger(module_prefix)
             parent_logger.handlers = []
-            parent_logger.setLevel(log_level)
+            parent_logger.setLevel(logging.DEBUG)
             parent_logger.propagate = False
             parent_logger.addHandler(handler)
 
             if console_handler:
                 parent_logger.addHandler(console_handler)
+            if stderr_debug_handler:
+                parent_logger.addHandler(stderr_debug_handler)
 
     # Configure root logger to catch anything else
     catch_all_path = run_logs_dir / "other.jsonl"
     catch_all_handler = logging.FileHandler(catch_all_path, mode="a")
     catch_all_handler.setFormatter(json_formatter)
-    catch_all_handler.setLevel(log_level)
+    # File logs are always DEBUG per plan
+    catch_all_handler.setLevel(logging.DEBUG)
     root_logger.addHandler(catch_all_handler)
 
     if console_handler:
         root_logger.addHandler(console_handler)
+    if stderr_debug_handler:
+        root_logger.addHandler(stderr_debug_handler)
 
     # Tame noisy third-party libraries to reduce debug spam while keeping our own DEBUG
     try:

@@ -69,6 +69,9 @@ class TUIDisplay:
         self._alt_screen = True
         # Optional CLI override for display mode
         self._force_display_mode_cli: Optional[str] = None
+        # Optional details panel
+        self._details_mode: str = "none"  # none|right
+        self._body_split: bool = False
 
         # Display state
         self._live: Optional[Live] = None
@@ -101,6 +104,28 @@ class TUIDisplay:
         layout["footer"].update(Panel("Starting...", style="blue"))
 
         return layout
+
+    def set_forced_display_mode(self, mode: Optional[str]) -> None:
+        """Force display density (detailed|compact|dense)."""
+        if mode and mode in {"detailed", "compact", "dense"}:
+            self._force_display_mode_cli = mode
+
+    def set_details_mode(self, mode: str) -> None:
+        """Enable optional details pane ("right" or "none")."""
+        m = (mode or "none").strip().lower()
+        if m not in ("none", "right"):
+            m = "none"
+        self._details_mode = m
+
+    def set_ids_full(self, full: bool) -> None:
+        self._ids_full = bool(full)
+
+    def set_details_messages(self, n: int) -> None:
+        try:
+            if hasattr(self.event_processor, "set_details_messages"):
+                self.event_processor.set_details_messages(n)
+        except Exception:
+            pass
 
     async def run(self, orchestrator, events_file: Path, from_offset: int = 0) -> None:
         """
@@ -374,23 +399,32 @@ class TUIDisplay:
                 run = run_src
                 # Simple header text for now
                 header_content = Text()
-                header_content.append(f"Run: {run.run_id}", style="bold cyan")
-                header_content.append(" | ")
-                header_content.append(
-                    f"Strategy: {self._get_strategy_summary()}", style="green"
-                )
-                # Model (from first strategy config if available)
+                header_content.append(f"{run.run_id}", style="bold cyan")
+                # Strategy with params appended below when available
+                # Strategy name(params) and Model (from first strategy config)
                 try:
-                    model = None
                     if run.strategies:
                         first = next(iter(list(run.strategies.values())))
-                        model = first.config.get("model") if hasattr(first, "config") else None
-                    if model:
-                        header_content.append(" | ")
-                        header_content.append(f"Model: {model}", style="magenta")
+                        # Strategy with params
+                        params = []
+                        cfg = getattr(first, "config", {}) or {}
+                        for k in sorted(cfg.keys()):
+                            v = cfg[k]
+                            if isinstance(v, (str, int, float, bool)):
+                                params.append(f"{k}={v}")
+                        strat_label = first.strategy_name
+                        if params:
+                            strat_label += f"({','.join(params)})"
+                        header_content.append(" • ")
+                        header_content.append(f"strategy={strat_label}", style="green")
+                        # Model
+                        model = cfg.get("model")
+                        if model:
+                            header_content.append(" • ")
+                            header_content.append(f"model {model}", style="magenta")
                 except Exception:
                     pass
-                header_content.append(" | ")
+                header_content.append(" • ")
                 # Show UI session start as authoritative global start (immediate)
                 header_content.append(
                     f"Started: {self._format_time(self._ui_started_at)}", style="dim"
@@ -406,8 +440,8 @@ class TUIDisplay:
                         hours, rem = divmod(int(elapsed.total_seconds()), 3600)
                         minutes, seconds = divmod(rem, 60)
                         duration = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
-                        header_content.append(" | ")
-                        header_content.append(f"Runtime: {duration}", style="dim")
+                        header_content.append(" • ")
+                        header_content.append(f"runtime {duration}", style="dim")
                 except Exception:
                     pass
 
@@ -416,14 +450,17 @@ class TUIDisplay:
                     inst_list = list(run.instances.values())
                     total = len(inst_list)
                     running = sum(1 for i in inst_list if i.status == InstanceStatus.RUNNING)
-                    completed = sum(1 for i in inst_list if i.status == InstanceStatus.COMPLETED)
-                    failed = sum(1 for i in inst_list if i.status == InstanceStatus.FAILED)
-                    interrupted = sum(1 for i in inst_list if i.status == InstanceStatus.INTERRUPTED)
-                    header_content.append(" | ")
+                    queued = sum(1 for i in inst_list if i.status == InstanceStatus.QUEUED)
+                    done = sum(1 for i in inst_list if i.status in (InstanceStatus.COMPLETED, InstanceStatus.FAILED, InstanceStatus.INTERRUPTED))
+                    header_content.append(" • ")
                     header_content.append(
-                        f"Instances: {total} (R:{running} C:{completed} F:{failed} I:{interrupted})",
+                        f"tasks: R:{running} Q:{queued} D:{done} • total:{total}",
                         style="cyan",
                     )
+                    # Note if IDs are in full verbosity mode
+                    if getattr(self, "_ids_full", False):
+                        header_content.append(" • ")
+                        header_content.append("ids: full", style="dim")
                 except Exception:
                     pass
 
@@ -441,7 +478,14 @@ class TUIDisplay:
             run_src = self._render_run
             if not run_src:
                 # No active run
-                self._layout["body"].update(
+                target = self._layout["body"]
+                # Reset split if previously set
+                if self._body_split and self._details_mode == "none":
+                    # Collapse body back to single panel
+                    self._layout["body"] = Layout(name="body", ratio=1)
+                    self._body_split = False
+                    target = self._layout["body"]
+                target.update(
                     Panel(
                         Align.center(
                             Text("Waiting for orchestration run...", style="dim")
@@ -457,9 +501,76 @@ class TUIDisplay:
             # Get dashboard content from adaptive display (synchronized to frame time)
             dashboard_content = self.adaptive_display.render_dashboard(run_src, display_mode, frame_now=getattr(self, "_frame_now", None))
 
-            self._layout["body"].update(dashboard_content)
+            # Handle details pane split
+            if self._details_mode == "right":
+                if not self._body_split:
+                    # Split once: dashboard | details
+                    body = self._layout["body"]
+                    body.split_row(Layout(name="dashboard", ratio=3), Layout(name="details", size=48))
+                    self._body_split = True
+                self._layout["body"]["dashboard"].update(dashboard_content)
+                # Update details panel
+                details_panel = self._render_details_panel()
+                self._layout["body"]["details"].update(details_panel)
+            else:
+                # No details pane; ensure any previous split is collapsed on next no-run frame
+                self._layout["body"].update(dashboard_content)
         except (AttributeError, TypeError, KeyError, RuntimeError) as e:
             self._layout["body"].update(Panel(f"Dashboard Error: {e}", style="red"))
+
+    def _render_details_panel(self):
+        """Render details for the most recently updated task (public events only)."""
+        try:
+            run = self._render_run
+            if not run or not getattr(self, "state", None):
+                return Panel("No details", style="dim")
+            iid = getattr(self.state, "last_updated_instance_id", None)
+            inst = run.instances.get(iid) if iid else None
+            if not inst:
+                return Panel("No task selected", style="dim")
+            # Build details text
+            from rich.table import Table
+            tbl = Table(show_header=False, box=None, pad_edge=False, show_edge=False)
+            tbl.add_row("Instance:", (inst.instance_id or "")[:16])
+            if inst.branch_name:
+                tbl.add_row("Branch:", inst.branch_name)
+            if inst.current_activity:
+                tbl.add_row("Activity:", inst.current_activity)
+            if inst.error:
+                tbl.add_row("Error:", inst.error)
+            # Metrics
+            if inst.duration_seconds:
+                tbl.add_row("Time:", self._format_duration(inst.duration_seconds))
+            if inst.total_tokens:
+                tbl.add_row("Tokens:", f"{inst.total_tokens:,} (↓{inst.input_tokens:,} ↑{inst.output_tokens:,})")
+            if inst.cost:
+                tbl.add_row("Cost:", f"${inst.cost:.2f}")
+            # Final message
+            try:
+                if getattr(inst, "final_message_path", None):
+                    note = " (truncated)" if getattr(inst, "final_message_truncated", False) else ""
+                    tbl.add_row("Final:", f"{inst.final_message_path}{note}")
+                elif getattr(inst, "final_message", None):
+                    preview = inst.final_message.strip().replace("\n", " ")
+                    if len(preview) > 200:
+                        preview = preview[:197] + "..."
+                    note = " (truncated)" if getattr(inst, "final_message_truncated", False) else ""
+                    tbl.add_row("Final:", f"{preview}{note}")
+            except Exception:
+                pass
+            # Message buffer (last N public messages)
+            try:
+                msgs = getattr(self.event_processor, "_messages", {}).get(inst.instance_id, [])
+                if msgs:
+                    from rich.markdown import Markdown
+                    # Render as a simple bulleted list
+                    tbl.add_row("Messages:", "\n".join(f"• {m}" for m in msgs))
+            except Exception:
+                pass
+            return Panel(tbl, title="Details", border_style="blue")
+        except Exception as e:
+            logger.debug(f"details panel error: {e}")
+            return Panel("Details error", style="red")
 
     def _update_footer(self) -> None:
         """Update footer zone with aggregate metrics."""
@@ -475,6 +586,7 @@ class TUIDisplay:
                 # Count instances by status
                 inst_list = list(run.instances.values())
                 active_count = sum(1 for i in inst_list if i.status == InstanceStatus.RUNNING)
+                queued_count = sum(1 for i in inst_list if i.status == InstanceStatus.QUEUED)
                 completed_count = sum(1 for i in inst_list if i.status == InstanceStatus.COMPLETED)
                 failed_count = sum(1 for i in inst_list if i.status == InstanceStatus.FAILED)
                 interrupted_count = sum(1 for i in inst_list if i.status == InstanceStatus.INTERRUPTED)
@@ -495,21 +607,35 @@ class TUIDisplay:
                 except Exception:
                     pass
 
-                # Get total cost
+                # Aggregate metrics
                 total_cost = sum(i.cost for i in inst_list)
+                total_tokens_in = sum(i.input_tokens for i in inst_list)
+                total_tokens_out = sum(i.output_tokens for i in inst_list)
+                total_tokens = sum(i.total_tokens for i in inst_list)
 
                 # First line: instance counts and duration
                 line1 = (
-                    f"Instances: {len(run.instances)} | Active: {active_count} | Completed: {completed_count} | "
+                    f"Instances: {len(run.instances)} | Active: {active_count} | Queue: {queued_count} | Completed: {completed_count} | "
                     f"Failed: {failed_count} | Interrupted: {interrupted_count} | Duration: {duration}"
                 )
                 footer_lines.append(line1)
 
-                # Second line: events and cost
+                # Second line: events, tokens, and cost (run totals)
                 line2 = (
-                    f"Events: {self.state.events_processed} | Cost: ${total_cost:.4f}"
+                    f"Events: {self.state.events_processed} | Tokens: {total_tokens:,} (↓{total_tokens_in:,} ↑{total_tokens_out:,}) | Cost: ${total_cost:.4f}"
                 )
                 footer_lines.append(line2)
+
+                # Third line: active subtotals (approximate)
+                active = [i for i in inst_list if i.status == InstanceStatus.RUNNING]
+                a_tokens_in = sum(i.input_tokens for i in active)
+                a_tokens_out = sum(i.output_tokens for i in active)
+                a_tokens = sum(i.total_tokens for i in active)
+                a_cost = sum(i.cost for i in active)
+                line3 = (
+                    f"Active: tokens {a_tokens:,} (↓{a_tokens_in:,} ↑{a_tokens_out:,}) | Cost: ${a_cost:.4f}"
+                )
+                footer_lines.append(line3)
             else:
                 footer_lines.append(
                     f"Not connected | Events: {self.state.events_processed}"

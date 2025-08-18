@@ -121,6 +121,30 @@ def load_yaml_config(yaml_path: Optional[Path] = None) -> Dict[str, Any]:
         return {}
 
 
+def load_global_config() -> Dict[str, Any]:
+    """Load global user config.
+
+    Preferred path: ~/.orchestrator/config.yaml
+    Fallback path: ~/.config/orchestrator/config.yaml
+    If both exist, the preferred path wins.
+    """
+    try:
+        home = Path.home()
+    except Exception:
+        return {}
+    preferred = home / ".orchestrator" / "config.yaml"
+    fallback = home / ".config" / "orchestrator" / "config.yaml"
+    for p in (preferred, fallback):
+        try:
+            if p.exists():
+                with open(p, "r") as f:
+                    data = yaml.safe_load(f) or {}
+                return data if isinstance(data, dict) else {}
+        except Exception:
+            continue
+    return {}
+
+
 def load_dotenv_config(dotenv_path: Optional[Path] = None) -> Dict[str, Any]:
     """
     Load configuration from .env file.
@@ -224,7 +248,9 @@ def get_default_config() -> Dict[str, Any]:
         "orchestration": {
             # Spec default: auto => max(2, min(20, floor(host_cpu / runner.container_cpu)))
             "max_parallel_instances": "auto",
-            "branch_namespace": "flat",  # flat|hierarchical
+            # Branch namespace is hierarchical by default and mandatory for new runs
+            # Format: orc/<strategy>/<run_id>/k<short8>
+            "branch_namespace": "hierarchical",  # hierarchical (mandatory); flat kept for legacy resumes
             "snapshot_interval": 30,  # seconds
             "event_buffer_size": 10000,
             "container_retention_failed": 86400,  # 24 hours
@@ -250,7 +276,16 @@ def get_default_config() -> Dict[str, Any]:
             "refresh_rate": 10,  # Hz (fallback)
             "refresh_rate_ms": 100,  # 10Hz
             "show_timestamps": False,
-            "color_scheme": "default",
+            "color_scheme": "accessible",
+            "details_messages": 10,
+        },
+        "logging": {
+            "level": "INFO",
+            "max_file_size": 10485760,
+            "retention_days": 7,
+            "redaction": {
+                "custom_patterns": [],
+            },
         },
     }
 

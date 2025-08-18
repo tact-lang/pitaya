@@ -251,13 +251,11 @@ class StrategyContext:
         self._instance_counter += 1
         # Emit canonical debug event for scheduling request
         try:
-            if getattr(self._orchestrator, "event_bus", None) and getattr(self._orchestrator.state_manager, "current_state", None):
-                self._orchestrator.event_bus.emit_canonical(
-                    type="strategy.debug",
-                    run_id=self._orchestrator.state_manager.current_state.run_id,
-                    strategy_execution_id=self._strategy_execution_id,
-                    key=key,
-                    payload={
+            if getattr(self._orchestrator, "event_bus", None):
+                # Diagnostic-only; do not write to public events.jsonl
+                self._orchestrator.event_bus.emit(
+                    "strategy.debug",
+                    {
                         "op": "run_request",
                         "key": key,
                         "kind": ("score" if "/score/" in key else "gen"),
@@ -362,13 +360,11 @@ class StrategyContext:
                 should_retry = (attempt < max_attempts) and (not retry_on or etype in retry_on)
                 # Emit debug event
                 try:
-                    if getattr(self._orchestrator, "event_bus", None) and getattr(self._orchestrator.state_manager, "current_state", None):
-                        self._orchestrator.event_bus.emit_canonical(
-                            type="strategy.debug",
-                            run_id=self._orchestrator.state_manager.current_state.run_id,
-                            strategy_execution_id=self._strategy_execution_id,
-                            key=key,
-                            payload={
+                    if getattr(self._orchestrator, "event_bus", None):
+                        # Diagnostic-only; do not write to public events.jsonl
+                        self._orchestrator.event_bus.emit(
+                            "strategy.debug",
+                            {
                                 "op": "run_schedule_retry",
                                 "attempt": attempt + 1,
                                 "max_attempts": max_attempts,
@@ -425,13 +421,11 @@ class StrategyContext:
             )
 
         try:
-            if getattr(self._orchestrator, "event_bus", None) and getattr(self._orchestrator.state_manager, "current_state", None):
-                self._orchestrator.event_bus.emit_canonical(
-                    type="strategy.debug",
-                    run_id=self._orchestrator.state_manager.current_state.run_id,
-                    strategy_execution_id=self._strategy_execution_id,
-                    key=key,
-                    payload={
+            if getattr(self._orchestrator, "event_bus", None):
+                # Diagnostic-only; do not write to public events.jsonl
+                self._orchestrator.event_bus.emit(
+                    "strategy.debug",
+                    {
                         "op": "run_enqueued",
                         "key": key,
                         "instance_id": instance_id,

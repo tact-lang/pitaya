@@ -125,7 +125,8 @@ Examples:
             return await self._run_offline(args)
         except KeyboardInterrupt:
             self.console.print("\n[yellow]Interrupted by user[/yellow]")
-            return 130
+            # Standardized interrupted exit code per spec
+            return 2
         except (OSError, IOError) as e:
             self.console.print(f"[red]Error: {e}[/red]")
             if args.debug:

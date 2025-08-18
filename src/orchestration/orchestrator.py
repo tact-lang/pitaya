@@ -338,12 +338,48 @@ class Orchestrator:
 
         # Note: canonical task.interrupted is emitted by StateManager.update_instance_state
 
-        # Suppress premature 'strategy.completed' emissions on shutdown to avoid duplicates.
-        # Final strategy.completed should be emitted by run_strategy/resume_run when the
-        # strategy actually reaches a terminal status.
+        # Per spec: emit strategy.completed {status: "canceled", reason: "operator_interrupt"}
+        # for each strategy execution that has not yet produced any successful
+        # child task, and flush pending events before exit.
         try:
-            if self.event_bus:
-                self.event_bus.flush_pending()
+            if self.state_manager and self.state_manager.current_state and self.event_bus:
+                for sid, strat in list(self.state_manager.current_state.strategies.items()):
+                    # Skip strategies already terminal in state
+                    if getattr(strat, "state", None) in ("completed", "failed"):
+                        continue
+                    # Determine if any child instance succeeded
+                    any_success = False
+                    try:
+                        for iid in (strat.instance_ids or []):
+                            info = self.state_manager.current_state.instances.get(iid)
+                            if not info:
+                                continue
+                            if getattr(info, "result", None) and getattr(info.result, "success", False):
+                                any_success = True
+                                break
+                    except Exception:
+                        any_success = False
+                    if not any_success:
+                        # Update strategy state to a terminal state for snapshot purposes
+                        try:
+                            self.state_manager.update_strategy_state(strategy_id=sid, state="failed")
+                        except Exception:
+                            pass
+                        # Emit canonical completion with canceled status and operator reason
+                        try:
+                            self.event_bus.emit_canonical(
+                                type="strategy.completed",
+                                run_id=self.state_manager.current_state.run_id,
+                                strategy_execution_id=sid,
+                                payload={"status": "canceled", "reason": "operator_interrupt"},
+                            )
+                        except Exception:
+                            pass
+                # Synchronously flush pending canonical events before exiting
+                try:
+                    self.event_bus.flush_pending()
+                except Exception:
+                    pass
         except Exception:
             pass
 
@@ -763,21 +799,44 @@ class Orchestrator:
 
         # Generate names according to spec using full run_id (run_YYYYMMDD_HHMMSS_<short8>)
         run_id_val = self.state_manager.current_state.run_id
+        # Strategy segment sanitization: allow only [A-Za-z0-9._-], strip others; fallback to 'unknown'
+        try:
+            import re as _re
+            _san = _re.compile(r"[^A-Za-z0-9._-]+")
+            _strategy_segment = _san.sub("-", str(strategy_name or "").strip())
+            _strategy_segment = _strategy_segment.strip("-/._") or "unknown"
+        except Exception:
+            _strategy_segment = str(strategy_name or "unknown")
         if key:
             import hashlib
             # Namespace durable key by strategy execution to avoid collisions across parallel runs
             khash = hashlib.sha256(f"{strategy_execution_id}|{key}".encode("utf-8")).hexdigest()[:8]
             container_name = f"orchestrator_{run_id_val}_s{sidx}_k{khash}"
-            if self.branch_namespace == "hierarchical":
-                branch_name = f"orc/{strategy_name}/{run_id_val}/k{khash}"
-            else:
-                branch_name = f"{strategy_name}_{run_id_val}_k{khash}"
+            # Enforce hierarchical namespace per spec; legacy flat kept only for old resumes
+            branch_name = f"orc/{_strategy_segment}/{run_id_val}/k{khash}"
         else:
             container_name = f"orchestrator_{run_id_val}_s{sidx}_i{instance_index}"
-            branch_name = f"{strategy_name}_{run_id_val}_{sidx}_{instance_index}"
+            # Even without durable key, keep branches under reserved orc/ namespace using synthetic leaf
+            branch_name = f"orc/{_strategy_segment}/{run_id_val}/i{instance_index}"
         logger.debug(
             f"spawn_instance: iid={instance_id} container={container_name} branch={branch_name}"
         )
+
+        # Defensive: clamp branch name length to <=200 chars and validate
+        try:
+            if len(branch_name) > 200:
+                # Prefer trimming the middle run_id segment if needed
+                head = f"orc/{_strategy_segment}/"
+                tail = branch_name.split("/")[-1]
+                room = 200 - (len(head) + 1 + len(tail))
+                if room > 8:  # keep at least some of run_id
+                    short_run = run_id_val[:room]
+                    branch_name = f"{head}{short_run}/{tail}"
+                else:
+                    # Last resort: fallback strategy segment
+                    branch_name = f"orc/unknown/{tail}"[-200:]
+        except Exception:
+            pass
 
         # Register instance only if this durable key wasn't seen before
         if instance_id not in self.state_manager.current_state.instances:

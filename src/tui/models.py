@@ -79,6 +79,11 @@ class InstanceDisplay:
     # Additional metadata
     metadata: Dict[str, Any] = field(default_factory=dict)
 
+    # Final message
+    final_message: Optional[str] = None
+    final_message_truncated: bool = False
+    final_message_path: Optional[str] = None
+
     @property
     def is_active(self) -> bool:
         """Check if instance is currently active."""
@@ -234,6 +239,7 @@ class TUIState:
 
     # Display state
     selected_instance_id: Optional[str] = None
+    last_updated_instance_id: Optional[str] = None
     show_help: bool = False
 
     # Error/warning messages

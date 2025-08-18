@@ -15,7 +15,7 @@ import uuid
 from collections import defaultdict, deque
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Set, Tuple, TextIO
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple, TextIO, Pattern
 
 
 logger = logging.getLogger(__name__)
@@ -98,6 +98,8 @@ class EventBus:
         self._pending_canonical: List[Tuple[Dict[str, Any], Dict[str, Any]]] = []  # (envelope record without start_offset/payload, payload)
         self._pending_lock = asyncio.Lock()
         self._flusher_task: Optional[asyncio.Task] = None
+        # Custom redaction patterns (compiled regex)
+        self._custom_redaction_patterns: List[Pattern] = []
 
     def _open_persist_file(self) -> None:
         """Open persistence file for appending events."""
@@ -350,8 +352,8 @@ class EventBus:
                 return [self._sanitize(v) for v in obj]
             if isinstance(obj, str):
                 s = obj
-                # Pattern sweep across strings
-                for pat in _PATTERNS:
+                # Pattern sweep across strings (built-in + custom)
+                for pat in list(_PATTERNS) + list(self._custom_redaction_patterns):
                     try:
                         if pat.pattern.lower().startswith("(?i)(authorization"):
                             # Preserve header name; redact token tail
@@ -364,6 +366,16 @@ class EventBus:
             return obj
         except Exception:
             return obj
+
+    def set_custom_redaction_patterns(self, patterns: List[str]) -> None:
+        """Set additional regex patterns to redact in event payloads/logs."""
+        out: List[Pattern] = []
+        for p in patterns or []:
+            try:
+                out.append(_re.compile(p))
+            except Exception:
+                continue
+        self._custom_redaction_patterns = out
 
     def _write_canonical_immediate(self, record: Dict[str, Any], payload: Dict[str, Any]) -> None:
         try:

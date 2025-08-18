@@ -28,13 +28,15 @@ The tool transforms single-threaded AI coding into a parallel, strategy-driven p
 
 **Event Stream** - Real-time runner events (internal) and canonical task/strategy events written by orchestration. The TUI consumes the public `task.*` and `strategy.*` events for monitoring.
 
-**Branch-per-Task** - By default (`import_policy="auto"` with `skip_empty_import=true`), a task creates a branch named `{strategy}_{run_id}_k{short8(qual_key)}` only if changes exist, enabling easy comparison and cherry-picking. With `import_policy="always"`, an empty branch is created pointing at the base.
+**Branch-per-Task** - By default (`import_policy="auto"` with `skip_empty_import=true`), a task creates a branch named `orc/<strategy>/<run_id>/k{short8(qual_key)}` only if changes exist, enabling easy comparison and cherry-picking. With `import_policy="always"`, an empty branch is created pointing at the base. This hierarchical namespace supersedes the older flat pattern `{strategy}_{run_id}_k{short8(qual_key)}`.
 
 Where `short8(y)` means the first 8 hex characters of `sha256(y)`, and `qual_key = f"{strategy_execution_id}|{durable_key}"` (durable key namespaced by the strategy execution). This prevents collisions when multiple strategy executions reuse the same durable key strings.
 
 Default: branch only if there are commits. To always create a branch pointing to the base, set `import_policy="always"`.
 
-Terminology: “Task” is the orchestration unit scheduled via `ctx.run`; each task is executed by a runner instance identified by `instance_id`. The TUI surfaces tasks; runner logs surface instances. Container labels carry `instance_id` for debugging, while public events and UI use task keys and `k<8hex>` short hashes.
+Terminology: “Task” is the orchestration unit scheduled via `ctx.run`; each task is executed by a runner instance identified by `instance_id`. The TUI surfaces tasks; runner logs surface instances. Container labels carry `instance_id` for debugging, while public events and UI use task keys and `k{short8(qual_key)}` short hashes.
+
+Shorthand: “k8” denotes `k{short8(qual_key)}` — the 8‑hex short of the fully‑qualified durable key.
 
 ## 1.3 Example Workflows
 
@@ -194,7 +196,13 @@ Each workflow produces branches in your repository, detailed logs, and a final s
 
 ## 1.5 Conventions and RFC Keywords
 
-The key words MUST, MUST NOT, REQUIRED, SHALL, and SHALL NOT in this document are to be interpreted as described in RFC 2119 and RFC 8174 when, and only when, they appear in all capitals. This specification restricts normative language to those keywords. Non‑normative behavior is labeled explicitly as optional or configurable.
+The key words MUST, MUST NOT, REQUIRED, SHALL, and SHALL NOT in this document are to be interpreted as described in RFC 2119 and RFC 8174 when, and only when, they appear in all capitals. Optional or configurable behavior is labeled explicitly.
+
+## 1.6 UX Guardrails & Principles
+
+- Smart defaults, fewer knobs: expose only options a typical developer will change; expert tuning stays in config files, not CLI flags.
+- Two primary modes: Interactive TTY launches the TUI by default; non‑TTY/CI prints concise, colorless human logs; JSON is opt‑in via `--json`.
+- Consistency: identifiers, ordering, and messages are consistent across TUI, streaming output, and logs. Public events (`task.*`, `strategy.*`) remain the single source of truth.
 
 # 2. System Architecture
 
@@ -248,7 +256,7 @@ The event system uses append-only file storage (`events.jsonl`) with monotonic b
 
 **Event Envelope**
 
-- Public events in `events.jsonl`: `task.scheduled`, `task.started`, `task.progress`, `task.completed`, `task.failed`, `task.interrupted`, `strategy.started`, `strategy.completed`, and `strategy.rand`. See the “Minimum Payload Fields” section for the canonical schema and required payload fields. The canonical namespace includes `task.*`, `strategy.*`, and the diagnostic `strategy.debug`. Only `task.*` and `strategy.*` are normative; `strategy.debug` is informational and non-normative.
+- Public events in `events.jsonl`: `task.scheduled`, `task.started`, `task.progress`, `task.completed`, `task.failed`, `task.interrupted`, `strategy.started`, `strategy.completed`, and `strategy.rand`. See the “Minimum Payload Fields” section for the canonical schema and required payload fields. The public contract consists of `task.*` and `strategy.*`; the diagnostic `strategy.debug` is informational only and not part of the public contract.
 - Envelope fields are authoritative for `ts`, `run_id`, and `strategy_execution_id`. Payloads MUST NOT duplicate these.
 - Each event includes `{id, type, ts, run_id, strategy_execution_id, key?, start_offset, payload}`.
   - For `task.*` events, `key` is REQUIRED.
@@ -256,7 +264,7 @@ The event system uses append-only file storage (`events.jsonl`) with monotonic b
   - `id` MUST be a UUIDv4 string; `ts` MUST be UTC ISO‑8601 with milliseconds and a trailing `Z` (e.g., `2025-08-16T12:34:56.789Z`).
   - `strategy_execution_id` MUST be a UUIDv4 generated once per strategy execution and persisted across resumes of that execution.
 - `task.scheduled.payload` includes a stable `task_fingerprint_hash` used for audit/deduplication. Fingerprint = SHA‑256 of the JCS‑normalized (RFC 8785) JSON over the exact inputs that define execution semantics:
-  - Object to hash (normative schema):
+  - Object to hash (canonical input schema, normative):
     ```json
     {
       "schema_version": "1",
@@ -298,7 +306,7 @@ Components follow a strict communication pattern: downward direct calls (Orchest
 - `task.progress`: `{ key, instance_id, phase, activity?, tool? }` where `phase` is an enum among `{workspace_preparing, container_creating, container_env_preparing, container_env_prepared, container_created, claude_starting, tool_use, assistant, system, result_collection, branch_imported, no_changes, cleanup}`. `activity` is an optional human-readable string; `tool` is the tool name when `phase=tool_use`.
 - `task.completed`: `{ key, instance_id, artifact, metrics, final_message, final_message_truncated, final_message_path }`  # success only
   `final_message` is truncated when it exceeds a fixed byte budget. When truncated, `final_message_truncated=true` and `final_message_path` MUST be a run‑relative path under `logs/<run_id>/` (no absolute host paths) and is retained according to the events retention policy; otherwise `final_message_truncated=false` and `final_message_path` is empty. The budget is fixed at 65536 bytes.
-- `task.failed`: `{ key, instance_id, error_type, message, network_egress? }` where `error_type ∈ { docker, api, network, git, timeout, session_corrupted, auth, unknown }` (normative and closed set) and `network_egress` (optional) is one of `online|offline|proxy` when relevant.
+- `task.failed`: `{ key, instance_id, error_type, message, network_egress? }` where `error_type ∈ { docker, api, network, git, timeout, session_corrupted, auth, unknown }` (closed set) and `network_egress` (optional) is one of `online|offline|proxy` when relevant.
 - `task.interrupted`: `{ key, instance_id }`
 - `strategy.started`: `{ name, params }`
 - `strategy.completed`: `{ status, reason? }` where `status ∈ {"success","failed","canceled"}` and `reason` is an optional short summary for failed/canceled strategies.
@@ -403,7 +411,7 @@ The Runner exposes a single async function `run_instance()` that accepts:
 - **run_id**: Run identifier for correlation (provided by orchestration)
 - **strategy_execution_id**: Strategy execution identifier (provided by orchestration)
 - **strategy_index**: 1-based index of the strategy execution within the run (optional; used for container labels/UX)
-- **instance_id**: Stable identifier provided by orchestration (normative: `sha256(JCS({"run_id": ..., "strategy_execution_id": ..., "key": ...})).hex()[:16]`); runner treats as opaque and it is stable within a run across retries/resumes.
+- **instance_id**: Opaque 16‑hex string provided by orchestration; stable within a run across retries/resumes. The derivation is normative in Orchestration and not part of the Runner’s contract.
 - **task_key**: Durable key for this task (for labeling/reattach; opaque to runner)
 - **container_name**: Full container name including run_id (provided by orchestration)
 - **model**: Claude model to use (default: "sonnet")
@@ -673,6 +681,8 @@ Runner MUST set the following environment variables inside the container for obs
 - `TASK_KEY`: Durable task key used by orchestration
 - `SESSION_GROUP_KEY`: Session group key used to scope the home volume
 - `KHASH`: `short8(sha256(task_key))` or empty when unavailable
+
+Note: `KHASH` is derived from the durable task key and can differ from the UI shorthand `k8 = short8(qual_key)`. Do not use `KHASH` to match UI identifiers.
 - `GHASH`: `short8(sha256(session_group_key or fallback))`
 
 On Linux with SELinux enabled, the workspace bind mount MUST be labeled with `:z` (and `:z,ro` when review workspace mode is read-only). The home directory MUST be a named Docker volume scoped as documented (per-run by default).
@@ -712,8 +722,10 @@ Let's break down why each flag matters:
 **Protected refs and branch validation**:
 
 - Protected ref denylist: `main`, `master`, `develop`, `release/*`, `stable`, `hotfix/*`, and any pattern configured under `git.protected_refs`. The runner MUST refuse ref updates to protected refs unless `--allow-overwrite-protected-refs` is explicitly set at the CLI or config level. This applies even when `import_conflict_policy="overwrite"`.
-- Reserved namespace: Target branches generated by orchestration MUST live under an orchestrator-owned namespace derived from the durable key (e.g., `{strategy}_{run_id}_k{short8(qual_key)}`) and MUST NOT collide with protected refs. If an operator enables a hierarchical namespace (`orchestration.branch_namespace=hierarchical`), the prefix `orc/<strategy>/<run_id>/...` MUST be used.
-- Branch name validation: Orchestration MUST validate `branch_name` against a strict regex (e.g., `^[A-Za-z0-9._\-\/]{1,200}$`) and reject names with forbidden segments (`..`, `.lock`, `@{`, trailing `/`, leading `-`). Invalid names MUST fail scheduling before a runner starts.
+- Reserved namespace: Target branches generated by orchestration MUST live under an orchestrator-owned hierarchical namespace derived from the durable key, using the pattern `orc/<strategy>/<run_id>/k{short8(qual_key)}`, and MUST NOT collide with protected refs. This supersedes the older flat pattern `{strategy}_{run_id}_k{short8(qual_key)}`. The `orc/` prefix is reserved for the orchestrator; user-created branches MUST NOT use this namespace to avoid collisions with orchestrator-managed refs.
+- Scope: This namespace requirement applies to local branches (`refs/heads/*`). Tags and remotes are out of scope for this specification.
+ - Recommendation: When pushing to remotes, mirror the local hierarchical path (`orc/<strategy>/<run_id>/k{short8}`) to avoid ambiguity across environments and CI.
+- Branch name validation: Orchestration MUST validate `branch_name` against a strict regex (e.g., `^[A-Za-z0-9._\-\/]{1,200}$`) and reject names with forbidden segments (`..`, `.lock`, `@{`, trailing `/`, leading `-`). The total branch name length MUST be ≤200 characters for the `refs/heads/<branch_name>` path excluding the `refs/heads/` prefix. Rationale: path safety and compatibility with common tooling. Invalid names MUST fail scheduling before a runner starts with a clear message, e.g., `invalid branch name orc/bestofn/run_20250114_123456/k1234abcd (201 chars; max 200)`. Confirmed worst‑case `run_id` length fits under this limit when combined with the hierarchical prefix.
 
 **Container Workspace**: Each container receives its isolated clone as a volume mount:
 
@@ -996,7 +1008,7 @@ Core responsibilities:
 - Own the event bus for component communication
 - Track current state of all tasks and strategies
 - Generate container names from durable task keys for grouping (`orchestrator_{run_id}_s{strategy_index}_k{short8(qual_key)}`), where `strategy_index` is the 1-based index of the strategy execution within the run and `qual_key = f"{strategy_execution_id}|{durable_key}"`.
-- Generate deterministic branch names from durable task keys (provided to the runner) using `{strategy}_{run_id}_k{short8(qual_key)}`.
+- Generate deterministic branch names from durable task keys (provided to the runner) using the hierarchical namespace `orc/<strategy>/<run_id>/k{short8(qual_key)}`.
 - Handle task failures according to strategy logic
 - Support resumption of interrupted runs
 - Clean up orphaned containers on startup
@@ -1104,7 +1116,7 @@ Exceptions (thrown by orchestration utilities):
 - `NoViableCandidates()` — used to signal selection failure in strategies (e.g., Best‑of‑N scoring yields zero valid candidates).
 - `KeyConflictDifferentFingerprint(key)` — scheduling error: same key with a different canonical fingerprint.
 
-`ctx.key(...)` always expands to an internal fully-qualified key namespaced by the current run and strategy execution: `run_id/strategy_execution_id/<joined parts>`. Authors only supply the `<joined parts>`; namespacing prevents collisions across parallel runs. Normative: `instance_id = sha256(JCS({"run_id": ..., "strategy_execution_id": ..., "key": ...})).hex()[:16]` — stable within a run across retries/resumes. UI **short form** is `inst-<first5>` for display only; the full 16‑hex `instance_id` MUST appear in labels and events.
+`ctx.key(...)` always expands to an internal fully-qualified key namespaced by the current run and strategy execution: `run_id/strategy_execution_id/<joined parts>`. Authors only supply the `<joined parts>`; namespacing prevents collisions across parallel runs. Orchestration MUST derive `instance_id = sha256(JCS({"run_id": ..., "strategy_execution_id": ..., "key": ...})).hex()[:16]`, which is stable within a run across retries/resumes. UI short form is `inst-{first5}` for display only; the full 16‑hex `instance_id` MUST appear in labels and events.
 
 **Task Input Schema** (single provider under the hood); `TaskResult` returned to strategies maps directly from `RunnerResult` fields exposed by the runner:
 
@@ -1289,7 +1301,12 @@ Parallel tasks work in complete isolation, requiring no coordination during exec
 
 **Branch Import Process**: After each container exits, the Instance Runner performs the git import as the final atomic step of `run_instance()`. This uses git's filesystem fetch capability to import the isolated workspace into the host repository. The runner MUST serialize imports per repository using a cross‑platform, process‑internal file lock at `<realpath(git-dir)>/.orc_import.lock` (determine `git-dir` via `git rev-parse --git-dir` and resolve to a realpath to avoid aliasing). Use fcntl on POSIX, msvcrt on Windows, or a cross‑platform library. Do not rely on shell `flock`. The import respects the per‑task `import_policy` ("auto" | "never" | "always"). The import is atomic — either all commits transfer successfully or none do. Collision policy is enforced while holding the import lock. Alternates/partial clones are disallowed; locking per `<realpath(git-dir)>` is sufficient.
 
-**Branch Naming**: `branch_name = f"{strategy_name}_{run_id}_k{short8(qual_key)}"` where `qual_key = f"{strategy_execution_id}|{durable_key}"` and `short8(x) = sha256(x).hex()[:8]`. Using `run_id` (not a timestamp) guarantees stability across resumes of the same run. Runner never invents names; it receives the final branch name from orchestration and creates that branch during import.
+**Branch Naming**: `branch_name = f"orc/{strategy_name}/{run_id}/k{short8(qual_key)}"` where `qual_key = f"{strategy_execution_id}|{durable_key}"` and `short8(x) = sha256(x).hex()[:8]`. This hierarchical namespace supersedes the older flat pattern `{strategy}_{run_id}_k{short8(qual_key)}`. Using `run_id` (not a timestamp) guarantees stability across resumes of the same run. Runner never invents names; it receives the final branch name from orchestration and creates that branch during import.
+
+Segment and length constraints:
+- The `strategy_name` path segment MUST be sanitized to contain only `[A-Za-z0-9._-]`. Disallowed characters MUST be replaced with `-`, repeated separators collapsed, and leading/trailing separators trimmed. Slashes are disallowed in `strategy_name` to prevent deeper nesting beyond `orc/<strategy>/<run_id>/k…`.
+- If sanitization produces an empty `strategy_name` segment, orchestration MUST substitute the fallback value `unknown`.
+- The complete branch name MUST satisfy the global validation rule (≤200 characters); orchestration MUST enforce this limit when generating names.
 
 **Clean Separation**: The synchronization mechanism maintains architectural boundaries:
 
@@ -1335,12 +1352,12 @@ The idempotent pre-check ("does the branch already equal the workspace HEAD?") *
 - Empty changes (auto): with `skip_empty_import=true` (default) and `import_policy="auto"`, if there are no commits relative to the base (detected via `BASE_COMMIT..HEAD`), no branch is created. The task result sets `artifact.has_changes=false`, `artifact.branch_final=null`, and records the planned branch name in `artifact.branch_planned` for reporting.
 - Empty changes (always): with `import_policy="always"`, a branch is created even when there are zero commits; it points at the base commit.
 - Never import: with `import_policy="never"`, no branch is created regardless of changes. The result MUST set `artifact.has_changes=false`, `artifact.branch_final=null`, and `artifact.branch_planned` MUST carry the planned branch name for traceability. Strategies MUST pick a real base for subsequent tasks (e.g., the candidate’s imported branch if `has_changes=true`, else the original `base_branch`).
-- Name collisions: controlled by `import_conflict_policy = "fail" | "overwrite" | "suffix"` (default `"fail"`). For `"suffix"`, `_2`, `_3`, … are appended atomically while holding the import lock. For `"overwrite"`, a forced ref update is used.
+- Name collisions: controlled by `import_conflict_policy = "fail" | "overwrite" | "suffix"` (default `"fail"`). For `"suffix"`, `_2`, `_3`, … are appended atomically to the leaf after `k{short8}` while holding the import lock (e.g., `orc/bestofn/run_20250114_123456/k7aa12cc_2`). For `"overwrite"`, a forced ref update is used.
 - Failures: if git fetch fails (disk space/corruption), the instance is marked failed with details. The isolated workspace is preserved for debugging.
 
 **Deduplication policy (suffix)**: By provenance. Different tasks importing the same commit create separate suffixed branches; this preserves branch‑per‑task traceability.
 
-**Suffix idempotency with provenance**: Under the per‑repo import lock and when `import_conflict_policy="suffix"`:
+**Suffix idempotency with provenance**: Under the per‑repo import lock and when `import_conflict_policy="suffix"` (candidate regex example: `.../k(?P<k8>[0-9a-f]{8})(?:_(?P<n>\d+))?$`):
 
 1) If any candidate branch matching `^${branch_name}(_[0-9]+)?$` has `HEAD == WS_HEAD` and the commit’s note already includes this `task_key`, treat as idempotent success and return that branch (no new suffix).
 
@@ -1513,7 +1530,7 @@ The TUI knows nothing about how tasks run or how strategies work—it simply sub
 
 ## 5.2 Display Architecture
 
-The TUI uses a hybrid approach combining event streams with periodic state polling for both responsiveness and reliability:
+The TUI is display-only (no interactive shortcuts). Interactive features (e.g., search/filter) are out of scope for this release. It uses a hybrid approach combining event streams with periodic state polling for both responsiveness and reliability:
 
 **Event Handling**: The TUI watches `events.jsonl` for new events using a portable file watcher with a polling fallback (to support macOS/Windows/Linux uniformly). As new events are appended to the file, the TUI reads and processes them, updating its internal state immediately. Events do not trigger renders directly. Whether 1 event or 100 events arrive, they update only the internal data structures. This prevents display flooding when hundreds of tasks generate rapid events.
 
@@ -1532,28 +1549,20 @@ The display model decouples event ingestion from rendering: events update intern
 
 ## 5.3 Layout Design
 
-The dashboard uses a three-zone layout maximizing information density:
+The dashboard uses a three-zone layout maximizing information density while remaining non-interactive:
 
-**Header Zone**: Single-line header showing run-level information:
+**Header Zone**: Single-line header: `RunID • strategy=name(params) • model • tasks: running/queued/done • runtime` (e.g., `strategy=best-of-n(n=5)`). Parentheses are used for display only; for CLI pass params via `-S/--set` (e.g., `-S n=5`).
 
-- Run ID with emoji indicator
-- Strategy name and configuration
-- Model being used
-- Task counts (running/completed/failed)
-- Total runtime
+**Dashboard Zone**: Dynamic grid grouped by strategy; within each group tasks are ordered running → queued → done, then chronological. Cards show, by default, and only:
+1) Phase (e.g., `container_created`, `tool_use`)
+2) Runtime
+3) Branch (planned/final as applicable)
+4) Instance short ID
+5) Last activity (e.g., `stalled 45s` when applicable)
 
-**Dashboard Zone**: Dynamic grid adapting to task count:
+Cost/tokens are not shown in cards by default (they appear in the details pane and footer).
 
-- Each strategy gets a bordered section
-- Tasks within strategies shown as cards
-- Card size varies based on total count (detailed → compact → minimal)
-- Visual grouping makes strategy boundaries clear
-
-**Footer Zone**: Fixed 2-line footer with aggregate metrics:
-
-- Total runtime, accumulated cost, token usage
-- Task counts (running/completed/failed)
-- Critical warnings or errors
+**Footer Zone**: Fixed 2-line footer with aggregate metrics: total runtime, per‑task running subtotal (sum of active tasks) and run total cost, tokens (in/out/total), failures count (subtle), and queue depth. Failures are surfaced via the counter only—no banners. Footer totals should update smoothly (≈≤1s perceived latency).
 
 The layout prioritizes current activity. Completed tasks fade visually while active ones draw attention. This focus on "what needs attention now" helps users manage large runs.
 
@@ -1561,30 +1570,25 @@ The layout prioritizes current activity. Completed tasks fade visually while act
 
 The display intelligently adapts to task count, showing maximum useful information without clutter:
 
-**Detailed Mode (1-5 tasks)**:
+**Detailed Mode (≤5 tasks)**:
 
-- Large cards with live status, phase, and key metrics
-- Live progress bars based on task completion
-- Token usage breakdown (input/output/total)
-- Real-time cost accumulation
-- Full error messages if failed
+- Larger cards; always show Phase and Runtime, plus the default fields above
+- Live progress bars when available
 
-**Compact Mode (6-30 tasks)**:
+**Compact Mode (6–30 tasks)**:
 
-- Medium cards with current status line only
-- Simplified progress indicator
-- Cost and runtime prominently displayed
-- Status shown as emoji (🔄 running, ✅ complete, ❌ failed)
+- Medium cards with Phase + Runtime always visible; other fields elide as needed
 
-**Dense Mode (30+ tasks)**:
+**Dense Mode (31+ tasks)**:
 
-- Minimal cards in tight grid
-- ID, status emoji, cost, and runtime only
-- Color coding for quick status scanning
-- Strategy-level progress more prominent
-- Summary stats matter more than individuals
+- Minimal cards in tight grid with Phase + Runtime always visible; other fields elide progressively
+- Strategy-level progress more prominent; summary stats matter more than individuals
 
-The adaptation is automatic but overridable. Users can force detail level if monitoring specific tasks closely. This flexibility handles both overview monitoring and detailed debugging.
+The adaptation is automatic but overridable via `--display {detailed|compact|dense|auto}`. This flexibility handles both overview monitoring and detailed debugging.
+
+**Optional Details Pane (no interactivity)**: When enabled with `--display-details right`, a right-side panel shows the most recently updated task’s details: last N public messages (sanitized), cost, tokens, metrics, and the final message (with truncation note and run‑relative path). Only public event data (`task.*`, `strategy.*`) is shown; runner internals remain file‑only. Defaults: `--display auto`, `--display-details none`, and N=10 (configurable via `tui.details_messages=10`).
+
+**Accessibility & palette**: Use a deuteranopia‑friendly palette with minimum 4.5:1 contrast for text on background. Emoji are permitted but the UI MUST NOT rely on color alone—pair color + icon + label (e.g., RUN, DONE, FAIL). Provide `--no-emoji` for environments that prefer ASCII only.
 
 ## 5.5 CLI Interface
 
@@ -1597,19 +1601,25 @@ orchestrator "your prompt" --strategy best-of-n --runs 3 -S n=5
 orchestrator --resume <run-id>
 orchestrator --list-runs
 orchestrator --clean-containers
+orchestrator doctor
+orchestrator config print [--json]
 ```
 
 **Output Modes**:
 
-- Default: Full TUI dashboard
-- `--no-tui`: Stream events to console with clean formatting
-- `--json`: Machine-readable output for scripting
+- TTY (interactive): launch the full TUI dashboard by default.
+- Non‑TTY/CI: print concise, colorless human logs; opt into JSON via `--json`.
+- `--no-tui`: force streaming logs even in a TTY.
 
-**Cleanup Commands**:
+The same identifiers, ordering, and lifecycle semantics appear across TUI, streaming, and logs.
 
-- `--clean-containers`: Removes stopped or orphaned containers labeled `orchestrator=true` older than the configured retention. Running containers are not removed. Supports `--dry-run` to list targets without deleting and `--force` to bypass prompts.
-- `--clean-volumes [--dry-run] [--force] [--older-than <hours>]`: Removes unreferenced session volumes matching `orc_home_{run_id}_g{GHASH}` (run scope) and `orc_home_g{GHASH}` (global scope) older than the threshold (default 24h). Never remove volumes referenced by any container. `--dry-run` lists candidates; `--force` skips interactive prompts.
+**Cleanup Commands** (confirmation required):
+
+- `--clean-containers`: Removes stopped or orphaned containers labeled `orchestrator=true` older than the configured retention. Running containers are not removed. Prompts interactively; use `--yes` to bypass. `--dry-run` lists targets without deleting.
+- `--clean-volumes [--dry-run] [--older-than <hours>]`: Removes unreferenced session volumes matching `orc_home_{run_id}_g{GHASH}` (run scope) and `orc_home_g{GHASH}` (global scope) older than the threshold (default 24h). Never removes volumes referenced by any container. Prompts interactively; use `--yes` to bypass.
 - `--quiet`: Only show final results
+
+In non‑TTY environments, operations requiring confirmation will fail fast with a clear hint to re‑run with `--yes`.
 
 **Exit Codes**:
 
@@ -1625,7 +1635,7 @@ Writer safety options:
 **Strategy Configuration**:
 
 - `--runs`: Number of parallel strategy executions within a single run ID (one run folder; N executions).
-- `-S key=value`: Set strategy-specific parameters (repeatable)
+- `-S key=value` and `--set key=value`: Set strategy‑specific parameters (repeatable). Both forms are merged.
 - `--config`: Load configuration from YAML or JSON file
 
 Examples:
@@ -1672,15 +1682,31 @@ orchestrator --config complex-prompt.yaml
 
 **Non-TUI Output**: When TUI is disabled, events stream to console with:
 
-- Colored prefixes for event types ([STARTED], [COMPLETED], [FAILED])
-- Instance IDs for correlation
-- Key information only - no verbose logging
-- Clean formatting without timestamp clutter
-- Rich table and tree views for readable summaries
+- Hybrid line style with compact prefix and key=value fields (no ANSI colors in non‑TTY):
+
+  `[k7aa12cc][inst-7a3f2] ▶ started model=sonnet base=main`
+
+  `[k7aa12cc][inst-7a3f2] ✅ completed time=3m24s cost=$0.42 tokens=2.5k branch=orc/bestofn/run_20250114_123456/k7aa12cc`
+
+  `[k19bb44a][inst-8b4c1] ❌ failed type=timeout after=60m retries=3`
+
+- Prefix is always `[k{short8(qual_key)}][inst-{first5}]`. Status glyphs: `▶` started, `✅` completed, `❌` failed, `⏸` interrupted. Use `--no-emoji` to disable glyphs.
+- Field order is stable; missing fields are omitted (no empty `key=`).
+- Verbosity: lifecycle events only by default; `--verbose` additionally prints notable phases like `container_created`, `branch_imported`, and `no_changes`.
 
 Note: The TUI reads only the canonical public events (`task.*`, `strategy.*`) from `events.jsonl`. Detailed tool-use/activity feeds from runner internals are available in `runner.jsonl` for debugging but are not part of the public event stream.
 
-**Configuration**: CLI arguments take precedence over all other config sources. Complex strategies can be configured via `--config` with YAML or JSON files for repeatability. Environment variables provide defaults without cluttering commands.
+**Configuration**: CLI arguments take precedence over all other config sources. Complex strategies can be configured via `--config` with YAML or JSON files for repeatability. Environment variables provide defaults without cluttering commands. At start of run, the orchestrator prints a truncated Effective Config header (sources shown; secrets redacted), e.g.:
+
+```
+Effective config (sources: cli>env>.env>project>global>default)
+model: sonnet                 (project)
+strategy: best-of-n           (cli)
+strategy.params.n: 5          (cli)
+runner.network_egress: online (default)
+auth: REDACTED                (env)
+… see `orchestrator config print` for full details
+```
 
 Additional flags and mappings:
 
@@ -1691,6 +1717,20 @@ Additional flags and mappings:
 - Git safety: `--allow-overwrite-protected-refs` must be set to allow forced updates to protected refs.
 - Proxy settings (no secrets logged):
   - Proxy configuration is supported via CLI, environment, and config file. Specific option names are implementation‑defined and may vary by environment.
+
+- TUI display controls (non‑interactive toggles): `--display {detailed|compact|dense|auto}` (default `auto`), `--display-details {right|none}` (default `none`).
+- Identifier verbosity: `--show-ids full` expands to full IDs in streaming and prints a note in the TUI header.
+- Emoji control: `--no-emoji` disables emojis in streaming output.
+- CI artifacts: `--ci-artifacts out.zip` writes a deterministic, small zip with `results/summary.json`, `results/branches.txt`, and `results/tasks/k{short8(qual_key)}.json` (TaskResult + minimal metadata). All contents follow the public event shapes, use run‑relative paths, and are redacted.
+
+**Helper Commands**:
+
+- `orchestrator doctor`: Performs mandatory checks (Docker daemon reachable and version, disk free threshold, repo validity, base branch exists, temp dir writable, presence of either OAuth token or API key, `models.yaml` load and checksum agreement) and informational checks (SELinux detection on Linux, WSL2 hints on Windows). Outputs a short pass/fail table with concise “Try:” bullets on failures. Exits `0` only if all mandatory checks pass; otherwise `1`.
+
+- `orchestrator config print`: Prints effective merged config honoring precedence (CLI > env > .env > project file > global defaults > built‑in). Shows source per key (cli/env/file/default); secrets are redacted by default. Supports `--json`. Unredaction is allowed only when `ORC_ALLOW_UNREDACTED=1` is set and `--redact=false` is provided (intended for development).
+
+Additional flags:
+- `--debug`: Enables debug mode (also streams full logs to stderr in addition to files).
 
 Cleanup semantics: On startup, orchestration performs a conservative orphan scan limited to containers labeled `orchestrator=true` in the current run namespace. Age calculations use the following precedence: `state.json` timestamps, then heartbeat file mtime, then Docker `CreatedAt`. Explicit `--clean-containers` is an operator action that removes across runs according to retention settings.
 
@@ -1713,8 +1753,8 @@ python -m src.tui --run-id run_20250114_123456
 
 Implementation notes (current TUI):
 - The TUI renders via Rich at a fixed 10Hz. If the optional `watchdog` package is not available, it automatically falls back to a pure polling tail of `events.jsonl` without any loss of fidelity.
-- Forcing display density: pass `--display-mode {detailed|compact|dense}` to override the automatic mode selection. This is useful when you want one-line summaries even for small runs.
-- Non-TTY environments: use `--output streaming` or `--output json` to avoid using the alternate screen buffer.
+- Forcing display density: pass `--display {detailed|compact|dense|auto}` to override the automatic mode selection. This is useful when you want one-line summaries even for small runs.
+- Non-TTY environments: TUI is not started; concise human logs are printed by default. Use `--json` for JSON events or `--no-tui` in a TTY to force streaming logs.
 - Stalled indicator: For running instances that haven’t updated in >30s, the Activity shows a “stalled Ns” suffix to highlight potential hangs while keeping the last known step (e.g., “Container created (stalled 45s)”).
 - Debug event processing separately
 - Test display layouts without running instances
@@ -1737,11 +1777,14 @@ Configuration follows a strict precedence hierarchy, making defaults sensible wh
 
 **Precedence Order** (highest to lowest):
 
-1. CLI arguments - Direct control for one-off runs
-2. Environment variables - Deployment-specific settings
-3. `.env` file - Local development convenience
-4. `orchestrator.yaml` - Shared team configuration
-5. Built-in defaults
+1. CLI arguments — direct control for one‑off runs
+2. Environment variables — deployment‑specific settings
+3. `.env` file — development convenience (prints exactly one warning when used)
+4. Project file `orchestrator.yaml` — shared team configuration
+5. Global defaults — `~/.orchestrator/config.yaml` (preferred) or XDG fallback `~/.config/orchestrator/config.yaml` if the preferred path is absent. If both exist, the loader MUST prefer `~/.orchestrator/config.yaml` and print a one‑line info noting the XDG fallback was ignored.
+6. Built‑in defaults
+
+On invalid config, render a compact validation table with three columns: `field | reason | example`. At run start, print a truncated “Effective config” header (≤20 lines) including sources (cli/env/.env/project/global/default) with `secrets=REDACTED`, ending with “see `orchestrator config print` for full details”.
 
 **Authentication**: Two credential types are supported. No explicit mode is required; the presence of credentials determines behavior.
 
@@ -1777,7 +1820,7 @@ ANTHROPIC_BASE_URL=...   # optional
 
 **Configuration Merging**: Complex deep merge with recursive dictionary merging for nested configurations. Arrays are replaced, not merged.
 
-**Model Mapping**: Friendly model names MUST resolve via a single shared mapping file `models.yaml`. Both orchestration and runner load from this single file. At process start, each component computes a checksum (e.g., SHA‑256) of the loaded `models.yaml`. Orchestration passes its checksum to the runner; the runner fails fast on mismatch. Any divergence or failure to load the same mapping in multi‑process deployments is a configuration error.
+**Model Mapping**: Friendly model names MUST resolve via a single shared mapping file `models.yaml`. Both orchestration and runner load from this single file. At process start, each component computes a checksum (e.g., SHA‑256) of the loaded `models.yaml`. Orchestration passes its checksum to the runner; the runner fails fast on mismatch. Any divergence or failure to load the same mapping in multi‑process deployments is a configuration error. Only when a mismatch/warn condition exists should the system print the checksum and resolved model IDs. If no message is printed at startup, the mappings match.
 
 ### 6.1.1 Default Values Catalog
 
@@ -1858,12 +1901,11 @@ logs/
     events.jsonl  # Complete event stream
 ```
 
-**Console Output**: Clean, purposeful console output:
+**Console Output & Levels**: Clean, purposeful console output (console level = INFO; files = DEBUG):
 
-- TUI mode: Only errors and warnings
-- No-TUI mode: Key events with colored prefixes
-- Debug mode: Full log stream to stderr
-- Never mix logs with TUI display
+- TTY/TUI mode: TUI handles display. Only critical errors/warnings are surfaced outside the TUI frame; all other logs go to files.
+- Non‑TTY/streaming: concise human logs using the hybrid line style (no ANSI colors), emojis permitted and disableable via `--no-emoji`.
+- Debug mode (`--debug`): Full log stream to stderr in addition to files.
 
 **Rotation and Cleanup**:
 - Public event/state data (`logs/<run_id>/events.jsonl`, `logs/<run_id>/state.json`, and `orchestrator_state/<run_id>/state.json`) MUST NOT be pruned while a run is non‑terminal. They become eligible for pruning only after all top‑level strategies emit `strategy.completed` and after a grace period `events.retention_grace_days` (default: 7). `events.retention_days` controls total retention for terminal runs.
@@ -1880,6 +1922,23 @@ Logging captures detailed data to files while minimizing console noise.
 - File size-based rotation with configurable backup count (applies to component logs only; never to `events.jsonl`)
 - `events.jsonl` is never rotated during an active run; rotation/archival occurs only after the run completes
 - Async rotation tasks to prevent blocking
+ 
+**Final message truncation**: Maintain a 64KB limit for `final_message` in public events. When truncated, always write the full text under `logs/<run_id>/…` (run‑relative path) and print that path in streaming output and expose it in the TUI details pane.
+
+**Failure diagnostics microcopy**: Console/TUI errors SHOULD follow a terse, helpful pattern:
+
+`title` (lowercase, action‑oriented) — optional short context
+
+`Try:`
+- one or two imperative, specific suggestions
+
+Examples:
+- `docker error: cannot connect to daemon. Try: start Docker; check $DOCKER_HOST; run 'orchestrator doctor'.`
+- `git error: base branch 'main' not found. Try: fetch 'origin'; verify branch name; run 'git branch --all'.`
+- `auth error: no credentials. Try: set CLAUDE_CODE_OAUTH_TOKEN or ANTHROPIC_API_KEY.`
+- `network blocked (egress=offline). Try: set runner.network_egress=online or configure proxy.`
+
+**Custom redaction patterns**: In addition to built‑in redaction, teams MAY configure `logging.redaction.custom_patterns` (array of regex) to extend provider coverage. Public events MUST remain sanitized; environment/header dumps are forbidden.
   
 Cost estimation configuration:
 
@@ -2169,26 +2228,26 @@ Monitoring is designed to answer the key question: "Is everything going as expec
 
 The dashboard adapts to run scale automatically. Users do not configure view modes; behavior scales from small runs to large runs (for example, 3 to 300 tasks).
 
-**Non-TUI Monitoring**: When TUI is disabled, progress streams to console (showing both task hash and instance id):
+**Non-TUI Monitoring**: When TUI is disabled, progress streams to console (showing both the task key and instance id):
 
 Identifier formats:
 
-- `k<8hex>` = `short8(qual_key)` = first 8 hex chars of SHA‑256 of the fully-qualified durable key `qual_key = f"{strategy_execution_id}|{durable_key}"`
-- `inst-<5hex>` = first 5 hex chars of the stable `instance_id`
-- Log prefix format MUST be: `<k8>/<inst5>: <message>`
+- `k{short8(qual_key)}` = first 8 hex chars of SHA‑256 of the fully‑qualified durable key `qual_key = f"{strategy_execution_id}|{durable_key}"` (shorthand: "k8")
+- `inst-{first5}` = first 5 hex chars of the stable `instance_id`
+- Prefix MUST be `[k{short8(qual_key)}][inst-{first5}] <message>` and uses the `k8` shorthand for `k{short8(qual_key)}`.
 
 ```
-k7aa12cc/inst-7a3f2: Started → feat_auth_1
-k7aa12cc/inst-7a3f2: Implementing authentication module...
-k7aa12cc/inst-7a3f2: Created auth/jwt.py with JWT handler
-k7aa12cc/inst-7a3f2: Completed ✓ 3m 24s • $0.42 • 2.5k tokens
+[k7aa12cc][inst-7a3f2] Started → feat_auth_1
+[k7aa12cc][inst-7a3f2] Implementing authentication module...
+[k7aa12cc][inst-7a3f2] Created auth/jwt.py with JWT handler
+[k7aa12cc][inst-7a3f2] ✅ completed time=3m24s cost=$0.42 tokens=2.5k
 
-k19bb44a/inst-8b4c1: Started → reviewing feat_auth_1  
-k19bb44a/inst-8b4c1: Analyzing implementation quality...
-k19bb44a/inst-8b4c1: Strategy output → score=8.5, feedback="Good error handling"
-k19bb44a/inst-8b4c1: Completed ✓ 45s • $0.12 • 0.8k tokens
+[k19bb44a][inst-8b4c1] Started → reviewing feat_auth_1  
+[k19bb44a][inst-8b4c1] Analyzing implementation quality...
+[k19bb44a][inst-8b4c1] Strategy output → score=8.5, feedback="Good error handling"
+[k19bb44a][inst-8b4c1] ✅ completed time=45s cost=$0.12 tokens=0.8k
 
-k2f88e01/inst-9d5e3: Failed ✗ Timeout after 60m • $2.41
+[k2f88e01][inst-9d5e3] ❌ failed type=timeout after=60m cost=$2.41
 ```
 
 Clean prefixes, instance correlation, key metrics. No timestamp spam or debug noise.
@@ -2229,7 +2288,7 @@ This approach handles the reality of AI coding: API timeouts, rate limits, and t
 - API Error: Persistent API failures (rate limit, auth)
 - Container Error: Docker issues, out of memory
 - Git Error: import/fetch failures (e.g., ref lock, pack corruption, insufficient disk)
- - Network Error: Blocked or unreachable network. When `runner.network_egress=offline`, failures due to blocked egress MUST be classified as `network` and include `egress=offline` in the message.
+ - Network Error: Blocked or unreachable network. When `runner.network_egress=offline`, failures due to blocked egress MUST be classified as `network`, include `egress=offline` in the message, and append a one‑time hint (once per task): `egress=offline → tool needs network; set runner.network_egress=online/proxy`. Orchestration MUST track an emitted‑hint flag per task key to avoid repeated hints.
 
 The Instance Runner reports failure type but does not interpret it. Strategy code is responsible for interpretation.
 
@@ -2398,24 +2457,24 @@ Runs: 3
 Results by strategy:
 
 Strategy #1 (best-of-n):
-  ✓ bestofn_20250114_123456_k5d3a9f2  3m 12s • $0.38 • 2.3k tokens
+  ✓ orc/bestofn/run_20250114_123456/k5d3a9f2  3m 12s • $0.38 • 2.3k tokens
     strategy_output (example): score=7.5, complexity=medium, test_coverage=85%
-  ✓ bestofn_20250114_123456_k7aa12cc  3m 45s • $0.41 • 2.5k tokens  
+  ✓ orc/bestofn/run_20250114_123456/k7aa12cc  3m 45s • $0.41 • 2.5k tokens  
     strategy_output (example): score=8.5, complexity=low, test_coverage=92%
-  → Selected: bestofn_20250114_123456_k7aa12cc
+  → Selected: orc/bestofn/run_20250114_123456/k7aa12cc
 
 Strategy #2 (best-of-n):
-  ✓ bestofn_20250114_123456_k19bb44a  4m 23s • $0.52 • 3.1k tokens
+  ✓ orc/bestofn/run_20250114_123456/k19bb44a  4m 23s • $0.52 • 3.1k tokens
     strategy_output (example): score=9.0, complexity=high, test_coverage=78%
-  ✗ bestofn_20250114_123456_k2f88e01  Failed: timeout after 3 retries
-  → Selected: bestofn_20250114_123456_k19bb44a
+  ✗ orc/bestofn/run_20250114_123456/k2f88e01  Failed: timeout after 3 retries
+  → Selected: orc/bestofn/run_20250114_123456/k19bb44a
 
 Strategy #3 (best-of-n):  
-  ✓ bestofn_20250114_123456_k8c0d3aa  3m 56s • $0.44 • 2.7k tokens
+  ✓ orc/bestofn/run_20250114_123456/k8c0d3aa  3m 56s • $0.44 • 2.7k tokens
     strategy_output (example): score=8.0, complexity=medium, test_coverage=88%
-  ✓ bestofn_20250114_123456_k0a9f3de  3m 33s • $0.39 • 2.4k tokens
+  ✓ orc/bestofn/run_20250114_123456/k0a9f3de  3m 33s • $0.39 • 2.4k tokens
     strategy_output (example): score=7.0, complexity=low, test_coverage=90%
-  → Selected: bestofn_20250114_123456_k8c0d3aa
+  → Selected: orc/bestofn/run_20250114_123456/k8c0d3aa
 
 Summary:
   Total Duration: 8m 45s
@@ -2423,9 +2482,9 @@ Summary:
   Success Rate: 5/6 tasks (83%)
   
 Final branches (3):
-  bestofn_20250114_123456_k7aa12cc
-  bestofn_20250114_123456_k19bb44a
-  bestofn_20250114_123456_k8c0d3aa
+  orc/bestofn/run_20250114_123456/k7aa12cc
+  orc/bestofn/run_20250114_123456/k19bb44a
+  orc/bestofn/run_20250114_123456/k8c0d3aa
 
 Full results: ./results/run_20250114_123456/
 ```
@@ -2441,11 +2500,11 @@ Full results: ./results/run_20250114_123456/
 
 ```
 To compare implementations:
-  git diff main..bestofn_20250114_123456_k7aa12cc
-  git checkout bestofn_20250114_123456_k8c0d3aa
+  git diff main..orc/bestofn/run_20250114_123456/k7aa12cc
+  git checkout orc/bestofn/run_20250114_123456/k8c0d3aa
   
 To merge selected solution:
-  git merge bestofn_20250114_123456_k8c0d3aa
+  git merge orc/bestofn/run_20250114_123456/k8c0d3aa
 ```
 
 **Export Formats**: Results can be exported for different audiences:
@@ -2468,3 +2527,35 @@ The orchestrator provides maintenance commands to prune old artifacts according 
 - `--prune-dry-run`: prints what would be removed without deleting.
 
  
+## 7.8 UX Non‑Goals & Risks
+
+- No interactive TUI controls or shortcuts; display‑only with non‑interactive flags.
+- No shell completions in this release.
+- No additional PII redaction by default (beyond centralized secret redaction); teams can extend with `logging.redaction.custom_patterns`.
+- No budget/threshold nags; footer shows totals only.
+- Branch namespace changed to hierarchical `orc/<strategy>/<run_id>/k{short8(qual_key)}`; this may affect scripts relying on the older flat pattern. Document migration and provide a deprecation note in release notes.
+
+## 7.9 Migration Tips
+
+Existing runs may contain branches using the older flat pattern `{strategy}_{run_id}_k{short8(qual_key)}`. New branches are hierarchical only. The orchestrator continues to read/display old branches; migration is optional. If you want to rename existing branches:
+
+- List flat‑pattern branches:
+  `git for-each-ref --format '%(refname:short)' refs/heads | grep -E '^[^/]+_run_[0-9]{8}_[0-9]{6}(_[0-9a-f]{8})?_k[0-9a-f]{8}$'`
+
+- Preview mapping to hierarchical:
+  `git for-each-ref --format '%(refname:short)' refs/heads | \
+   while read -r b; do \
+     n=$(echo "$b" | sed -nE 's@^([^_]+)_(run_[0-9]{8}_[0-9]{6}(?:_[0-9a-f]{8})?)_k([0-9a-f]{8})$@orc/\1/\2/k\3@p'); \
+     if [ -n "$n" ]; then printf "%-60s -> %s\n" "$b" "$n"; fi; \
+   done`
+
+- Rename in a loop (interactive, stops on conflicts):
+  `git for-each-ref --format '%(refname:short)' refs/heads | \
+   while read -r b; do \
+     n=$(echo "$b" | sed -nE 's@^([^_]+)_(run_[0-9]{8}_[0-9]{6}(?:_[0-9a-f]{8})?)_k([0-9a-f]{8})$@orc/\1/\2/k\3@p'); \
+     if [ -n "$n" ] && [ "$b" != "$n" ]; then echo "$b -> $n"; git branch -m "$b" "$n"; fi; \
+   done`
+
+Notes:
+- Use `git branch -M` to force overwrites only if you’re certain no collisions exist.
+- Update any CI or scripts that parse branch names accordingly.
