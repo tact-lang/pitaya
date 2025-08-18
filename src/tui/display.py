@@ -74,7 +74,7 @@ class TUIDisplay:
         # Display state
         self._live: Optional[Live] = None
         self._shutdown = False
-        self._orchestrator = None  # Set when connected
+        self._orchestrator = None  # Kept for offline state reconciliation
         # Render on the primary console; stdout is redirected by Live to avoid corruption
         # Immutable snapshot for rendering to avoid races at completion bursts
         self._render_run: Optional[RunDisplay] = None
@@ -150,48 +150,7 @@ class TUIDisplay:
             # Run render loop
             await self._render_loop()
 
-    async def run_connected(self, client, from_offset: int = 0) -> None:
-        """
-        Run the TUI display connected to orchestrator HTTP server.
-
-        Args:
-            client: OrchestratorClient instance
-            from_offset: Starting event offset
-        """
-        self._orchestrator = client
-
-        # Prime state immediately to avoid initial '--:--:--' duration delay
-        try:
-            st = await client.get_state()
-            if st:
-                self._reconcile_state(st)
-        except Exception:
-            pass
-
-        # Start event polling from HTTP
-        asyncio.create_task(self._http_event_polling_loop(client, from_offset))
-
-        # Start state polling
-        asyncio.create_task(self._state_polling_loop())
-
-        # Start display (single Live session; no watchdog restarts)
-        with Live(
-            self._layout,
-            console=self.console,
-            refresh_per_second=10,  # 10Hz default
-            screen=self._alt_screen,
-            vertical_overflow="crop",  # Crop content that goes beyond screen
-            transient=self._alt_screen,
-            redirect_stdout=True,
-            redirect_stderr=False,
-        ) as live:
-            self._live = live
-
-            # Force initial refresh
-            live.update(self._layout)
-
-            # Run render loop
-            await self._render_loop()
+    # Connected display mode removed
 
     async def stop(self) -> None:
         """Stop the TUI display."""
@@ -294,15 +253,9 @@ class TUIDisplay:
         """Periodic state reconciliation loop."""
         while not self._shutdown:
             try:
-                # Poll orchestrator state
-                if self._orchestrator:
-                    if hasattr(self._orchestrator, "get_current_state"):
-                        # Direct orchestrator instance
-                        state = self._orchestrator.get_current_state()
-                    else:
-                        # HTTP client
-                        state = await self._orchestrator.get_state()
-
+                # Poll orchestrator state (direct instance only)
+                if self._orchestrator and hasattr(self._orchestrator, "get_current_state"):
+                    state = self._orchestrator.get_current_state()
                     if state:
                         self._reconcile_state(state)
 
@@ -330,34 +283,7 @@ class TUIDisplay:
             except (OSError, AttributeError) as e:
                 self.state.add_error(f"State poll error: {e}")
 
-    async def _http_event_polling_loop(self, client, from_offset: int) -> None:
-        """Poll for events from HTTP server."""
-        offset = from_offset
-
-        while not self._shutdown:
-            try:
-                # Get events from server
-                t0 = time.perf_counter()
-                events, new_offset = await client.get_events(offset=offset, limit=100)
-                t1 = time.perf_counter()
-
-                # Process each event
-                for event in events:
-                    self.event_processor.process_event(event)
-
-                # Update offset
-                offset = new_offset
-                self.state.last_event_start_offset = offset
-                logger.debug(
-                    f"http_poll events={len(events)} new_offset={new_offset} dur_ms={(t1 - t0)*1000:.2f}"
-                )
-
-                # Short delay between polls
-                await asyncio.sleep(0.5)
-
-            except (OSError, asyncio.CancelledError, AttributeError) as e:
-                self.state.add_error(f"Event poll error: {e}")
-                await asyncio.sleep(2.0)  # Back off on error
+    # Network polling loop removed
 
     def _reconcile_state(self, orchestrator_state: Any) -> None:
         """Reconcile orchestrator state with TUI state."""

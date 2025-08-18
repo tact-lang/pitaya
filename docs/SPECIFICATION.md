@@ -206,7 +206,7 @@ The orchestrator implements strict separation of concerns through three independ
 
 **Orchestration** - Coordinates multiple durable tasks according to strategies. Owns the event bus, manages parallel execution, and tracks global state. Depends only on Instance Runner's public API. Strategies schedule durable tasks with `ctx.run` and make decisions based on results. Provides branch names and container names to tasks.
 
-**TUI (Interface)** - Displays real-time progress and results. Subscribes to orchestration events for real-time updates and periodically polls state for reconciliation. Has zero knowledge of how tasks run or how strategies work—it visualizes events and state only. The TUI is replaceable with a web UI or CLI-only output without changes to other layers.
+**TUI (Interface)** - Displays real-time progress and results. Subscribes to orchestration events for real-time updates and periodically polls state for reconciliation. Has zero knowledge of how tasks run or how strategies work—it visualizes events and state only. The TUI is replaceable with other UIs or CLI-only output without changes to other layers.
 
 Components are decoupled: replacing the TUI does not modify instance execution, and supporting alternative AI tools requires changing only the Instance Runner.
 
@@ -302,6 +302,8 @@ Components follow a strict communication pattern: downward direct calls (Orchest
 - `strategy.started`: `{ name, params }`
 - `strategy.completed`: `{ status, reason? }` where `status ∈ {"success","failed","canceled"}` and `reason` is an optional short summary for failed/canceled strategies.
 - `strategy.rand`: `{ seq, value }` where `seq` is a monotonically increasing integer per strategy execution, and `value` is a float in [0,1).
+
+ Implementations MAY include additional non‑normative payload fields for recovery and diagnostics as long as they do not duplicate envelope fields. For example, `task.scheduled` may include `base_branch` to facilitate robust recovery when replaying events without a recent snapshot.
 
 ### Strategy Status Semantics
 
@@ -563,7 +565,7 @@ Hardening requirements:
 - Capabilities: containers MUST drop all capabilities (`--cap-drop ALL`) and run with `--security-opt no-new-privileges` and the default Docker seccomp profile (or stricter if available).
 - Process/resource limits: containers MUST set a `--pids-limit` and strict `--ulimit nofile` to prevent resource exhaustion. Sensible defaults should be applied and remain configurable.
 - Mount policy: exactly three mounts are permitted (`/workspace`, `/home/node`, `/tmp`). The runner MUST prevent mounting host paths other than these and MUST reject any attempt to mount the Docker socket or other host device/special files.
-- Optional I/O throttles: operators MAY enable blkio throttling to limit disk impact on shared hosts. When enabled, record throttle settings in runner-internal logs only (never in public events).
+ 
 
 **Container Reuse**: When `reuse_container=True`:
 
@@ -598,7 +600,7 @@ This persistence is crucial because Claude Code maintains session state inside t
 
 - `online` (default): standard Docker networking; outbound internet allowed.
 - `offline`: containers MUST run with `--network none`. Strategies MUST NOT request `offline` unless explicitly configured by the user/environment.
-- `proxy`: outbound traffic routed via proxy; pass `HTTP_PROXY/HTTPS_PROXY/NO_PROXY` into the container environment via plugin/runner config without ever logging credentials. Precedence: CLI flags override environment, which override config.
+- `proxy`: outbound traffic routed via a configured proxy; credentials MUST never be logged. Configuration precedence: CLI flags override environment, which override config.
 
 Failure classification for offline runs: if a task runs with `offline` and fails due to blocked egress, classify as `error_type="network"`, set `network_egress="offline"` in the payload, and include `egress=offline` in the human message for clarity.
 
@@ -1507,9 +1509,9 @@ Core responsibilities:
 - Stream important events to console in non-TUI mode
 - Present final results and branch information
 
-The TUI knows nothing about how tasks run or how strategies work—it simply subscribes to events and queries state. This separation allows full replacement with a web UI without changing orchestration logic.
+The TUI knows nothing about how tasks run or how strategies work—it simply subscribes to events and queries state. This separation allows full replacement with alternative UIs without changing orchestration logic.
 
-**Multi-UI Support**: Multiple UIs can monitor the same run by tailing the shared `events.jsonl` file and periodically reading `state.json` snapshots. No HTTP server is provided.
+**Multi-UI Support**: Multiple UIs can monitor the same run by tailing the shared `events.jsonl` file and periodically reading `state.json` snapshots.
 
 ## 5.2 Display Architecture
 
@@ -1690,9 +1692,7 @@ Additional flags and mappings:
 - Disk guard: `--disk-min-free-gb` and `--disk-max-pack-growth-mib-per-min` tune admission backpressure thresholds.
 - Git safety: `--allow-overwrite-protected-refs` must be set to allow forced updates to protected refs.
 - Proxy settings (no secrets logged):
-  - CLI: `--proxy-http`, `--proxy-https`, `--no-proxy`
-  - Config: `runner.network.proxy.http|https|no_proxy`
-  - Env: `HTTP_PROXY`, `HTTPS_PROXY`, `NO_PROXY`
+  - Proxy configuration is supported via CLI, environment, and config file. Specific option names are implementation‑defined and may vary by environment.
 
 Cleanup semantics: On startup, orchestration performs a conservative orphan scan limited to containers labeled `orchestrator=true` in the current run namespace. Age calculations use the following precedence: `state.json` timestamps, then heartbeat file mtime, then Docker `CreatedAt`. Explicit `--clean-containers` is an operator action that removes across runs according to retention settings.
 
@@ -1959,9 +1959,9 @@ Security focuses on protecting the host system and preventing instance interfere
    - JWT-like blobs (`^[A-Za-z0-9-_]+\.[A-Za-z0-9-_]+\.[A-Za-z0-9-_]+$`)
    - Base64 basic-auth and API tokens (heuristic length thresholds)
 
-By default, environment variables and HTTP headers MUST NOT be logged to public events. Only an allowlist of safe metadata keys may be included. Runner-internal logs MUST also avoid raw env/header dumps.
+By default, environment variables and headers MUST NOT be logged to public events. Only an allowlist of safe metadata keys may be included. Runner-internal logs MUST also avoid raw env/header dumps.
 
-Sanitization MUST be covered by unit tests using a small real-world corpus of keys/tokens to prevent regressions. Patterns are configurable to extend provider coverage.
+Patterns are configurable to extend provider coverage.
 
 Sanitization scope: Redaction applies to all public strings in event payloads, including but not limited to `final_message`, `message`, and textual metadata.
 
@@ -2016,23 +2016,10 @@ Persistence focuses on essential data for resumability and results:
 
 **Event Log**: Append-only `events.jsonl` with a single-writer model:
 
-- One writer task computes `start_offset`, appends, and flushes according to the configured flush policy (buffers events and writes+fsyncs every `interval_ms` or `max_batch`, whichever comes first). The writer MUST acquire an OS-level exclusive lock on `logs/<run_id>/events.jsonl.lock` for the duration of the run using the stale lock detection algorithm below; if an active lock is already held, startup MUST fail fast to prevent multiple writers. Crash semantics: state snapshots carry `last_event_start_offset`; on crash, replay up to the last fsynced batch.
+- One writer task computes `start_offset`, appends, and flushes according to the configured flush policy (buffers events and writes+fsyncs every `interval_ms` or `max_batch`, whichever comes first). The writer MUST acquire an OS-level exclusive lock on `logs/<run_id>/events.jsonl.lock` for the duration of the run. Crash semantics: state snapshots carry `last_event_start_offset`; on crash, replay up to the last fsynced batch.
 
-**Stale Lock Detection**: The lockfile format includes `{ pid, hostname, started_at_iso }` metadata. Acquisition algorithm:
+**Lock Metadata (diagnostic)**: The lockfile SHOULD include `{ pid, hostname, started_at_iso }` metadata written after acquiring the OS lock to aid diagnostics. OS-level locking ensures locks are released when the writer process exits. Implementations MAY additionally implement stale-lock heuristics; they are not required for correctness.
 
-```python
-path = logs/run_id/events.jsonl.lock
-if exists(path):
-    meta = json.load(open(path))
-    if not process_is_alive(meta["pid"], meta["hostname"]):
-        # stale; replace
-        os.remove(path)
-    else:
-        fail("Another writer is active")
-# now acquire OS lock (fcntl/msvcrt), write metadata, fsync
-```
-
-The `process_is_alive` function uses `os.kill(pid, 0)` on POSIX (Linux/macOS) and `OpenProcess` on Windows.
 
 **Filesystem Requirements**: The logs/state directories MUST be on a local filesystem; network filesystems are unsupported.
 
@@ -2155,8 +2142,9 @@ The following environment variables and behaviors are normative:
   - `ORCHESTRATOR_EVENTS__RETENTION_GRACE_DAYS` (default: 7)
   The orchestrator deletes `events.jsonl` and `runner.jsonl` for terminal runs older than the retention + grace window.
 
-- Adaptive parallelism:
-  - `ORCHESTRATOR_ADAPTIVE_PARALLELISM=1` enables auto-scaling when the max parallel instances is at its default. The system detects cgroup CPU quota on Linux and warns when configured parallelism oversubscribes host CPUs.
+- Adaptive parallelism (default):
+  - When `--max-parallel` is not specified, the orchestrator sets `max_parallel_instances = max(2, min(20, floor(host_cpu / container_cpu)))`.
+  - The system detects cgroup CPU quota on Linux and warns when configured parallelism oversubscribes host CPUs.
 
 - Error classification mapping:
   - When `network_egress=offline`, failures are classified as `task.failed.error_type="network"` unless canceled.

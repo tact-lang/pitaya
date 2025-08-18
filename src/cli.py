@@ -161,10 +161,7 @@ Examples:
             help="Authentication mode to use (default: auto-detect based on available credentials)",
         )
 
-        # Proxy settings (map to env and runner network egress)
-        parser.add_argument("--proxy-http", help="HTTP proxy URL (sets HTTP_PROXY)")
-        parser.add_argument("--proxy-https", help="HTTPS proxy URL (sets HTTPS_PROXY)")
-        parser.add_argument("--no-proxy", help="Comma-separated NO_PROXY hosts (sets NO_PROXY)")
+        # Proxy settings (optional) removed
 
         # Resource limits
         parser.add_argument(
@@ -272,11 +269,7 @@ Examples:
             action="store_true",
             help="Deprecated (default behavior). Dirty working tree only warns.",
         )
-        parser.add_argument(
-            "--http-port",
-            type=int,
-            help="Enable HTTP server on specified port for multi-UI support",
-        )
+        # Server extension support removed
         # Session volume scope safety switch (normative; requires explicit consent)
         parser.add_argument(
             "--allow-global-session-volume",
@@ -1312,8 +1305,7 @@ Examples:
             cli_config.setdefault("orchestration", {})["logs_dir"] = args.logs_dir
         if args.output:
             cli_config["output"] = args.output
-        if args.http_port:
-            cli_config["http_port"] = args.http_port
+        # Server extension support removed
         if args.debug:
             cli_config.setdefault("logging", {})["level"] = "DEBUG"
         # Add CLI auth args
@@ -1323,12 +1315,7 @@ Examples:
             cli_config.setdefault("runner", {})["api_key"] = args.api_key
 
         # Apply proxy flags to environment early so downstream components observe them
-        if getattr(args, "proxy_http", None):
-            os.environ["HTTP_PROXY"] = args.proxy_http
-        if getattr(args, "proxy_https", None):
-            os.environ["HTTPS_PROXY"] = args.proxy_https
-        if getattr(args, "no_proxy", None):
-            os.environ["NO_PROXY"] = args.no_proxy
+        # Proxy environment mapping removed
 
         # Merge configurations with proper precedence: CLI > env > .env > file > defaults
         full_config = merge_config(
@@ -1435,12 +1422,7 @@ Examples:
             except Exception:
                 max_parallel_val = 20
 
-        # If proxies were provided, default runner.network_egress to 'proxy' so containers inherit proxy envs
-        try:
-            if (getattr(args, "proxy_http", None) or getattr(args, "proxy_https", None)):
-                full_config.setdefault("runner", {})["network_egress"] = "proxy"
-        except Exception:
-            pass
+        # Proxy automatic egress defaults removed
 
         # Create orchestrator
         self.orchestrator = Orchestrator(
@@ -1456,18 +1438,13 @@ Examples:
             container_retention_success_hours=int(full_config.get("orchestration", {}).get("container_retention_success", 7200) // 3600 if isinstance(full_config.get("orchestration", {}).get("container_retention_success", 7200), int) else 2),
             runner_timeout_seconds=int(full_config.get("runner", {}).get("timeout", 3600)),
             default_network_egress=str(full_config.get("runner", {}).get("network_egress", "online")),
+            branch_namespace=str(full_config.get("orchestration", {}).get("branch_namespace", "flat")),
         )
 
         # Initialize orchestrator
         await self.orchestrator.initialize()
 
-        # Start HTTP server if requested
-        http_port = args.http_port or full_config.get("http_port")
-        if http_port:
-            await self.orchestrator.start_http_server(http_port)
-            self.console.print(
-                f"[blue]HTTP server started on port {http_port}[/blue]"
-            )
+        # Server extension support removed
 
         # Determine run mode
         if args.no_tui:

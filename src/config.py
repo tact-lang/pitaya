@@ -239,7 +239,7 @@ def load_env_config() -> Dict[str, Any]:
         "OUTPUT": "output",
         "STATE_DIR": "state_dir",
         "LOGS_DIR": "logs_dir",
-        "HTTP_PORT": "http_port",
+        # Server extension support removed
         "DEBUG": "debug",
         # Runner settings
         "RUNNER__OAUTH_TOKEN": "runner.oauth_token",
@@ -255,6 +255,7 @@ def load_env_config() -> Dict[str, Any]:
         "CONTAINER_MEMORY": "runner.memory_limit",
         # Orchestration settings
         "ORCHESTRATION__MAX_PARALLEL_INSTANCES": "orchestration.max_parallel_instances",
+        "ORCHESTRATION__BRANCH_NAMESPACE": "orchestration.branch_namespace",
         "ORCHESTRATION__SNAPSHOT_INTERVAL": "orchestration.snapshot_interval",
         "ORCHESTRATION__EVENT_BUFFER_SIZE": "orchestration.event_buffer_size",
         "ORCHESTRATION__CONTAINER_RETENTION_FAILED": "orchestration.container_retention_failed",
@@ -358,6 +359,7 @@ def get_default_config() -> Dict[str, Any]:
         "orchestration": {
             # Spec default: auto => max(2, min(20, floor(host_cpu / runner.container_cpu)))
             "max_parallel_instances": "auto",
+            "branch_namespace": "flat",  # flat|hierarchical
             "snapshot_interval": 30,  # seconds
             "event_buffer_size": 10000,
             "container_retention_failed": 86400,  # 24 hours

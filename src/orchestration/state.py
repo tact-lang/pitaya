@@ -89,6 +89,10 @@ class RunState:
     # Durable task registry: key -> {fingerprint:str}
     tasks: Dict[str, Dict[str, Any]] = field(default_factory=dict)
 
+    # Determinism recording: latest strategy.rand per strategy execution
+    # strategy_rand[strategy_execution_id] = {"seq": int, "value": float}
+    strategy_rand: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+
     def to_dict(self) -> Dict[str, Any]:
         """Convert state to dictionary for serialization."""
         return {
@@ -158,6 +162,7 @@ class RunState:
                 for id, strat in self.strategies.items()
             },
             "tasks": self.tasks,
+            "strategy_rand": self.strategy_rand,
         }
 
     @classmethod
@@ -240,6 +245,14 @@ class RunState:
                 ),
                 total_instances=int(strat_data.get("total_instances", 0)),
             )
+
+        # Restore strategy rand tracking
+        try:
+            sr = data.get("strategy_rand") or {}
+            if isinstance(sr, dict):
+                state.strategy_rand = sr
+        except Exception:
+            pass
 
         return state
 
@@ -475,7 +488,12 @@ class StateManager:
             raise RuntimeError("No active run state")
         existing = self.current_state.tasks.get(key)
         if existing and existing.get("fingerprint") != fingerprint:
-            raise ValueError(f"KeyConflictDifferentFingerprint for key {key}")
+            from ..exceptions import OrchestratorError  # avoid circular import at top-level
+            try:
+                from ..exceptions import KeyConflictDifferentFingerprint
+                raise KeyConflictDifferentFingerprint(f"KeyConflictDifferentFingerprint for key {key}")
+            except Exception:
+                raise OrchestratorError(f"KeyConflictDifferentFingerprint for key {key}")
         entry = {"fingerprint": fingerprint}
         if canonical_input is not None:
             entry["input"] = canonical_input
@@ -489,6 +507,20 @@ class StateManager:
             logger.debug(f"state.register_task: key={key} fp={fingerprint[:8]}...")
         except Exception:
             pass
+
+    def update_strategy_rand(self, strategy_id: str, seq: int, value: float) -> None:
+        """Record latest strategy.rand sequence and value for a strategy execution."""
+        if not self.current_state:
+            return
+        self.current_state.strategy_rand[strategy_id] = {"seq": int(seq), "value": float(value)}
+        if self.event_bus:
+            try:
+                self.event_bus.emit(
+                    "state.strategy_rand_updated",
+                    {"strategy_id": strategy_id, "seq": int(seq), "value": float(value)},
+                )
+            except Exception:
+                pass
 
     def update_instance_state(
         self,

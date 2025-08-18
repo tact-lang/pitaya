@@ -41,9 +41,6 @@ class OrchestratorTUI:
             formatter_class=argparse.RawDescriptionHelpFormatter,
             epilog="""
 Examples:
-  # Connect to running orchestrator
-  orchestrator-tui --connect localhost:8080
-  
   # Watch events file
   orchestrator-tui --events-file logs/run_20250114_123456/events.jsonl
   
@@ -55,12 +52,8 @@ Examples:
 """,
         )
 
-        # Connection options
-        conn_group = parser.add_mutually_exclusive_group(required=False)
-        conn_group.add_argument(
-            "--connect", metavar="HOST:PORT", help="Connect to orchestrator HTTP server"
-        )
-        conn_group.add_argument(
+        # Input options (file mode only)
+        parser.add_argument(
             "--events-file", type=Path, help="Read events from file (offline mode)"
         )
 
@@ -115,19 +108,15 @@ Examples:
             self.console = Console(force_terminal=False, no_color=True)
 
         try:
-            if args.connect:
-                # Connect to orchestrator HTTP server
-                return await self._run_connected(args)
-            else:
-                # If events file not provided but run-id is, infer path
-                if not args.events_file and args.run_id:
-                    # Respect ORCHESTRATOR_LOGS_DIR if set
-                    import os
-                    logs_base = os.environ.get("ORCHESTRATOR_LOGS_DIR", "logs")
-                    inferred = Path(logs_base) / args.run_id / "events.jsonl"
-                    args.events_file = inferred
-                # Read from events file
-                return await self._run_offline(args)
+            # If events file not provided but run-id is, infer path
+            if not args.events_file and args.run_id:
+                # Respect ORCHESTRATOR_LOGS_DIR if set
+                import os
+                logs_base = os.environ.get("ORCHESTRATOR_LOGS_DIR", "logs")
+                inferred = Path(logs_base) / args.run_id / "events.jsonl"
+                args.events_file = inferred
+            # Read from events file
+            return await self._run_offline(args)
         except KeyboardInterrupt:
             self.console.print("\n[yellow]Interrupted by user[/yellow]")
             return 130
@@ -137,71 +126,7 @@ Examples:
                 self.console.print_exception()
             return 1
 
-    async def _run_connected(self, args: argparse.Namespace) -> int:
-        """
-        Run TUI connected to orchestrator.
-
-        Args:
-            args: Parsed arguments
-
-        Returns:
-            Exit code
-        """
-        # Parse connection string
-        host, port = args.connect.split(":")
-        port = int(port)
-
-        # Import HTTP client
-        from src.orchestration.http_client import OrchestratorClient
-
-        # Create client
-        client = OrchestratorClient(f"http://{host}:{port}")
-
-        # Test connection
-        try:
-            state = await client.get_state()
-            if not state:
-                self.console.print("[red]Failed to connect to orchestrator[/red]")
-                return 1
-        except (OSError, asyncio.TimeoutError) as e:
-            self.console.print(f"[red]Connection failed: {e}[/red]")
-            return 1
-
-        # Run appropriate output mode
-        if self.output_mode == "tui":
-            # Create and run TUI display
-            # Read refresh rate and display mode from env when not provided
-            import os
-            refresh_rate = 0.1
-            try:
-                rr = os.environ.get("ORCHESTRATOR_TUI__REFRESH_RATE")
-                if rr is not None:
-                    refresh_rate = float(rr) / 100.0 if float(rr) > 1 else float(rr)
-            except Exception:
-                pass
-
-            display = TUIDisplay(
-                console=self.console, refresh_rate=refresh_rate, state_poll_interval=3.0
-            )
-            # Apply CLI/env forced display mode via display helper
-            display.set_forced_display_mode(self.display_mode)
-
-            # Run TUI with client
-            await display.run_connected(client, args.from_offset)
-
-        elif self.output_mode == "streaming":
-            # Stream events as text
-            await self._stream_events_connected(client, args)
-
-        elif self.output_mode == "json":
-            # Output events as JSON
-            await self._json_events_connected(client, args)
-
-        elif self.output_mode == "quiet":
-            # Minimal output
-            await self._quiet_mode_connected(client, args)
-
-        return 0
+    # Connected modes removed
 
     async def _run_offline(self, args: argparse.Namespace) -> int:
         """
@@ -395,71 +320,7 @@ Examples:
         else:
             self.console.print("No run data found")
 
-    async def _stream_events_connected(self, client, args: argparse.Namespace) -> None:
-        """Stream events from connected orchestrator."""
-        # Get events endpoint
-        offset = args.from_offset
-
-        while True:
-            events, new_offset = await client.get_events(
-                offset=offset,
-                limit=100,
-                run_id=args.run_id,
-                event_types=set(args.event_types) if args.event_types else None,
-            )
-
-            for event in events:
-                # Format and display
-                timestamp = event.get("ts") or event.get("timestamp", "")
-                event_type = event.get("type", "unknown")
-                instance_id = event.get("instance_id", "")
-
-                msg = f"[{timestamp}]"
-                if instance_id:
-                    msg += f" [{instance_id[:8]}]"
-                msg += f" {event_type}"
-
-                # Add data
-                data = event.get("data", {})
-                if "error" in data:
-                    msg += f" - Error: {data['error']}"
-                elif "activity" in data:
-                    msg += f" - {data['activity']}"
-
-                self.console.print(msg)
-
-            offset = new_offset
-            await asyncio.sleep(0.5)  # Poll interval
-
-    async def _json_events_connected(self, client, args: argparse.Namespace) -> None:
-        """Output JSON events from connected orchestrator."""
-        offset = args.from_offset
-
-        while True:
-            events, new_offset = await client.get_events(
-                offset=offset,
-                limit=100,
-                run_id=args.run_id,
-                event_types=set(args.event_types) if args.event_types else None,
-            )
-
-            for event in events:
-                print(json.dumps(event))
-
-            offset = new_offset
-            await asyncio.sleep(0.5)
-
-    async def _quiet_mode_connected(self, client, args: argparse.Namespace) -> None:
-        """Quiet mode for connected orchestrator."""
-        # Just get final state
-        state = await client.get_state()
-
-        if state:
-            self.console.print(f"Run: {state.get('run_id', 'unknown')}")
-            self.console.print(f"Total cost: ${state.get('total_cost', 0):.4f}")
-            self.console.print(f"Total instances: {state.get('total_instances', 0)}")
-            self.console.print(f"Completed: {state.get('completed_instances', 0)}")
-            self.console.print(f"Failed: {state.get('failed_instances', 0)}")
+    # Connected helper methods removed
 
     def _format_duration(self, seconds: float) -> str:
         """Format duration for display."""

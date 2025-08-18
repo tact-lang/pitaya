@@ -38,22 +38,21 @@ import shutil
 warnings.filterwarnings("ignore", message=".*I/O operation on closed file.*")
 warnings.filterwarnings("ignore", category=ResourceWarning)
 
-# Monkey-patch urllib3's HTTPResponse to fix the flush issue
-try:
-    import urllib3.response
+# Workaround: suppress benign "I/O operation on closed file" from urllib3 during close
+try:  # pragma: no cover - environment dependent
+    import urllib3.response as _u3r  # type: ignore
+    _original_close = _u3r.HTTPResponse.close  # type: ignore[attr-defined]
 
-    _original_close = urllib3.response.HTTPResponse.close  # type: ignore
-
-    def _patched_close(self):  # type: ignore
+    def _patched_close(self):  # type: ignore[no-redef]
         try:
             _original_close(self)
         except (ValueError, OSError):
-            # Ignore "I/O operation on closed file" errors
+            # Ignore noisy close/flush errors from underlying fp
             pass
 
-    urllib3.response.HTTPResponse.close = _patched_close  # type: ignore
+    _u3r.HTTPResponse.close = _patched_close  # type: ignore[attr-defined]
 except Exception:
-    # If patching fails, just continue
+    # If patching fails, just continue; this is a best-effort mitigation
     pass
 
 logger = logging.getLogger(__name__)

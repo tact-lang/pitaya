@@ -11,7 +11,7 @@ import logging
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Set, Tuple, TYPE_CHECKING
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 from ..instance_runner import run_instance
 from ..shared import (
@@ -34,8 +34,6 @@ from ..exceptions import (
     ValidationError,
 )
 
-if TYPE_CHECKING:
-    from .http_server import OrchestratorHTTPServer
 
 logger = logging.getLogger(__name__)
 
@@ -55,7 +53,7 @@ class Orchestrator:
 
     def __init__(
         self,
-        max_parallel_instances: int = 20,
+        max_parallel_instances: Optional[int] = None,
         state_dir: Path = Path("./orchestrator_state"),
         logs_dir: Path = Path("./logs"),
         container_limits: Optional[ContainerLimits] = None,
@@ -67,6 +65,7 @@ class Orchestrator:
         container_retention_success_hours: int = 2,
         runner_timeout_seconds: int = 3600,
         default_network_egress: str = "online",
+        branch_namespace: str = "flat",
     ):
         """
         Initialize orchestrator.
@@ -79,7 +78,7 @@ class Orchestrator:
             retry_config: Retry configuration for instances
             auth_config: Authentication configuration for AI tools
         """
-        self.max_parallel_instances = max_parallel_instances
+        self.max_parallel_instances: Optional[int] = max_parallel_instances
         self.state_dir = state_dir
         self.logs_dir = logs_dir
         self.container_limits = container_limits or ContainerLimits()
@@ -117,8 +116,10 @@ class Orchestrator:
         self._instance_futures: Dict[str, asyncio.Future] = {}
         self._shutdown = False
 
-        # Resource pool semaphore
-        self._resource_pool = asyncio.Semaphore(max_parallel_instances)
+        # Resource pool semaphore (initialized after adaptive calc in initialize())
+        self._resource_pool: asyncio.Semaphore = asyncio.Semaphore(1)
+        # Branch namespace strategy: 'flat' (default) or 'hierarchical'
+        self.branch_namespace = str(branch_namespace or "flat").lower()
 
         # Multi-resource admission (CPU, memory, disk guard)
         self._admission_lock = asyncio.Lock()
@@ -161,8 +162,7 @@ class Orchestrator:
         # Map instance_id -> container_id[:12] for last-active tracking
         self._inst_container_id: Dict[str, str] = {}
 
-        # HTTP server (optional)
-        self.http_server: Optional["OrchestratorHTTPServer"] = None
+        # Server extension support removed
         self._initialized: bool = False
         self._force_import: bool = False  # set per-run from strategy_config
 
@@ -187,7 +187,7 @@ class Orchestrator:
         # Clean up orphaned containers from previous runs
         await self.cleanup_orphaned_containers()
 
-        # Adjust parallelism adaptively if beneficial
+        # Resolve max_parallel_instances (simple adaptive default)
         try:
             import os, math
             host_cpu = max(1, os.cpu_count() or 1)
@@ -219,27 +219,26 @@ class Orchestrator:
                 pass
             per_container = max(1, int(self.container_limits.cpu_count))
             adaptive = max(2, min(20, host_cpu // per_container))
-            # Only apply adaptive change when explicitly enabled via env
-            use_adapt = os.environ.get("ORCHESTRATOR_ADAPTIVE_PARALLELISM", "0").lower() in ("1","true","yes")
-            if use_adapt and self.max_parallel_instances == 20 and adaptive != 20:
-                logger.info(f"Adaptive parallelism: host_cpu={host_cpu}, per_container={per_container} -> max_parallel_instances={adaptive}")
+            if self.max_parallel_instances is None:
                 self.max_parallel_instances = adaptive
-                self._resource_pool = asyncio.Semaphore(self.max_parallel_instances)
-            else:
-                if self.max_parallel_instances == 20 and adaptive != 20:
-                    logger.info(f"Adaptive parallelism recommendation: host_cpu={host_cpu}, per_container={per_container} -> suggested max_parallel_instances={adaptive} (set ORCHESTRATOR_ADAPTIVE_PARALLELISM=1 to apply)")
+                logger.info(
+                    f"Parallelism(auto): host_cpu={host_cpu}, per_container={per_container} -> max_parallel_instances={adaptive}"
+                )
             # Oversubscription warning
             try:
-                if (self.max_parallel_instances * per_container) > host_cpu:
+                if (int(self.max_parallel_instances) * per_container) > host_cpu:
                     logger.warning(f"Configured parallelism may oversubscribe CPU: max_parallel_instances={self.max_parallel_instances}, per_container_cpu={per_container}, host_cpu={host_cpu}")
             except Exception:
                 pass
         except Exception as e:
             logger.debug(f"Adaptive parallelism calc failed: {e}")
 
+        # Initialize resource pool semaphore now that parallelism is resolved
+        self._resource_pool = asyncio.Semaphore(int(self.max_parallel_instances or 1))
+
         # Start multiple background executors for true parallel execution
         # Start a reasonable number of executors (min of max_parallel and 10)
-        num_executors = min(self.max_parallel_instances, 10)
+        num_executors = min(int(self.max_parallel_instances or 1), 10)
         for i in range(num_executors):
             task = asyncio.create_task(self._instance_executor())
             self._executor_tasks.append(task)
@@ -249,14 +248,7 @@ class Orchestrator:
         )
         self._initialized = True
 
-    async def start_http_server(self, port: int) -> None:
-        """Start HTTP server for multi-UI support."""
-        from .http_server import OrchestratorHTTPServer
-
-        self.http_server = OrchestratorHTTPServer(self, port)
-        # Run in separate thread to match spec wording
-        self.http_server.start_threaded()
-        logger.info(f"HTTP server started (threaded) on port {port}")
+    # Server extension support removed
 
     async def shutdown(self) -> None:
         """Shutdown orchestrator cleanly."""
@@ -348,12 +340,7 @@ class Orchestrator:
 
                 logger.info("All running containers stopped")
 
-        # Stop HTTP server if running
-        if self.http_server:
-            try:
-                self.http_server.stop_threaded()
-            except Exception:
-                pass
+        # Server extension support removed
 
         # Note: canonical task.interrupted is emitted by StateManager.update_instance_state
 
@@ -771,7 +758,10 @@ class Orchestrator:
             # Namespace durable key by strategy execution to avoid collisions across parallel runs
             khash = hashlib.sha256(f"{strategy_execution_id}|{key}".encode("utf-8")).hexdigest()[:8]
             container_name = f"orchestrator_{run_id_val}_s{sidx}_k{khash}"
-            branch_name = f"{strategy_name}_{run_id_val}_k{khash}"
+            if self.branch_namespace == "hierarchical":
+                branch_name = f"orc/{strategy_name}/{run_id_val}/k{khash}"
+            else:
+                branch_name = f"{strategy_name}_{run_id_val}_k{khash}"
         else:
             container_name = f"orchestrator_{run_id_val}_s{sidx}_i{instance_index}"
             branch_name = f"{strategy_name}_{run_id_val}_{sidx}_{instance_index}"

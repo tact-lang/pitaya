@@ -88,12 +88,18 @@ class StrategyContext:
         try:
             if getattr(self._orchestrator, "event_bus", None) and getattr(self._orchestrator, "state_manager", None):
                 run_id = self._orchestrator.state_manager.current_state.run_id
+                # Emit canonical event
                 self._orchestrator.event_bus.emit_canonical(
                     type="strategy.rand",
                     run_id=run_id,
                     strategy_execution_id=self._strategy_execution_id,
                     payload={"seq": self._rng_index, "value": v},
                 )
+                # Mirror latest seq/value into state snapshot for fast resume
+                try:
+                    self._orchestrator.state_manager.update_strategy_rand(self._strategy_execution_id, self._rng_index, v)
+                except Exception:
+                    pass
         except Exception:
             pass
         return v
@@ -208,7 +214,7 @@ class StrategyContext:
         # Register task fingerprint
         try:
             self._orchestrator.state_manager.register_task(key, fingerprint, encoded_to_use)
-        except ValueError as e:
+        except Exception as e:
             # KeyConflictDifferentFingerprint
             if getattr(self._orchestrator, "event_bus", None):
                 self._orchestrator.event_bus.emit(

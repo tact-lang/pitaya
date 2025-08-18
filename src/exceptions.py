@@ -46,3 +46,9 @@ class ClaudeError(OrchestratorError):
     """Raised when Claude Code operations fail."""
 
     pass
+
+
+class KeyConflictDifferentFingerprint(OrchestratorError):
+    """Raised when a durable key is reused with a different fingerprint."""
+
+    pass

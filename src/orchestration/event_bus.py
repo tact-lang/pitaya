@@ -10,6 +10,7 @@ import asyncio
 import json
 import logging
 import os
+import socket
 import uuid
 from collections import defaultdict, deque
 from datetime import datetime, timezone
@@ -131,6 +132,21 @@ class EventBus:
                 else:
                     import fcntl
                     fcntl.flock(self._lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                # Write lock metadata for diagnostics (best-effort)
+                try:
+                    meta = {
+                        "pid": os.getpid(),
+                        "hostname": socket.gethostname(),
+                        "started_at_iso": self._utc_ts_ms_z(),
+                        "run_id": self._run_id,
+                    }
+                    self._lock_file.seek(0)
+                    self._lock_file.truncate(0)
+                    self._lock_file.write(json.dumps(meta))
+                    self._lock_file.flush()
+                    os.fsync(self._lock_file.fileno())
+                except Exception:
+                    pass
             except Exception as e:
                 # Strict enforcement: fail fast if lock cannot be acquired
                 raise RuntimeError(f"Failed to acquire events.jsonl lock: {e}")
@@ -744,11 +760,23 @@ class EventBus:
                         with open(file_path, "rb") as f:
                             f.seek(last_offset)
                             while True:
+                                pos_before = f.tell()
                                 line = f.readline()
                                 if not line:
                                     break
+                                # Enforce newline boundary per spec: if partial line (no trailing \n), rewind and wait
+                                if not line.endswith(b"\n"):
+                                    try:
+                                        f.seek(pos_before)
+                                    except Exception:
+                                        pass
+                                    break
                                 try:
-                                    event = json.loads(line.decode("utf-8").strip())
+                                    s = line.decode("utf-8", errors="ignore").strip()
+                                    if not s:
+                                        last_offset += len(line)
+                                        continue
+                                    event = json.loads(s)
                                 except json.JSONDecodeError:
                                     # Skip malformed lines but still advance offset
                                     last_offset += len(line)
@@ -838,6 +866,20 @@ class EventBus:
         if self._persist_file:
             self._persist_file.close()
             self._persist_file = None
+        # Close runner file
+        try:
+            if self._runner_file:
+                self._runner_file.close()
+        except Exception:
+            pass
+        self._runner_file = None
+        # Release lock file
+        try:
+            if self._lock_file:
+                self._lock_file.close()
+        except Exception:
+            pass
+        self._lock_file = None
 
     def __enter__(self):
         return self
