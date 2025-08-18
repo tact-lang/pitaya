@@ -150,7 +150,18 @@ class StrategyContext:
         key: str,
         policy: Optional[Dict[str, Any]] = None,
     ) -> Handle:
-        """Schedule a durable task and return a handle."""
+        """Schedule a durable task and return a handle.
+
+        Orchestration-level retry policy (optional):
+        - Applies only to scheduling/reattach failures (pre-runner). Once the runner executes,
+          the runner-level retry handles transient execution errors.
+        - Schema example:
+          {
+            "max_attempts": 3,
+            "backoff": {"type": "exponential", "base_s": 10, "factor": 6, "max_s": 360},
+            "retry_on": ["docker", "api", "network", "git", "timeout", "unknown"]
+          }
+        """
         try:
             if getattr(self._orchestrator, "event_bus", None):
                 self._orchestrator.event_bus.emit(
@@ -236,7 +247,7 @@ class StrategyContext:
         except Exception:
             pass
 
-        # Spawn instance with durable key metadata
+        # Spawn instance with durable key metadata (with optional orchestration-level retries)
         self._instance_counter += 1
         # Emit canonical debug event for scheduling request
         try:
@@ -257,30 +268,134 @@ class StrategyContext:
             pass
         # Provide default network_egress from orchestrator when task doesn't set it
         _default_egress = getattr(self._orchestrator, "default_network_egress", "online")
-        instance_id = await self._orchestrator.spawn_instance(
-            prompt=prompt,
-            repo_path=self._orchestrator.repo_path,
-            base_branch=base_branch,
-            strategy_name=self._strategy_name,
-            strategy_execution_id=self._strategy_execution_id,
-            instance_index=self._instance_counter,
-            metadata={
-                "model": model,
-                "key": key,
-                "fingerprint": fingerprint,
-                "session_group_key": session_group_key,
-                "import_policy": task.get("import_policy", "auto"),
-                "import_conflict_policy": task.get("import_conflict_policy", "fail"),
-                "skip_empty_import": bool(task.get("skip_empty_import", True)),
-                "resume_session_id": task.get("resume_session_id"),
-                "network_egress": task.get("network_egress", _default_egress),
-                "max_turns": task.get("max_turns"),
-                # Optional per-task resource hints (integers)
-                **({"container_cpu": int(_task_cpu)} if isinstance(_task_cpu, (int, float)) else {}),
-                **({"container_memory_gb": int(_task_mem)} if isinstance(_task_mem, (int, float)) else {}),
-            },
-            key=key,
-        )
+
+        # Build metadata once (stable across retries)
+        _metadata = {
+            "model": model,
+            "key": key,
+            "fingerprint": fingerprint,
+            "session_group_key": session_group_key,
+            "import_policy": task.get("import_policy", "auto"),
+            "import_conflict_policy": task.get("import_conflict_policy", "fail"),
+            "skip_empty_import": bool(task.get("skip_empty_import", True)),
+            "resume_session_id": task.get("resume_session_id"),
+            "network_egress": task.get("network_egress", _default_egress),
+            "max_turns": task.get("max_turns"),
+            **({"container_cpu": int(_task_cpu)} if isinstance(_task_cpu, (int, float)) else {}),
+            **({"container_memory_gb": int(_task_mem)} if isinstance(_task_mem, (int, float)) else {}),
+        }
+
+        # Orchestration-level scheduling retry policy
+        max_attempts = 1
+        base_s = 0.0
+        factor = 1.0
+        max_s = 0.0
+        retry_on = set()
+        if isinstance(policy, dict):
+            try:
+                max_attempts = int(policy.get("max_attempts", 1))
+            except Exception:
+                max_attempts = 1
+            bo = policy.get("backoff", {}) or {}
+            try:
+                base_s = float(bo.get("base_s", 0.0))
+            except Exception:
+                base_s = 0.0
+            try:
+                factor = float(bo.get("factor", 1.0))
+            except Exception:
+                factor = 1.0
+            try:
+                max_s = float(bo.get("max_s", 0.0))
+            except Exception:
+                max_s = 0.0
+            r = policy.get("retry_on", []) or []
+            try:
+                retry_on = set(str(x).lower() for x in r)
+            except Exception:
+                retry_on = set()
+
+        attempt = 0
+        delay = base_s
+        last_exc: Optional[Exception] = None
+        instance_id: Optional[str] = None
+        while attempt < max_attempts:
+            attempt += 1
+            try:
+                instance_id = await self._orchestrator.spawn_instance(
+                    prompt=prompt,
+                    repo_path=self._orchestrator.repo_path,
+                    base_branch=base_branch,
+                    strategy_name=self._strategy_name,
+                    strategy_execution_id=self._strategy_execution_id,
+                    instance_index=self._instance_counter,
+                    metadata=_metadata,
+                    key=key,
+                )
+                last_exc = None
+                break
+            except Exception as e:
+                last_exc = e
+                # Classify error type against retry_on
+                etype = "unknown"
+                try:
+                    from ..exceptions import DockerError, GitError, TimeoutError, ValidationError, OrchestratorError
+                    if isinstance(e, DockerError):
+                        etype = "docker"
+                    elif isinstance(e, GitError):
+                        etype = "git"
+                    elif isinstance(e, TimeoutError):
+                        etype = "timeout"
+                    elif isinstance(e, ValidationError):
+                        # scheduling-time validation typically shouldn't be retried
+                        etype = "validation"
+                    elif isinstance(e, OrchestratorError):
+                        etype = "unknown"
+                    # Heuristic: network-related text
+                    emsg = str(e).lower()
+                    if any(tok in emsg for tok in ("network", "econnrefused", "timeout")):
+                        etype = "network" if etype not in {"docker", "git"} else etype
+                except Exception:
+                    pass
+
+                # Decide to retry or raise
+                should_retry = (attempt < max_attempts) and (not retry_on or etype in retry_on)
+                # Emit debug event
+                try:
+                    if getattr(self._orchestrator, "event_bus", None) and getattr(self._orchestrator.state_manager, "current_state", None):
+                        self._orchestrator.event_bus.emit_canonical(
+                            type="strategy.debug",
+                            run_id=self._orchestrator.state_manager.current_state.run_id,
+                            strategy_execution_id=self._strategy_execution_id,
+                            key=key,
+                            payload={
+                                "op": "run_schedule_retry",
+                                "attempt": attempt + 1,
+                                "max_attempts": max_attempts,
+                                "error_type": etype,
+                                "delay_s": max(0.0, min(delay, max_s) if max_s > 0 else delay),
+                                "message": str(e)[:500],
+                            },
+                        )
+                except Exception:
+                    pass
+                if not should_retry:
+                    raise
+                # Backoff
+                try:
+                    import asyncio as _aio
+                    sleep_for = delay
+                    if max_s > 0 and sleep_for > max_s:
+                        sleep_for = max_s
+                    if sleep_for > 0:
+                        await _aio.sleep(sleep_for)
+                    delay = delay * factor if factor > 0 else delay
+                except Exception:
+                    pass
+
+        if instance_id is None and last_exc is not None:
+            # Exhausted retries
+            raise last_exc
         try:
             if getattr(self._orchestrator, "event_bus", None):
                 self._orchestrator.event_bus.emit(
@@ -328,7 +443,15 @@ class StrategyContext:
 
     async def wait(self, handle: Handle) -> InstanceResult:
         results = await self._orchestrator.wait_for_instances([handle.instance_id])
-        return results[handle.instance_id]
+        r = results[handle.instance_id]
+        if not getattr(r, "success", False):
+            try:
+                from ..exceptions import TaskFailed
+                raise TaskFailed(handle.key, getattr(r, "error_type", "unknown") or "unknown", getattr(r, "error", "") or "")
+            except ImportError:
+                # Fallback to returning the result if exceptions module is unavailable
+                return r
+        return r
 
     async def wait_all(self, handles: List[Handle], tolerate_failures: bool = False) -> Any:
         ids = [h.instance_id for h in handles]
@@ -339,7 +462,12 @@ class StrategyContext:
             failures = [r for r in out if not getattr(r, "success", False)]
             return successes, failures
         if any(not getattr(r, "success", False) for r in out):
-            raise RuntimeError("AggregateTaskFailed")
+            try:
+                from ..exceptions import AggregateTaskFailed
+                failed_keys = [h.key for h, r in zip(handles, out) if not getattr(r, "success", False)]
+                raise AggregateTaskFailed(failed_keys)
+            except ImportError:
+                raise RuntimeError("AggregateTaskFailed")
         return out
 
     async def parallel(self, handles: List[InstanceHandle]) -> List[InstanceResult]:

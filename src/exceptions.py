@@ -52,3 +52,27 @@ class KeyConflictDifferentFingerprint(OrchestratorError):
     """Raised when a durable key is reused with a different fingerprint."""
 
     pass
+
+
+class TaskFailed(OrchestratorError):
+    """Raised by ctx.wait(handle) when a single task fails."""
+
+    def __init__(self, key: str, error_type: str = "unknown", message: str = "") -> None:
+        super().__init__(f"TaskFailed(key={key}, type={error_type}): {message}")
+        self.key = key
+        self.error_type = error_type
+        self.message = message
+
+
+class AggregateTaskFailed(OrchestratorError):
+    """Raised by ctx.wait_all(handles) when one or more tasks fail (and tolerance is False)."""
+
+    def __init__(self, keys: list[str]) -> None:
+        super().__init__(f"AggregateTaskFailed(keys={keys})")
+        self.keys = keys
+
+
+class NoViableCandidates(OrchestratorError):
+    """Raised by strategies when selection yields no valid candidates."""
+
+    pass

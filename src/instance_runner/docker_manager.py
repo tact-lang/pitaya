@@ -472,7 +472,7 @@ class DockerManager:
                     "run_id": run_id or "",
                     "strategy_execution_id": strategy_execution_id or "",
                     "strategy_index": sidx,
-                    "task_key": session_group_key or "",
+                    "task_key": task_key or "",
                     "session_group_key": session_group_key or "",
                     "orchestrator.last_active_ts": datetime.now(timezone.utc).isoformat(),
                     "instance_id": instance_id or "",

@@ -120,9 +120,13 @@ class BestOfNStrategy(Strategy):
                 scored_results.extend(result)
 
         if not scored_results:
-            # All strategies failed - return empty list to indicate failure
+            # All strategies failed - raise per spec (NoViableCandidates)
             logger.error(f"All {config.n} strategy executions failed")
-            return []
+            try:
+                from ...exceptions import NoViableCandidates
+                raise NoViableCandidates()
+            except Exception:
+                return []
 
         # Filter successful results with valid scores
         valid_results = []
@@ -142,14 +146,17 @@ class BestOfNStrategy(Strategy):
                     )
 
         if not valid_results:
-            # No successfully scored results, return first successful result
+            # No successfully scored results
             successful = [r for r in scored_results if r.success]
             if successful:
                 logger.warning("No scored results, returning first successful result")
                 return [successful[0]]
-            # All failed, return first failure for debugging
-            logger.error("All results failed, returning first failure for debugging")
-            return [scored_results[0]] if scored_results else []
+            # All failed
+            try:
+                from ...exceptions import NoViableCandidates
+                raise NoViableCandidates()
+            except Exception:
+                return [scored_results[0]] if scored_results else []
 
         # Find the best scoring result
         best_result = max(valid_results, key=lambda r: r.metrics.get("score", 0))

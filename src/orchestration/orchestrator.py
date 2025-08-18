@@ -1187,25 +1187,7 @@ class Orchestrator:
             instance_id=instance_id,
             state=InstanceStatus.RUNNING,
         )
-        # Emit canonical task.started when durable key is available
-        try:
-            task_key_started = (info.metadata or {}).get("key")
-            # find strategy_execution_id
-            sid_env = None
-            for sid, strat in self.state_manager.current_state.strategies.items():
-                if instance_id in strat.instance_ids:
-                    sid_env = sid
-                    break
-            if task_key_started and self.event_bus:
-                self.event_bus.emit_canonical(
-                    type="task.started",
-                    run_id=self.state_manager.current_state.run_id,
-                    strategy_execution_id=sid_env,
-                    key=task_key_started,
-                    payload={"key": task_key_started, "instance_id": instance_id},
-                )
-        except Exception:
-            pass
+        # Note: canonical task.started is emitted below with full payload (container_name/model)
         logger.debug(f"_execute_instance: iid={instance_id} -> RUNNING model={(info.metadata or {}).get('model','-')} key={(info.metadata or {}).get('key','-')}")
 
         # Emit instance.started event for TUI and canonical mapping when key available
@@ -1217,7 +1199,12 @@ class Orchestrator:
                 run_id=self.state_manager.current_state.run_id,
                 strategy_execution_id=next((sid for sid, strat in self.state_manager.current_state.strategies.items() if instance_id in strat.instance_ids), None),
                 key=task_key,
-                payload={"key": task_key, "instance_id": instance_id, "container_name": info.container_name, "model": info.metadata.get("model", "sonnet")},
+                payload={
+                    "key": task_key,
+                    "instance_id": instance_id,
+                    "container_name": info.container_name,
+                    "model": info.metadata.get("model", "sonnet"),
+                },
             )
 
         # Create event callback (forward and capture session_id for resume)

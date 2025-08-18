@@ -466,14 +466,19 @@ class GitOperations:
                                     logger.info(f"Found existing suffixed branch {ref} with matching HEAD and provenance; idempotent success")
                                     return {"has_changes": "true", "target_branch": ref, "commit": workspace_head, "duplicate_of_branch": ref, "dedupe_reason": dedupe_reason}
                                 else:
-                                    # Treat as crash_window resume: append provenance and return existing
+                                    # Treat as crash_window resume: append provenance NOW and return existing
+                                    try:
+                                        _ts = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+                                        note_lines = [
+                                            f"task_key={task_key}; run_id={run_id}; strategy_execution_id={strategy_execution_id}; branch={ref}; ts={_ts}"
+                                        ]
+                                        await self._run_command(["git", "-C", str(repo_path), "notes", "--ref=orchestrator", "add", "-f", "-m", "\n".join(note_lines), workspace_head])
+                                    except Exception:
+                                        pass
                                     duplicate_of_branch = ref
                                     dedupe_reason = "crash_window"
-                                    logger.info(f"Found existing suffixed branch {ref} with matching HEAD but missing provenance; treating as resume")
-                                    # Proceed to append provenance after import path below
-                                    target_branch = ref
-                                    branch_exists = True
-                                    break
+                                    logger.info(f"Found existing suffixed branch {ref} with matching HEAD but missing provenance; treating as resume idempotently")
+                                    return {"has_changes": "true", "target_branch": ref, "commit": workspace_head, "duplicate_of_branch": ref, "dedupe_reason": dedupe_reason}
                 except Exception:
                     pass
 

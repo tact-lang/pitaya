@@ -76,7 +76,14 @@ class ScoringStrategy(Strategy):
         gen_task = {"prompt": prompt, "base_branch": base_branch, "model": cfg.model}
         gen_key = ctx.key(*prefix, "gen")
         generation_handle = await ctx.run(gen_task, key=gen_key)
-        generation_result = await ctx.wait(generation_handle)
+        try:
+            generation_result = await ctx.wait(generation_handle)
+        except Exception as e:
+            # Map TaskFailed to a failure result to keep strategy semantics
+            from ...shared import InstanceResult as _IR
+            err_type = getattr(e, "error_type", "unknown")
+            msg = getattr(e, "message", str(e))
+            generation_result = _IR(success=False, error=msg, error_type=err_type, status="failed")
 
         # If generation failed, the strategy fails
         if not generation_result.success:
@@ -100,7 +107,11 @@ ORIGINAL TASK: {prompt}"""
         }
         score_key = ctx.key(*prefix, "score", generation_handle.instance_id, "attempt-1")
         scoring_handle = await ctx.run(scoring_task, key=score_key)
-        scoring_result = await ctx.wait(scoring_handle)
+        try:
+            scoring_result = await ctx.wait(scoring_handle)
+        except Exception as e:
+            # Treat scoring failure as strategy failure per spec
+            raise StrategyError(getattr(e, "message", str(e)))
 
         # Extract score from the reviewer's output
         score = None

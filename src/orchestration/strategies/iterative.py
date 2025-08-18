@@ -88,7 +88,13 @@ class IterativeStrategy(Strategy):
             # Durable run with key and continuation
             task = {"prompt": iteration_prompt, "base_branch": current_branch}
             handle = await ctx.run(task, key=ctx.key("iter", iteration + 1))
-            result = await ctx.wait(handle)
+            try:
+                result = await ctx.wait(handle)
+            except Exception as e:
+                from ...shared import InstanceResult as _IR
+                err_type = getattr(e, "error_type", "unknown")
+                msg = getattr(e, "message", str(e))
+                result = _IR(success=False, error=msg, error_type=err_type, status="failed")
 
             # If any iteration fails, stop and return what we have
             if not result.success:
@@ -106,7 +112,13 @@ class IterativeStrategy(Strategy):
                 # Spawn a reviewer instance
                 review_task = {"prompt": config.reviewer_prompt, "base_branch": current_branch}
                 review_handle = await ctx.run(review_task, key=ctx.key("review", iteration + 1))
-                review_result = await ctx.wait(review_handle)
+                try:
+                    review_result = await ctx.wait(review_handle)
+                except Exception as e:
+                    from ...shared import InstanceResult as _IR
+                    err_type = getattr(e, "error_type", "unknown")
+                    msg = getattr(e, "message", str(e))
+                    review_result = _IR(success=False, error=msg, error_type=err_type, status="failed")
 
                 if review_result.success and review_result.final_message:
                     feedback = review_result.final_message
