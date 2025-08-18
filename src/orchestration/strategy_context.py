@@ -153,6 +153,9 @@ class StrategyContext:
         except Exception:
             pass
         # Compute canonical fingerprint (JCS-like sorted JSON) with nulls dropped
+        # Allow per-task CPU/memory overrides for admission and container limits
+        _task_cpu = task.get("container_cpu")
+        _task_mem = task.get("container_memory") or task.get("container_memory_gb")
         canonical = {
             "schema_version": "1",
             "prompt": task.get("prompt", ""),
@@ -170,8 +173,14 @@ class StrategyContext:
                 "network_egress": task.get("network_egress", "online"),
                 "max_turns": task.get("max_turns"),
                 # Include container defaults for fingerprint stability
-                "container_cpu": getattr(getattr(self._orchestrator, "container_limits", None), "cpu_count", None),
-                "container_memory": f"{getattr(getattr(self._orchestrator, 'container_limits', None), 'memory_gb', 0)}g" if getattr(getattr(self._orchestrator, 'container_limits', None), 'memory_gb', None) is not None else None,
+                "container_cpu": (_task_cpu if _task_cpu is not None else getattr(getattr(self._orchestrator, "container_limits", None), "cpu_count", None)),
+                "container_memory": (
+                    f"{int(_task_mem)}g" if isinstance(_task_mem, (int, float)) else (
+                        _task_mem if isinstance(_task_mem, str) else (
+                            f"{getattr(getattr(self._orchestrator, 'container_limits', None), 'memory_gb', 0)}g" if getattr(getattr(self._orchestrator, 'container_limits', None), 'memory_gb', None) is not None else None
+                        )
+                    )
+                ),
             },
         }
         # Drop nulls recursively
@@ -260,6 +269,9 @@ class StrategyContext:
                 "resume_session_id": task.get("resume_session_id"),
                 "network_egress": task.get("network_egress", _default_egress),
                 "max_turns": task.get("max_turns"),
+                # Optional per-task resource hints (integers)
+                **({"container_cpu": int(_task_cpu)} if isinstance(_task_cpu, (int, float)) else {}),
+                **({"container_memory_gb": int(_task_mem)} if isinstance(_task_mem, (int, float)) else {}),
             },
             key=key,
         )
@@ -284,6 +296,9 @@ class StrategyContext:
                     "instance_id": instance_id,
                     "container_name": self._orchestrator.state_manager.current_state.instances[instance_id].container_name,
                     "model": model,
+                    # Include base_branch so recovery after crashes can reconstruct
+                    # a valid workspace target when snapshots lag.
+                    "base_branch": base_branch,
                     "task_fingerprint_hash": fingerprint,
                 },
             )

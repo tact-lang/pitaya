@@ -89,9 +89,12 @@ class ScoringStrategy(Strategy):
 
 ORIGINAL TASK: {prompt}"""
 
+        # If generation produced no branch (e.g., no changes), fall back to the original
+        # base_branch so the reviewer can still run in a valid workspace.
+        effective_base = generation_result.branch_name or base_branch
         scoring_task = {
             "prompt": review_prompt,
-            "base_branch": generation_result.branch_name,
+            "base_branch": effective_base,
             # Review/scoring tasks should not create branches; run read-only when configured
             "import_policy": "never",
         }

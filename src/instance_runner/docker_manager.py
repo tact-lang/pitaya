@@ -15,7 +15,7 @@ from typing import Any, Callable, Dict, List, Optional, TYPE_CHECKING
 
 import docker
 from docker.errors import ImageNotFound
-from docker.types import Mount
+from docker.types import Mount, Ulimit
 
 if TYPE_CHECKING:
     from docker.errors import DockerException, NotFound
@@ -415,7 +415,8 @@ class DockerManager:
                 payload = {"session_group_key": eff_sgk}
                 enc = _json.dumps(payload, separators=(",", ":"), sort_keys=True)
                 ghash = hashlib.sha256(enc.encode("utf-8", errors="ignore")).hexdigest()[:8]
-                volume_name = f"orc_home_{(run_id or 'norun')}_g{ghash}"
+                # Scope volumes per-run and per-strategy to avoid concurrent copy-up races
+                volume_name = f"orc_home_{(run_id or 'norun')}_s{sidx}_g{ghash}"
             # KHASH based on durable task key if provided
             khash = hashlib.sha256((task_key or "").encode("utf-8", errors="ignore")).hexdigest()[:8] if task_key else ""
 
@@ -467,7 +468,7 @@ class DockerManager:
             except Exception:
                 pass
 
-            # Container configuration following spec section 3.4
+            # Container configuration following spec section 3.4 (with hardening)
             config: Dict[str, Any] = {
                 "image": image,
                 "name": container_name,
@@ -511,6 +512,34 @@ class DockerManager:
             # Apply workspace volumes mapping when needed (SELinux)
             if volumes:
                 config["volumes"] = volumes
+
+            # Security hardening: drop capabilities, block new privileges, set pids/nofile limits
+            try:
+                config["cap_drop"] = ["ALL"]
+            except Exception:
+                pass
+            try:
+                # Docker SDK expects strings like 'no-new-privileges:true' and optional 'seccomp=<value>'
+                # Do NOT set seccomp explicitly by default; Docker applies default seccomp automatically.
+                # Allow override via ORCHESTRATOR_RUNNER__SECCOMP (e.g., 'unconfined' or absolute path to JSON profile).
+                secopts = set(config.get("security_opt") or [])
+                secopts.add("no-new-privileges:true")
+                seccomp_override = os.environ.get("ORCHESTRATOR_RUNNER__SECCOMP")
+                if seccomp_override:
+                    secopts.add(f"seccomp={seccomp_override}")
+                config["security_opt"] = list(secopts)
+            except Exception:
+                pass
+            try:
+                config["pids_limit"] = int(os.environ.get("ORCHESTRATOR_RUNNER__PIDS_LIMIT", "512"))
+            except Exception:
+                config["pids_limit"] = 512
+            try:
+                nofile_soft = int(os.environ.get("ORCHESTRATOR_RUNNER__ULIMIT_NOFILE_SOFT", "4096"))
+                nofile_hard = int(os.environ.get("ORCHESTRATOR_RUNNER__ULIMIT_NOFILE_HARD", "4096"))
+                config["ulimits"] = (config.get("ulimits") or []) + [Ulimit(name="nofile", soft=nofile_soft, hard=nofile_hard)]
+            except Exception:
+                pass
 
             # Enforce network egress policy
             try:
@@ -593,6 +622,40 @@ class DockerManager:
                 # Continue with base config if plugin hook fails
                 pass
 
+            # Enforce mount policy after plugin hook: keep existing mounts prepared above.
+            # We do not alter the Docker SDK Mount objects here to avoid losing required mounts
+            # due to SDK attribute differences. We only harden obvious risky flags.
+            try:
+                # tmpfs: ensure only /tmp is present when tmpfs exists
+                if isinstance(config.get("tmpfs"), dict):
+                    tmap = config.get("tmpfs") or {}
+                    if set(tmap.keys()) != {"/tmp"}:
+                        tmp_only = {}
+                        if "/tmp" in tmap:
+                            tmp_only["/tmp"] = tmap["/tmp"]
+                        config["tmpfs"] = tmp_only
+                # Disallow devices/privileged/cap_add additions
+                for k in ("devices", "device_requests"):
+                    if k in config:
+                        try:
+                            del config[k]
+                        except Exception:
+                            pass
+                if bool(config.get("privileged")):
+                    config["privileged"] = False
+                if config.get("cap_add"):
+                    config["cap_add"] = []
+                # Ensure no-new-privileges remains
+                try:
+                    secopts = set(config.get("security_opt") or [])
+                    secopts.add("no-new-privileges:true")
+                    config["security_opt"] = list(secopts)
+                except Exception:
+                    pass
+            except Exception:
+                # If enforcement fails, continue with original safe mounts
+                pass
+
             # Summarize environment without leaking secrets
             try:
                 env = config.get("environment", {}) or {}
@@ -651,39 +714,119 @@ class DockerManager:
                     f"Docker create timed out after 20s for {container_name}. Check Docker Desktop and volume sharing."
                 )
             except (docker.errors.APIError, docker.errors.DockerException) as e:
-                if event_callback:
-                    event_callback({
-                        "type": "instance.container_create_failed",
-                        "data": {"container_name": container_name, "error": str(e)},
-                    })
-                raise DockerError(f"Docker create failed for {container_name}: {e}")
+                # Handle name conflicts gracefully to avoid races during parallel creation
+                msg = str(e)
+                status_code = getattr(e, "status_code", None) or getattr(getattr(e, "response", None), "status_code", None)
+                is_conflict = False
+                try:
+                    is_conflict = (status_code == 409) or ("already in use" in msg) or ("Conflict" in msg)
+                except Exception:
+                    is_conflict = False
 
-            # Start container (bounded timeout)
-            start_start = time.monotonic()
-            start_future = loop.run_in_executor(None, container.start)
+                if is_conflict:
+                    if event_callback:
+                        event_callback({
+                            "type": "instance.container_create_conflict",
+                            "data": {"container_name": container_name, "error": msg},
+                        })
+                    # Attempt to adopt the existing container by this name. This addresses races where
+                    # a parallel attempt (or a previous retry) created the container just before us.
+                    adopt_start = time.monotonic()
+                    for i in range(6):  # Try up to ~3s total
+                        try:
+                            get_future2 = loop.run_in_executor(
+                                None, lambda: self.client.containers.get(container_name)
+                            )
+                            existing2 = await asyncio.wait_for(get_future2, timeout=5)
+                            # Ensure it's started
+                            try:
+                                await asyncio.wait_for(loop.run_in_executor(None, existing2.reload), timeout=5)
+                            except Exception:
+                                pass
+                            if existing2.status != "running":
+                                try:
+                                    await asyncio.wait_for(loop.run_in_executor(None, existing2.start), timeout=15)
+                                except Exception:
+                                    pass
+                                # Give it a moment to reach running
+                                for _ in range(10):
+                                    await asyncio.sleep(0.2)
+                                    try:
+                                        await loop.run_in_executor(None, existing2.reload)
+                                    except Exception:
+                                        pass
+                                    if existing2.status == "running":
+                                        break
+                            # Report adoption
+                            logger.info(
+                                "Adopted existing container %s after conflict (%.2fs)",
+                                container_name,
+                                time.monotonic() - adopt_start,
+                            )
+                            if event_callback:
+                                event_callback({
+                                    "type": "instance.container_adopted",
+                                    "data": {"container_name": container_name, "container_id": getattr(existing2, "id", "")[:12]},
+                                })
+                            container = existing2
+                            break
+                        except NotFound:
+                            # Container may not be visible yet; brief backoff and retry
+                            await asyncio.sleep(0.5)
+                            continue
+                        except (docker.errors.APIError, docker.errors.DockerException):
+                            await asyncio.sleep(0.5)
+                            continue
+
+                    if not container:
+                        # Could not adopt; surface a clearer error
+                        if event_callback:
+                            event_callback({
+                                "type": "instance.container_create_failed",
+                                "data": {"container_name": container_name, "error": msg},
+                            })
+                        raise DockerError(
+                            f"Docker create name conflict for {container_name} but adoption failed: {e}"
+                        )
+                else:
+                    if event_callback:
+                        event_callback({
+                            "type": "instance.container_create_failed",
+                            "data": {"container_name": container_name, "error": str(e)},
+                        })
+                    raise DockerError(f"Docker create failed for {container_name}: {e}")
+
+            # Start container (bounded timeout) unless already running
             try:
-                await asyncio.wait_for(start_future, timeout=15)
-                logger.info(
-                    "Docker start completed for %s (%.2fs)",
-                    container.name,
-                    time.monotonic() - start_start,
-                )
-            except asyncio.TimeoutError:
-                if event_callback:
-                    event_callback({
-                        "type": "instance.container_start_timeout",
-                        "data": {"container_name": container_name, "timeout_s": 15},
-                    })
-                raise DockerError(
-                    f"Docker start timed out after 15s for {container_name}."
-                )
-            except (docker.errors.APIError, docker.errors.DockerException) as e:
-                if event_callback:
-                    event_callback({
-                        "type": "instance.container_start_failed",
-                        "data": {"container_name": container_name, "error": str(e)},
-                    })
-                raise DockerError(f"Docker start failed for {container_name}: {e}")
+                await loop.run_in_executor(None, container.reload)
+            except Exception:
+                pass
+            if getattr(container, "status", None) != "running":
+                start_start = time.monotonic()
+                start_future = loop.run_in_executor(None, container.start)
+                try:
+                    await asyncio.wait_for(start_future, timeout=15)
+                    logger.info(
+                        "Docker start completed for %s (%.2fs)",
+                        container.name,
+                        time.monotonic() - start_start,
+                    )
+                except asyncio.TimeoutError:
+                    if event_callback:
+                        event_callback({
+                            "type": "instance.container_start_timeout",
+                            "data": {"container_name": container_name, "timeout_s": 15},
+                        })
+                    raise DockerError(
+                        f"Docker start timed out after 15s for {container_name}."
+                    )
+                except (docker.errors.APIError, docker.errors.DockerException) as e:
+                    if event_callback:
+                        event_callback({
+                            "type": "instance.container_start_failed",
+                            "data": {"container_name": container_name, "error": str(e)},
+                        })
+                    raise DockerError(f"Docker start failed for {container_name}: {e}")
 
             # Wait for container to be running
             for i in range(20):
@@ -841,18 +984,24 @@ class DockerManager:
         except (docker.errors.APIError, docker.errors.DockerException, OSError) as e:
             raise DockerError(f"Failed to execute Claude Code: {e}")
 
-    async def stop_container(self, container: Container, timeout: int = 10) -> None:
+    async def stop_container(self, container: Container, timeout: int | None = None) -> None:
         """
         Stop a container gracefully with SIGTERM, then SIGKILL if needed.
 
         Args:
             container: Container to stop
-            timeout: Seconds to wait for graceful shutdown before force kill
+            timeout: Seconds to wait for graceful shutdown before force kill. If None, uses
+                     ORCHESTRATOR_RUNNER__STOP_TIMEOUT_S or defaults to 1s for fast shutdown.
         """
         try:
             loop = asyncio.get_event_loop()
             # Docker's stop() sends SIGTERM, waits timeout seconds, then SIGKILL
-            await loop.run_in_executor(None, lambda: container.stop(timeout=timeout))
+            import os as _os
+            try:
+                eff_timeout = int(timeout) if timeout is not None else int(_os.environ.get("ORCHESTRATOR_RUNNER__STOP_TIMEOUT_S", "1"))
+            except Exception:
+                eff_timeout = 1
+            await loop.run_in_executor(None, lambda: container.stop(timeout=max(0, eff_timeout)))
             logger.info(f"Stopped container {container.name} gracefully")
         except NotFound:
             logger.debug(f"Container {container.name} not found")
@@ -1003,7 +1152,7 @@ class DockerManager:
                                 group = container.labels.get("session_group_key") or container.labels.get("task_key") or ""
                                 import hashlib
                                 ghash = hashlib.sha256(group.encode("utf-8")).hexdigest()[:8] if group else "unknown"
-                                volume_name = f"orc_home_{run_id}_g{ghash}"
+                                volume_name = f"orc_home_{run_id}_s{sidx}_g{ghash}"
                             except Exception:
                                 volume_name = f"orc_home_{run_id}_s{sidx}_i{iidx}"
                             # Attempt to remove container

@@ -190,8 +190,7 @@ Each workflow produces branches in your repository, detailed logs, and a final s
 
 ## 1.4 Non-Goals
 
-- Memory-aware admission control: the system admits tasks using CPU tokens only; memory-based gating is out of scope.
-- Formal fsync/clock proofs: the system relies on interval fsync (≤50ms) and atomic snapshot renames.
+- Formal correctness proofs of fsync/clock behavior: out of scope. Instead, the system enforces a single durability invariant tying snapshots to fsynced events (see Event ↔ Snapshot Durability) and uses atomic snapshot renames.
 
 ## 1.5 Conventions and RFC Keywords
 
@@ -245,6 +244,7 @@ The event system uses append-only file storage (`events.jsonl`) with monotonic b
 - Writers MUST be single-process per run (single-writer model), emit UTF-8 JSON per line, and flush according to the configured flush policy (interval-based batching by default; per-event when explicitly configured). The event carries the `start_offset` (byte position before the record was written). This is configured via environment variable (e.g., `ORCHESTRATOR_EVENTS__FLUSH_POLICY=per_event`).
   The single-writer invariant is enforced by an OS lockfile `events.jsonl.lock` (see Event Log Contract below).
   The number of events flushed per interval is bounded by a configured batch size for latency control (see `events.flush_policy.max_batch`).
+  Single durability invariant: `state.json.last_event_start_offset` MUST point to an event the writer has already fsynced. Snapshot persistence MUST never happen ahead of durable event fsync.
 
 **Event Envelope**
 
@@ -505,11 +505,11 @@ mkdir -p "$WORKSPACE_DIR"
 
 ```
 /tmp/orchestrator/<run-id>/k_<hash(key)> → /workspace
-orc_home_<run_id>_g{GHASH} → /home/node
+orc_home_<run_id>_s<strategy_index>_g{GHASH} → /home/node
 tmpfs → /tmp
 ```
 
-Platform-specific mount handling ensures compatibility. The named volume (pattern: `orc_home_{run_id}_g{GHASH}`) provides persistent storage for Claude Code's session data, ensuring sessions survive container restarts and enabling cross-task continuity when the same session group key is used. Note: The implementation uses `/home/node` due to the base Docker image using the `node` user.
+Platform-specific mount handling ensures compatibility. The named volume (pattern: `orc_home_{run_id}_s{strategy_index}_g{GHASH}`) provides persistent storage for Claude Code's session data, ensuring sessions survive container restarts and enabling cross-task continuity when the same session group key is used. Names are per strategy execution to avoid copy-up races. Note: The implementation uses `/home/node` due to the base Docker image using the `node` user.
 
 `GHASH`:
   • Run scope (default): `GHASH = short8( sha256( JCS({"session_group_key": EFFECTIVE_SGK}) ) )`, where `EFFECTIVE_SGK = session_group_key if provided else durable task key`. Namespacing is provided by the run-scoped volume name `orc_home_{run_id}_g{GHASH}`.
@@ -535,7 +535,7 @@ fi
 
 docker run \
   -v "$WORKSPACE_DIR:/workspace${mount_flags}" \
-  --mount "type=volume,source=orc_home_${run_id}_g${GHASH},target=/home/node" \
+  --mount "type=volume,source=orc_home_${run_id}_s${SIDX}_g${GHASH},target=/home/node" \
   --tmpfs /tmp:rw,size=<runner.tmpfs_size_mb>m \  # Writable temporary space (configurable)
   --read-only \                     # Entire filesystem read-only except mounts
   --name "$container_name" \
@@ -558,6 +558,13 @@ Writable mounts: `/home/node` is a writable named volume that persists across co
 
 When a task declares `import_policy="never"`, the runner MUST mount the `/workspace` path as read-only when `runner.review_workspace_mode=ro` (default `ro`). If `reuse_container=True` would prevent a read-only remount, the runner MUST start a fresh container (ignoring `reuse_container`) to honor read-only when `review_workspace_mode=ro`. Review/scoring tasks write only to `/tmp` and `/home/node`. When `review_workspace_mode=ro`, attempted writes to `/workspace` MUST error fast with a clear message. Plugins write scratch output to `/tmp` in strict RO mode.
 
+Hardening requirements:
+
+- Capabilities: containers MUST drop all capabilities (`--cap-drop ALL`) and run with `--security-opt no-new-privileges` and the default Docker seccomp profile (or stricter if available).
+- Process/resource limits: containers MUST set a `--pids-limit` and strict `--ulimit nofile` to prevent resource exhaustion. Sensible defaults should be applied and remain configurable.
+- Mount policy: exactly three mounts are permitted (`/workspace`, `/home/node`, `/tmp`). The runner MUST prevent mounting host paths other than these and MUST reject any attempt to mount the Docker socket or other host device/special files.
+- Optional I/O throttles: operators MAY enable blkio throttling to limit disk impact on shared hosts. When enabled, record throttle settings in runner-internal logs only (never in public events).
+
 **Container Reuse**: When `reuse_container=True`:
 
 - If a container exists and is running: Execute Claude Code in the existing container
@@ -579,7 +586,7 @@ If (1) and (3) conflict, the runner MUST stop and remove the existing container 
 
 Container replacement protocol: To honor mount mode changes (e.g., switching to read‑only for review tasks), the runner MUST stop and remove the existing container and re-create a new one with the same `container_name` and the same session volume. The new container MUST apply current task labels (`run_id`, `strategy_execution_id`, `task_key`, `instance_id`). Emit a runner‑internal event `runner.container.replaced` with `{ old_id, new_id, reason: "ro_required" }`. Public `task.*` events are unaffected. Retention timers apply to the latest active container; replaced containers are not retained.
 
-**Container Persistence**: Containers are kept after execution to enable Claude Code session resume:
+**Container Persistence**: Containers are kept after execution to enable Claude Code session resume (subject to global retention caps and on‑run GC/backpressure policies):
 
 - Failed/timeout instances: Retained for 24 hours (configurable)
 - Successful instances with `finalize=True`: Container is stopped (not removed) after successful completion and retained for 2 hours (configurable)
@@ -595,13 +602,13 @@ This persistence is crucial because Claude Code maintains session state inside t
 
 Failure classification for offline runs: if a task runs with `offline` and fails due to blocked egress, classify as `error_type="network"`, set `network_egress="offline"` in the payload, and include `egress=offline` in the human message for clarity.
 
-**Session Groups**: To maintain session continuity across multiple tasks (e.g., plan → implement → refine), strategies supply a `session_group_key` in `ctx.run`. Containers and the `/home/node` named volume are keyed by this group (default = the task key). Passing the same `session_group_key` for related tasks ensures they share the same session volume; passing a different key isolates sessions. Volume scope is configurable via `runner.session_volume_scope = "run" | "global"` (default: `"run"`). In `"global"` scope, the volume name omits the `run_id` so sessions can be reused across runs; this requires explicit `--allow-global-session-volume` to prevent cross-contamination between different model/tool configs; in `"run"` scope, volumes are run‑scoped.
+**Session Groups**: To maintain session continuity across multiple tasks (e.g., plan → implement → refine), strategies supply a `session_group_key` in `ctx.run`. Containers and the `/home/node` named volume are keyed by this group (default = the task key). Passing the same `session_group_key` for related tasks ensures they share the same session volume; passing a different key isolates sessions. Volume scope is configurable via `runner.session_volume_scope = "run" | "global"` (default: `"run"`). In `"global"` scope, the volume name omits the `run_id` so sessions can be reused across runs; this requires explicit `--allow-global-session-volume` to prevent cross-contamination between different model/tool configs; in `"run"` scope, volumes are run‑scoped and MUST be unique per strategy execution to avoid Docker's copy-up race when multiple containers mount the same named volume concurrently.
 
 Global scope naming: `orc_home_g{GHASH}`.
 
 Session group hashing:
 
-- Run scope (default): `GHASH = short8(sha256(JCS({"session_group_key": EFFECTIVE_SGK})))` and the home volume name is `orc_home_{run_id}_g{GHASH}`.
+- Run scope (default): `GHASH = short8(sha256(JCS({"session_group_key": EFFECTIVE_SGK})))` and the home volume name is `orc_home_{run_id}_s{strategy_index}_g{GHASH}`.
 - Global scope: requires `--allow-global-session-volume`; `GHASH = short8(sha256(JCS({"session_group_key": EFFECTIVE_SGK, "plugin": PLUGIN, "model": MODEL})))` and the home volume name is `orc_home_g{GHASH}`.
 
 **Resource Limits**: Each container gets configurable CPU/memory limits with sensible defaults:
@@ -702,6 +709,12 @@ Let's break down why each flag matters:
 
 **Agent Commits**: The AI agent works directly on the base branch in its isolated clone. It does not create new branches; it commits changes to the single available branch. This simplifies the agent's task and ensures predictable behavior.
 
+**Protected refs and branch validation**:
+
+- Protected ref denylist: `main`, `master`, `develop`, `release/*`, `stable`, `hotfix/*`, and any pattern configured under `git.protected_refs`. The runner MUST refuse ref updates to protected refs unless `--allow-overwrite-protected-refs` is explicitly set at the CLI or config level. This applies even when `import_conflict_policy="overwrite"`.
+- Reserved namespace: Target branches generated by orchestration MUST live under an orchestrator-owned namespace derived from the durable key (e.g., `{strategy}_{run_id}_k{short8(qual_key)}`) and MUST NOT collide with protected refs. If an operator enables a hierarchical namespace (`orchestration.branch_namespace=hierarchical`), the prefix `orc/<strategy>/<run_id>/...` MUST be used.
+- Branch name validation: Orchestration MUST validate `branch_name` against a strict regex (e.g., `^[A-Za-z0-9._\-\/]{1,200}$`) and reject names with forbidden segments (`..`, `.lock`, `@{`, trailing `/`, leading `-`). Invalid names MUST fail scheduling before a runner starts.
+
 **Container Workspace**: Each container receives its isolated clone as a volume mount:
 
 ```bash
@@ -773,6 +786,10 @@ if git show-ref --verify --quiet "refs/heads/${TARGET_BRANCH}"; then
     fail)
       echo "Error: Branch ${TARGET_BRANCH} already exists" >&2; exit 1 ;;
     overwrite)
+      # Only allow forced updates for non-protected refs
+      if printf "%s\n" "${TARGET_BRANCH}" | grep -Eq '^(main|master|develop|stable|release\/|hotfix\/)' ; then
+        echo "Error: overwrite of protected ref ${TARGET_BRANCH} requires --allow-overwrite-protected-refs" >&2; exit 1
+      fi
       : # proceed; fetch will move ref (forced update)
       ;;
     suffix)
@@ -814,6 +831,7 @@ This import operation:
 - Creates the branch atomically in the host repository
 - Requires no network operations or remote configuration
 - Fails cleanly if the branch already exists (according to `import_conflict_policy`)
+- Refuses forced updates to protected refs unless explicitly allowed via `--allow-overwrite-protected-refs`
 - Preserves the connection to the original base branch
 - For `import_policy="always"`, handles the "no changes" case by creating a branch pointing to the base.
 - For `import_policy="auto"` with `skip_empty_import=true` (default), no branch is created when there are no commits.
@@ -1178,7 +1196,7 @@ These patterns are expressed directly in strategy code using keys like `gen/<i>`
 
 Managing concurrent tasks requires careful resource control:
 
-**Resource Pool**: Maximum parallel tasks configurable (default adaptive). The default limit is `max(2, min(20, floor(host_cpu / runner.container_cpu)))`. This prevents host oversubscription while allowing parallelism. When at capacity, new task requests queue until a slot opens. A warning MUST be logged if the configured value oversubscribes the host (i.e., `max_parallel_tasks * runner.container_cpu > host_cpu`).
+**Resource Pool**: Maximum parallel tasks configurable (default adaptive). The default limit is `max(2, min(20, floor(host_cpu / runner.container_cpu)))`. This prevents host oversubscription while allowing parallelism. When at capacity, new task requests queue until a slot opens. A warning MUST be logged if the configured value oversubscribes the host (i.e., `max_parallel_tasks * runner.container_cpu > host_cpu`). Operators can also select presets via `--parallel {conservative|balanced|aggressive}`, which set `container_cpu` and `container_memory` together (e.g., conservative: 1 CPU/2GiB, balanced: 2 CPU/4GiB [default], aggressive: 3 CPU/6–8GiB) to keep CPU and RAM in sync.
 
 Host CPU detection:
 
@@ -1188,7 +1206,14 @@ Host CPU detection:
 
 **FIFO Scheduling**: Simple first-in-first-out queue ensures fairness. No complex priority systems - strategies that submit first get resources first. This predictability makes debugging easier.
 
-**Task Scheduling**: When launching tasks, admission requires both (a) an available pool slot and (b) sufficient CPU tokens such that `sum(running.container_cpu) + new.container_cpu ≤ host_cpu`. When `max_parallel_tasks="auto"`, the pool size is derived from CPU tokens via the adaptive default above.
+**Task Scheduling**: Admission is multi-resource: a task is admitted only if all guards pass:
+
+1) Pool slot available
+2) CPU tokens: `sum(running.container_cpu) + new.container_cpu ≤ host_cpu`
+3) Memory tokens: `sum(running.container_memory) + new.container_memory ≤ host_mem * mem_guard_pct` (default `mem_guard_pct=0.8`)
+4) Disk guard: free space on the workspace filesystem `≥ disk.min_free_gb` and recent Git pack growth slope `≤ disk.max_pack_growth_mib_per_min`
+
+When `max_parallel_tasks="auto"`, the pool size is derived from CPU tokens via the adaptive default above. Memory and disk guards apply regardless of pool size.
 
 The engine:
 
@@ -1197,18 +1222,17 @@ The engine:
 - Persists `strategy_index` label on containers with the 1-based value for easier grouping and debugging (the display alias `sidx` is used in UI only)
 - Tracks task-to-container mapping for monitoring and cleanup
 - Manages multiple background executor tasks (configurable count) for true parallel execution
-- Validates disk space before starting tasks (20GB minimum)
+- Applies a disk guard before starting tasks (configurable minimum free space and pack‑growth slope); on breach, pauses admissions and triggers on‑run GC (see §4.10)
 
 **Execution Tracking**: Each task tracked from schedule to completion. Strategies can wait for specific tasks or groups. Essential for patterns like "wait for all 5 to complete, then pick best".
 
 **Capacity Model**:
 
-- Each task declares `container_cpu` and `container_memory` at scheduling time (defaults apply).
-- Scheduler maintains an aggregate CPU token bucket equal to detected `host_cpu` (cgroup-aware). A task is admitted only if `sum(running.container_cpu) + new.container_cpu ≤ host_cpu`.
+- Each task declares `container_cpu` and `container_memory` at scheduling time (defaults/presets apply).
+- Scheduler maintains aggregate CPU and memory token ledgers; both MUST be within limits to admit a task.
+- Disk guard is evaluated on each admission attempt; if breached, admission is paused until healthy.
 - Tasks not admitted wait in FIFO order. This prevents oversubscription even with per-task overrides.
-- Oversubscription warnings are emitted when `max_parallel_tasks * runner.container_cpu > host_cpu` or when a single task requests `container_cpu > host_cpu`.
-
-Admission control is CPU-based only. Memory-aware gating is out of scope; operators must size `runner.container_memory` conservatively.
+- Oversubscription warnings are emitted when `max_parallel_tasks * runner.container_cpu > host_cpu` or when a single task requests `container_cpu > host_cpu` or `container_memory > host_mem`.
 
 **Resource Cleanup**: When tasks complete, their slots immediately return to the pool. Failed tasks do not block resources. This ensures maximum utilization without manual intervention.
 
@@ -1230,7 +1254,7 @@ State tracking serves two purposes: enabling UI displays and crash recovery:
 **State Persistence Implementation**: State is persisted through two mechanisms:
 
 - `events.jsonl`: Append-only log containing every state change with monotonic byte offsets. A single writer computes the `start_offset`, writes the record, flushes, and fsyncs.
-- `state.json`: Periodic snapshot (every 30 seconds) containing full state and the `last_event_start_offset` (the byte position of the last applied event's start). Snapshots MUST persist, per instance: `state`, `started_at`, `completed_at`, `interrupted_at`, `branch_name`, `container_name`, and `session_id` to enable resumability. Written atomically using temp file + rename
+- `state.json`: Periodic snapshot (every 30 seconds) containing full state and the `last_event_start_offset` (the byte position of the last applied event's start). Snapshots MUST persist, per instance: `state`, `started_at`, `completed_at`, `interrupted_at`, `branch_name`, `container_name`, and `session_id` to enable resumability. Written atomically using temp file + rename. Snapshots MUST only reference offsets that the writer has confirmed durable (fsynced).
 
 Recovery process:
 
@@ -1431,7 +1455,7 @@ results/
 
 **Startup Validation**:
 
-- Check 20GB free disk space before starting
+- Check minimum free disk space before starting (configurable; default 20GiB)
 - Verify Docker daemon accessibility
 - Clean up orphaned containers from previous runs (owned by orchestration)
 - Validate git repository and base branch
@@ -1446,6 +1470,17 @@ results/
 Runner cleanup is limited to its own container on task failure; it MUST NOT scan for or delete unrelated containers to avoid races with orchestration.
 
 **Session Volume Cleanup**: Session volumes (`orc_home_{run_id}_g{GHASH}` in run scope or `orc_home_g{GHASH}` in global scope) are not auto‑cleaned on startup. Cleaning volumes is an explicit operator action via `orchestrator --clean-volumes`. The command removes only unreferenced volumes older than a configurable threshold (default 24h) and MUST never remove volumes still referenced by any container.
+
+**On-run GC and backpressure**:
+
+- Disk guard thresholds:
+  - `disk.min_free_gb` (default 10GiB)
+  - `disk.max_pack_growth_mib_per_min` (default 256 MiB/min over a 5‑minute window)
+- If free space drops below `min_free_gb` or the pack‑growth slope exceeds the threshold, orchestration MUST:
+  1) Pause task admissions immediately
+  2) Trigger GC of retained artifacts: purge oldest failed workspaces/containers first; optionally compress logs/artifacts when configured
+  3) Resume admissions only after both thresholds return to healthy ranges
+- Retention is size‑aware: in addition to age (e.g., 24h), the system MUST cap total bytes retained for failed workspaces/containers (configurable, e.g., `retention.max_failed_artifacts_gb`). Exceeding the cap purges oldest first.
 
 **Parallel Shutdown**: On Ctrl+C or error:
 
@@ -1650,6 +1685,10 @@ Note: The TUI reads only the canonical public events (`task.*`, `strategy.*`) fr
 Additional flags and mappings:
 
 - `--allow-global-session-volume` enables global session volume scope; maps to `runner.session_volume_scope=global` and requires explicit consent.
+- `--parallel {conservative|balanced|aggressive}` sets CPU+RAM presets for containers (maps to `runner.container_cpu` and `runner.container_memory`).
+- Budgets: (removed — budgets not enforced; see Cost Tracking)
+- Disk guard: `--disk-min-free-gb` and `--disk-max-pack-growth-mib-per-min` tune admission backpressure thresholds.
+- Git safety: `--allow-overwrite-protected-refs` must be set to allow forced updates to protected refs.
 - Proxy settings (no secrets logged):
   - CLI: `--proxy-http`, `--proxy-https`, `--no-proxy`
   - Config: `runner.network.proxy.http|https|no_proxy`
@@ -1751,7 +1790,7 @@ ORCHESTRATOR_DEBUG=true
 ORCHESTRATOR_STRATEGY__BEST_OF_N__N=5
 
 # Runner settings
-ORCHESTRATOR_RUNNER__ISOLATION_MODE=full_copy  # shared_objects requires explicit env to enable
+ORCHESTRATOR_RUNNER__ISOLATION_MODE=full_copy
 
 # TUI settings
 ORCHESTRATOR_TUI__REFRESH_RATE=100          # render cadence in ms (default 100ms)
@@ -1911,23 +1950,20 @@ Security focuses on protecting the host system and preventing instance interfere
 - Support for both OAuth tokens (subscription) and API keys
 - Secrets MUST be redacted from logs and error traces; environment dumps are forbidden in runner events
 
-**Centralized Redaction**: A sanitizer with SECRET_PATTERNS is used by Orchestration before writing any public event:
+**Centralized Redaction**: Orchestration MUST sanitize every public event (envelope + payload) in two stages before writing to `events.jsonl`:
 
-```python
-SECRET_PATTERNS = [
-    r'(?i)(api|token|oauth|secret)[-_ ]?(key|token)\s*[:=]\s*[\w\-]{8,}',
-    r'sk-[A-Za-z0-9]{20,}',
-]
-def sanitize_public(obj):
-    def _scrub(s):
-        for pat in SECRET_PATTERNS:
-            s = re.sub(pat, '[REDACTED]', s)
-        return s
-    # walk dict/str recursively and scrub strings
+1) Field-name redaction (case-insensitive): for any key name containing `token`, `key`, `secret`, `password`, `authorization`, or `cookie`, replace the value with `[REDACTED]` regardless of content shape (string/array/object).
+2) Pattern sweep over all strings (values and nested text): redact bearer tokens and common credential formats, including but not limited to:
+   - `Authorization: Bearer <...>`
+   - Provider prefixes like `sk-...`, `ghp_...`, `gho_...`, `ghs_...`
+   - JWT-like blobs (`^[A-Za-z0-9-_]+\.[A-Za-z0-9-_]+\.[A-Za-z0-9-_]+$`)
+   - Base64 basic-auth and API tokens (heuristic length thresholds)
 
-Patterns are illustrative and configurable to cover provider-specific keys. Sanitization MUST apply to all public `message` fields and to `final_message` content before emission.
+By default, environment variables and HTTP headers MUST NOT be logged to public events. Only an allowlist of safe metadata keys may be included. Runner-internal logs MUST also avoid raw env/header dumps.
+
+Sanitization MUST be covered by unit tests using a small real-world corpus of keys/tokens to prevent regressions. Patterns are configurable to extend provider coverage.
+
 Sanitization scope: Redaction applies to all public strings in event payloads, including but not limited to `final_message`, `message`, and textual metadata.
-```
 
 **File System Boundaries**: Instances MUST NOT:
 
@@ -2186,7 +2222,7 @@ Monitoring is designed to answer the key question: "Is everything going as expec
 **TUI Dashboard**: The default monitoring experience shows:
 
 - Real-time task status with visual grouping by strategy
-- Live cost accumulation (critical for budget awareness)
+- Live cost accumulation for visibility
 - Progress indicators based on Claude's task completion
 - Clear failure indication with error snippets
 

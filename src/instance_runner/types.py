@@ -38,6 +38,9 @@ class RetryConfig:
         "no such host",
         "timeout",
         "Cannot connect to the Docker daemon",
+        "already in use",  # name conflict
+        "409 Client Error",  # explicit status hint
+        "Conflict (\"Conflict.",  # docker's overlap wording
     )
     claude_error_patterns: tuple = (
         "rate limit",

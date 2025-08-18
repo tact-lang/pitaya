@@ -420,29 +420,7 @@ class StateManager:
 
         return self.current_state
 
-    def load_snapshot(self, run_id: str) -> Optional[RunState]:
-        """Load state from a previous run (legacy method, use load_and_recover_state).
-
-        This method is kept for backward compatibility but should not be used
-        for new code. Use load_and_recover_state for full recovery.
-        """
-        snapshot_path = self.state_dir / run_id / "state.json"
-
-        if not snapshot_path.exists():
-            logger.error(f"No snapshot found for run {run_id}")
-            return None
-
-        try:
-            with open(snapshot_path) as f:
-                data = json.load(f)
-
-            self.current_state = RunState.from_dict(data)
-            logger.info(f"Loaded state for run {run_id}")
-            return self.current_state
-
-        except (FileNotFoundError, json.JSONDecodeError, OSError) as e:
-            logger.error(f"Failed to load state for run {run_id}: {e}")
-            return None
+    # Removed legacy load_snapshot; use load_and_recover_state for recovery.
 
     def register_instance(
         self,
@@ -761,6 +739,34 @@ class StateManager:
             return
 
         try:
+            # Enforce durability invariant: ensure events flushed/fsynced before snapshot
+            try:
+                if self.event_bus:
+                    self.event_bus.flush_pending()
+            except Exception:
+                pass
+            # Normalize aggregate counters from instance map to avoid drift across resumes
+            try:
+                from ..shared import InstanceStatus as _IS
+                insts = list(self.current_state.instances.values())
+                self.current_state.total_instances = len(insts)
+                self.current_state.completed_instances = sum(1 for i in insts if i.state == _IS.COMPLETED)
+                self.current_state.failed_instances = sum(1 for i in insts if i.state == _IS.FAILED)
+                # Recompute aggregate cost/tokens from per-instance results for idempotency
+                total_cost = 0.0
+                total_tokens = 0
+                for i in insts:
+                    try:
+                        if i.result and i.result.metrics:
+                            total_cost += float(i.result.metrics.get("total_cost", 0.0) or 0.0)
+                            total_tokens += int(i.result.metrics.get("total_tokens", 0) or 0)
+                    except Exception:
+                        pass
+                self.current_state.total_cost = total_cost
+                self.current_state.total_tokens = total_tokens
+            except Exception:
+                # Best-effort normalization; keep existing counters if import fails
+                pass
             # Preserve last_event_start_offset as updated from applied events; do not
             # overwrite it with the writer's current file size.
             run_dir = self.state_dir / self.current_state.run_id
@@ -838,7 +844,7 @@ class StateManager:
                         )
                 except asyncio.CancelledError:
                     break
-                except (OSError, json.JSONEncodeError) as e:
+                except Exception as e:
                     logger.error(f"Error in periodic snapshot: {e}")
 
         self._snapshot_task = asyncio.create_task(snapshot_loop())
@@ -993,7 +999,7 @@ class StateManager:
                 elif status == "failed":
                     strat.state = "failed"
                 elif status == "canceled":
-                    strat.state = "failed"
+                    strat.state = "canceled"
 
         # Canonical task events
         elif event_type == "task.scheduled":
@@ -1008,7 +1014,9 @@ class StateManager:
                     instance_id=iid,
                     strategy_name=sname,
                     prompt="",
-                    base_branch="",
+                    # Prefer base_branch from canonical payload when present to
+                    # make resume robust even if snapshots lagged.
+                    base_branch=(data.get("base_branch") or ""),
                     branch_name="",
                     container_name=data.get("container_name", ""),
                     state=InstanceStatus.QUEUED,
@@ -1034,6 +1042,7 @@ class StateManager:
             iid = data.get("instance_id")
             if iid and iid in self.current_state.instances:
                 info = self.current_state.instances[iid]
+                old_state = info.state
                 info.state = InstanceStatus.COMPLETED
                 info.completed_at = ts or datetime.now(timezone.utc)
                 art = data.get("artifact", {})
@@ -1046,7 +1055,7 @@ class StateManager:
                 except Exception:
                     pass
                 # Update aggregate metrics
-                if self.current_state.completed_instances is not None:
+                if self.current_state.completed_instances is not None and old_state != InstanceStatus.COMPLETED:
                     self.current_state.completed_instances += 1
                 metrics = data.get("metrics", {})
                 try:
@@ -1059,9 +1068,10 @@ class StateManager:
             iid = data.get("instance_id")
             if iid and iid in self.current_state.instances:
                 info = self.current_state.instances[iid]
+                old_state = info.state
                 info.state = InstanceStatus.FAILED
                 info.completed_at = ts or datetime.now(timezone.utc)
-                if self.current_state.failed_instances is not None:
+                if self.current_state.failed_instances is not None and old_state != InstanceStatus.FAILED:
                     self.current_state.failed_instances += 1
 
         elif event_type == "task.interrupted":

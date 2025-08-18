@@ -252,6 +252,39 @@ async def run_instance(
             result.error or "", result.error_type or "", retry_config
         )
 
+        # Special-case: immediate Docker exec exit on resume can be a transient session issue.
+        # If operator_resume and Docker error is a plain non-zero exit, fall back to a fresh run
+        # by clearing session_id and disabling reuse_container for the next attempt.
+        try:
+            _err = (result.error or "").lower()
+            if (
+                not is_retryable
+                and operator_resume
+                and (result.error_type or "").lower() == "docker"
+                and ("exited with code" in _err or "exit code" in _err)
+            ):
+                is_retryable = True
+                # Emit a retry hint event for diagnostics
+                if event_callback:
+                    event_callback(
+                        {
+                            "type": "instance.retrying",
+                            "timestamp": datetime.now(timezone.utc).isoformat(),
+                            "instance_id": instance_id,
+                            "data": {
+                                "reason": "resume_exec_exit",
+                                "action": "fresh_container",
+                            },
+                        }
+                    )
+                # Force next attempt to use a fresh container and drop resume session
+                reuse_container = False
+                session_id = None
+                # Use a short backoff for this specific case
+                delay = min(delay, 1.0)
+        except Exception:
+            pass
+
         if not is_retryable:
             return result
 
@@ -521,9 +554,12 @@ async def _run_instance_attempt(
             emit_event("instance.phase_completed", {"phase": "container_creation"})
 
             # Optional tool verification inside container per spec operations
-            # Strict tool verification: fail fast if required tools are missing
-            required = ["git", "claude"]
-            await docker_manager.verify_container_tools(container, required)
+            # Verify only git (mandatory for import). The AI CLI is validated implicitly during execute.
+            try:
+                await docker_manager.verify_container_tools(container, ["git"])
+            except DockerError as e:
+                # Surface failure; git is required
+                raise
 
             # Start heartbeat inside container for last_active tracking
             try:

@@ -20,6 +20,19 @@ from typing import Any, Callable, Dict, List, Optional, Set, Tuple, TextIO
 logger = logging.getLogger(__name__)
 
 
+# Two-stage redaction patterns
+import re as _re
+_SENSITIVE_KEYS = ("token", "api_key", "apikey", "authorization", "password", "secret", "cookie")
+_PATTERNS = [
+    _re.compile(r"(?i)(authorization\s*:\s*Bearer)\s+[A-Za-z0-9._\-]+"),
+    _re.compile(r"sk-[A-Za-z0-9]{16,}"),
+    _re.compile(r"gh[opsu]_[A-Za-z0-9]{20,}"),  # ghp_, gho_, ghs_, gh u
+    _re.compile(r"[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+"),  # JWT-like
+    _re.compile(r"(?i)(api[_-]?key|token)\s*[:=]\s*[A-Za-z0-9\-]{8,}"),
+    _re.compile(r"(?i)Basic\s+[A-Za-z0-9+/=]{20,}"),
+]
+
+
 class EventBus:
     """
     In-memory event bus with ring buffer and persistence.
@@ -326,19 +339,33 @@ class EventBus:
             pass
 
     def _sanitize(self, obj: Any) -> Any:
-        """Redact sensitive fields recursively (best-effort)."""
+        """Redact secrets recursively: field-name redaction + pattern sweep."""
         try:
             if isinstance(obj, dict):
-                redacted: Dict[str, Any] = {}
+                out: Dict[str, Any] = {}
                 for k, v in obj.items():
                     kl = str(k).lower()
-                    if any(tok in kl for tok in ["token", "api_key", "apikey", "authorization", "password", "secret", "bearer"]):
-                        redacted[k] = "***"
+                    if any(s in kl for s in _SENSITIVE_KEYS):
+                        # Field-name redaction: value replaced regardless of type
+                        out[k] = "[REDACTED]"
                     else:
-                        redacted[k] = self._sanitize(v)
-                return redacted
+                        out[k] = self._sanitize(v)
+                return out
             if isinstance(obj, list):
                 return [self._sanitize(v) for v in obj]
+            if isinstance(obj, str):
+                s = obj
+                # Pattern sweep across strings
+                for pat in _PATTERNS:
+                    try:
+                        if pat.pattern.lower().startswith("(?i)(authorization"):
+                            # Preserve header name; redact token tail
+                            s = pat.sub(r"\1 [REDACTED]", s)
+                        else:
+                            s = pat.sub("[REDACTED]", s)
+                    except Exception:
+                        continue
+                return s
             return obj
         except Exception:
             return obj

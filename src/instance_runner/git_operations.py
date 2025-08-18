@@ -21,6 +21,40 @@ from ..utils.platform_utils import get_temp_dir
 
 logger = logging.getLogger(__name__)
 
+_BRANCH_RE = None
+
+
+def _is_valid_branch_name(name: str) -> bool:
+    """Validate branch name against a strict regex and forbidden substrings.
+
+    Disallows dangerous patterns: '..', '.lock', '@{', leading '-', trailing '/', and invalid chars.
+    """
+    try:
+        import re
+        global _BRANCH_RE
+        if _BRANCH_RE is None:
+            _BRANCH_RE = re.compile(r"^[A-Za-z0-9._\-/]{1,200}$")
+        if not isinstance(name, str) or not name:
+            return False
+        if name.startswith("-") or name.endswith("/"):
+            return False
+        if ".." in name or ".lock" in name or "@{" in name:
+            return False
+        if "//" in name:
+            return False
+        return bool(_BRANCH_RE.match(name))
+    except Exception:
+        return False
+
+
+def _is_protected_ref(name: str) -> bool:
+    """Return True if the ref name is protected (main/master/develop/stable/release/*/hotfix/*)."""
+    if not isinstance(name, str):
+        return False
+    if name in ("main", "master", "develop", "stable"):
+        return True
+    return name.startswith("release/") or name.startswith("hotfix/")
+
 
 class GitOperations:
     """Handles git workspace isolation for instances."""
@@ -70,23 +104,48 @@ class GitOperations:
                 base_dir = get_temp_dir()
 
         if run_id and container_name:
-            # Extract indices from container name for workspace naming
-            # Container name format: orchestrator_{timestamp}_s{sidx}_i{iidx}
-            name_parts = container_name.split("_")
-            if len(name_parts) >= 4:
-                sidx = name_parts[-2].lstrip("s")
-                iidx = name_parts[-1].lstrip("i")
-                # Path: {base}/orchestrator/${run_id}/i_${sidx}_${iidx}
-                workspace_dir = base_dir / f"orchestrator/{run_id}/i_{sidx}_{iidx}"
-            else:
-                # Fallback if container name doesn't match expected format
-                workspace_dir = base_dir / f"orchestrator/{run_id}/{instance_id}"
+            # Derive a stable workspace path per run + strategy + durable key
+            # Accept both formats:
+            #   orchestrator_{run_id}_s{sidx}_i{iidx}
+            #   orchestrator_{run_id}_s{sidx}_k{khash}[_rXXXX...]
+            tokens = (container_name or "").split("_")
+            sidx = "0"
+            khash = ""
+            try:
+                # Find s{number}
+                for t in tokens:
+                    if t.startswith("s") and t[1:].isdigit():
+                        sidx = t[1:]
+                        break
+                # Prefer k{hash} if present; else fall back to last token that looks like i{...}
+                for t in tokens:
+                    if t.startswith("k") and len(t) > 1:
+                        khash = t[1:]
+                        break
+                if not khash:
+                    # Look for i{index}; keep its content for backwards-compat
+                    for t in tokens:
+                        if t.startswith("i") and len(t) > 1:
+                            khash = t[1:]
+                            break
+                if not khash:
+                    # Final fallback: short instance_id
+                    khash = (instance_id or "")[0:8] or "x"
+            except Exception:
+                sidx = "0"
+                khash = (instance_id or "")[0:8] or "x"
+
+            # Path: {base}/orchestrator/${run_id}/i_${sidx}_${khash} (stable across resume suffixes)
+            workspace_dir = base_dir / f"orchestrator/{run_id}/i_{sidx}_{khash}"
         else:
             # Fallback for standalone usage
             workspace_dir = base_dir / f"orchestrator/instance_{instance_id}"
 
         # On Windows, ensure path length remains below typical limits
         try:
+            # Validate base branch name (defensive; base must already exist in repo)
+            if not _is_valid_branch_name(base_branch):
+                raise GitError(f"Invalid base branch name: {base_branch}")
             import platform
             if platform.system() == "Windows":
                 # If the final path would be too long, use a shorter form
@@ -328,6 +387,10 @@ class GitOperations:
             except Exception:
                 pass
 
+            # Validate target branch name and protected refs before any ref updates
+            if not _is_valid_branch_name(branch_name):
+                raise GitError(f"Invalid target branch name: {branch_name}")
+
             # Check if target branch already exists
             check_branch_cmd = [
                 "git",
@@ -340,6 +403,13 @@ class GitOperations:
             ]
             branch_exists_result = await self._run_command(check_branch_cmd)
             branch_exists = branch_exists_result[0] == 0
+
+            # Disallow creating/updating protected refs unless explicitly allowed
+            allow_env = os.environ.get("ORCHESTRATOR_ALLOW_OVERWRITE_PROTECTED_REFS", "0").lower() in ("1", "true", "yes")
+            if _is_protected_ref(branch_name) and not allow_env:
+                raise GitError(
+                    f"Refusing to update protected ref '{branch_name}'. Set ORCHESTRATOR_ALLOW_OVERWRITE_PROTECTED_REFS=1 to allow."
+                )
 
             # Read preserved base commit
             base_commit_file = workspace_dir / ".git" / "BASE_COMMIT"
@@ -453,7 +523,12 @@ class GitOperations:
                 if import_conflict_policy == "fail":
                     raise GitError(f"Branch {branch_name} already exists")
                 elif import_conflict_policy == "overwrite":
-                    pass  # will force update via +HEAD
+                    # Only allow forced updates for non-protected refs (opt-in via env)
+                    allow_env = os.environ.get("ORCHESTRATOR_ALLOW_OVERWRITE_PROTECTED_REFS", "0").lower() in ("1", "true", "yes")
+                    if _is_protected_ref(target_branch) and not allow_env:
+                        raise GitError(
+                            f"Refusing to overwrite protected ref '{target_branch}'. Set ORCHESTRATOR_ALLOW_OVERWRITE_PROTECTED_REFS=1 to allow."
+                        )
                 elif import_conflict_policy == "suffix":
                     # Find next available suffix
                     i = 2

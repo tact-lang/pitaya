@@ -122,7 +122,7 @@ class OrchestratorHTTPServer:
 
             return web.json_response(state.to_dict())
 
-        except (AttributeError, TypeError, json.JSONEncodeError) as e:
+        except Exception as e:
             logger.exception("Error handling /state request")
             return web.json_response(
                 {"error": f"Internal server error: {str(e)}"}, status=500

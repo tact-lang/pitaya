@@ -254,6 +254,18 @@ Examples:
             action="store_true",
             help="Require a clean working tree (error if dirty)",
         )
+        # Protected refs overwrite gate
+        parser.add_argument(
+            "--allow-overwrite-protected-refs",
+            action="store_true",
+            help="Allow overwriting protected refs (main/master/release/*/etc). Use with extreme caution.",
+        )
+        # Parallel presets (sets container CPU+RAM together)
+        parser.add_argument(
+            "--parallel",
+            choices=["conservative", "balanced", "aggressive"],
+            help="Preset for per-container resources: conservative(1CPU/2GiB), balanced(2CPU/4GiB), aggressive(3CPU/6-8GiB)",
+        )
         # Back-compat alias: --allow-dirty (now the default; retained as no-op)
         parser.add_argument(
             "--allow-dirty",
@@ -1105,16 +1117,34 @@ Examples:
                         message = message[:497] + "..."
                     self.console.print(f"  [dim]final_message:[/dim] {message}")
 
-        # Summary section
+        # Summary section (prefer strategy-level status; fall back to instances)
         self.console.print("[bold]Summary:[/bold]")
 
-        # Calculate totals
+        # Strategy-level rollup when state is available
+        if state and hasattr(state, "strategies") and state.strategies:
+            try:
+                strat_states = [getattr(s, "state", "") for s in state.strategies.values()]
+                strat_success = sum(1 for s in strat_states if s == "completed")
+                strat_canceled = sum(1 for s in strat_states if s == "canceled")
+                strat_failed = sum(1 for s in strat_states if s == "failed")
+                self.console.print(
+                    f"  Strategies: {strat_success}/{len(strat_states)} completed; {strat_canceled} canceled; {strat_failed} failed"
+                )
+                # Show resume tip when any strategy canceled
+                if strat_canceled > 0:
+                    self.console.print("\n[blue]Scoring interrupted. To resume this run:[/blue]")
+                    self.console.print(f"  orchestrator --resume {run_id}")
+            except Exception:
+                pass
+
+        # Instance-level totals for context
         total_duration = sum(r.duration_seconds or 0 for r in results)
         total_cost = sum(r.metrics.get("total_cost", 0) for r in results if r.metrics)
         success_count = sum(1 for r in results if r.success)
+        int_count = sum(1 for r in results if getattr(r, "status", "") == "canceled")
+        failed_count = sum(1 for r in results if (not r.success and getattr(r, "status", "") != "canceled"))
         total_count = len(results)
 
-        # Format duration
         if total_duration >= 60:
             minutes = int(total_duration // 60)
             seconds = int(total_duration % 60)
@@ -1125,10 +1155,10 @@ Examples:
         self.console.print(f"  Total Duration: {duration_str}")
         self.console.print(f"  Total Cost: ${total_cost:.2f}")
         self.console.print(
-            f"  Success Rate: {success_count}/{total_count} instances ({success_count/total_count*100:.0f}%)"
+            f"  Instances: {success_count} succeeded, {int_count} canceled, {failed_count} failed (total {total_count})"
         )
 
-        # Final branches
+        # Final branches (show generated branches even if scoring canceled)
         final_branches = [r.branch_name for r in results if r.branch_name and r.success]
         if final_branches:
             self.console.print(
@@ -1304,6 +1334,25 @@ Examples:
         full_config = merge_config(
             cli_config, env_config, dotenv_config, config or {}, defaults
         )
+
+        # Configure container limits from merged config; apply --parallel preset if provided
+        if getattr(args, "allow_overwrite_protected_refs", False):
+            os.environ["ORCHESTRATOR_ALLOW_OVERWRITE_PROTECTED_REFS"] = "1"
+
+        # Apply parallel preset before building limits
+        preset = getattr(args, "parallel", None)
+        if preset:
+            runner = full_config.setdefault("runner", {})
+            if preset == "conservative":
+                runner["cpu_limit"] = 1
+                runner["memory_limit"] = "2g"
+            elif preset == "balanced":
+                runner["cpu_limit"] = 2
+                runner["memory_limit"] = "4g"
+            elif preset == "aggressive":
+                runner["cpu_limit"] = 3
+                # Allow operator to override memory via env/config; default 6g
+                runner["memory_limit"] = runner.get("memory_limit", "6g")
 
         # Configure container limits from merged config
         memory_limit_str = full_config["runner"]["memory_limit"]
@@ -1848,8 +1897,8 @@ Examples:
                         logger.warning(f"Error while cancelling task: {e}")
                     pass
 
-            # If shutdown was requested, show resume command
-            if shutdown_requested and not args.resume and not args.resume_fresh:
+            # If shutdown was requested, always show resume command (even during a resume)
+            if shutdown_requested:
                 self.console.print("\n[blue]To resume this run:[/blue]")
                 self.console.print(f"  orchestrator --resume {run_id}")
                 self.console.print(
@@ -1862,11 +1911,27 @@ Examples:
 
             # Print final result
             if state:
-                # Use actual instance counts from state
-                total_instances = state.total_instances
-                completed_instances = state.completed_instances
-                failed_instances = state.failed_instances
-                total_cost = state.total_cost
+                # Derive counts directly from instance states to avoid double-counting across resumes
+                try:
+                    from .shared import InstanceStatus as _IS
+                except Exception:
+                    _IS = None
+                try:
+                    instance_list = list(state.instances.values())
+                    total_instances = len(instance_list)
+                    if _IS:
+                        completed_instances = sum(1 for i in instance_list if i.state == _IS.COMPLETED)
+                        failed_instances = sum(1 for i in instance_list if i.state == _IS.FAILED)
+                    else:
+                        # Fallback to aggregate counters if type import fails
+                        completed_instances = state.completed_instances
+                        failed_instances = state.failed_instances
+                    total_cost = state.total_cost
+                except Exception:
+                    total_instances = state.total_instances
+                    completed_instances = state.completed_instances
+                    failed_instances = state.failed_instances
+                    total_cost = state.total_cost
 
                 self.console.print(
                     f"\n[green]Run completed: {completed_instances}/{total_instances} instances succeeded[/green]"
@@ -1952,10 +2017,6 @@ Examples:
 
             return 0
 
-        except KeyboardInterrupt:
-            # This should rarely be reached now due to signal handler
-            # But keep it for safety
-            return 130
         except KeyboardInterrupt:
             # Ensure graceful shutdown on Ctrl+C in TUI path
             self.console.print("\n[yellow]Interrupted by user[/yellow]")
