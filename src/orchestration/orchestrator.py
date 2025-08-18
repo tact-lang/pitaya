@@ -66,6 +66,8 @@ class Orchestrator:
         runner_timeout_seconds: int = 3600,
         default_network_egress: str = "online",
         branch_namespace: str = "flat",
+        allow_overwrite_protected_refs: bool = False,
+        allow_global_session_volume: bool = False,
     ):
         """
         Initialize orchestrator.
@@ -120,6 +122,8 @@ class Orchestrator:
         self._resource_pool: asyncio.Semaphore = asyncio.Semaphore(1)
         # Branch namespace strategy: 'flat' (default) or 'hierarchical'
         self.branch_namespace = str(branch_namespace or "flat").lower()
+        self.allow_overwrite_protected_refs = bool(allow_overwrite_protected_refs)
+        self.allow_global_session_volume = bool(allow_global_session_volume)
 
         # Multi-resource admission (CPU, memory, disk guard)
         self._admission_lock = asyncio.Lock()
@@ -143,17 +147,11 @@ class Orchestrator:
             self._host_mem_gb = max(1, int(total_bytes / (1024**3)) if total_bytes else 8)
         except Exception:
             self._host_mem_gb = 8
-        try:
-            import os as _os
-            self._mem_guard_pct = float(_os.environ.get("ORCHESTRATOR_MEM_GUARD_PCT", "0.8"))
-            self._disk_min_free_gb = int(_os.environ.get("ORCHESTRATOR_DISK_MIN_FREE_GB", "10"))
-            self._pack_max_slope_mib_per_min = int(_os.environ.get("ORCHESTRATOR_DISK_MAX_PACK_GROWTH_MIB_PER_MIN", "256"))
-            self._retention_max_failed_gb = int(_os.environ.get("ORCHESTRATOR_RETENTION_MAX_FAILED_GB", "0"))  # 0 = disabled
-        except Exception:
-            self._mem_guard_pct = 0.8
-            self._disk_min_free_gb = 10
-            self._pack_max_slope_mib_per_min = 256
-            self._retention_max_failed_gb = 0
+        # Fixed sensible defaults (no env overrides)
+        self._mem_guard_pct = 0.8
+        self._disk_min_free_gb = 10
+        self._pack_max_slope_mib_per_min = 256
+        self._retention_max_failed_gb = 0
         from collections import deque as _deque
         self._pack_series = _deque(maxlen=64)  # (ts, size_bytes)
 
@@ -317,12 +315,8 @@ class Orchestrator:
                         )
                         if container:
                             # Use a short timeout to avoid the 10s default wait on PID1 SIGTERM
-                            # Allow env override ORCHESTRATOR_SHUTDOWN_STOP_TIMEOUT_S (default 1)
-                            try:
-                                import os as _os
-                                tmo = int(_os.environ.get("ORCHESTRATOR_SHUTDOWN_STOP_TIMEOUT_S", "1"))
-                            except Exception:
-                                tmo = 1
+                            # Fixed fast stop timeout
+                            tmo = 1
                             await docker_mgr.stop_container(container, timeout=max(0, tmo))
                             logger.info(
                                 f"Stopped container {instance_info.container_name}"
@@ -444,6 +438,22 @@ class Orchestrator:
 
             logger.info(f"Found strategy class for {strategy_name}")
             strategy_class = AVAILABLE_STRATEGIES[strategy_name]
+
+            # Preflight plugin capability gating per spec
+            try:
+                from ..instance_runner.plugins import AVAILABLE_PLUGINS as _APLUGS
+                plugin = _APLUGS.get("claude-code")()
+                # Strategies that rely on resume/session continuity must require supports_resume
+                requires_resume = strategy_name in ("iterative",)
+                if requires_resume and not getattr(plugin.capabilities, "supports_resume", False):
+                    raise ValidationError(
+                        f"Strategy '{strategy_name}' requires resume capability but selected plugin does not support it"
+                    )
+            except Exception as _e:
+                # If validation throws, surface as a clean orchestrator error
+                if isinstance(_e, ValidationError):
+                    raise
+                logger.debug(f"Capability gating check skipped/failed: {_e}")
 
             # Execute multiple strategy runs in parallel
             logger.info(f"Runs requested: {runs}")
@@ -862,7 +872,7 @@ class Orchestrator:
                                 # Final message truncation per spec (backfill path)
                                 import os as _os
                                 try:
-                                    max_bytes = int(_os.environ.get("ORCHESTRATOR_EVENTS__MAX_FINAL_MESSAGE_BYTES", "65536"))
+                                    max_bytes = 65536
                                 except Exception:
                                     max_bytes = 65536
                                 full_msg = (getattr(info.result, "final_message", None) or "")
@@ -1362,6 +1372,8 @@ class Orchestrator:
                 max_turns=(info.metadata or {}).get("max_turns"),
                 reuse_container=bool((info.metadata or {}).get("reuse_container", True)),
                 model_mapping_checksum=self._models_checksum,
+                allow_overwrite_protected_refs=self.allow_overwrite_protected_refs,
+                allow_global_session_volume=self.allow_global_session_volume,
             )
             logger.info(f"_execute_instance: run_instance finished iid={instance_id} success={result.success} status={getattr(result,'status',None)}")
 
@@ -1407,7 +1419,7 @@ class Orchestrator:
                     # Final message truncation per spec
                     import os as _os
                     try:
-                        max_bytes = int(_os.environ.get("ORCHESTRATOR_EVENTS__MAX_FINAL_MESSAGE_BYTES", "65536"))
+                        max_bytes = 65536
                     except Exception:
                         max_bytes = 65536
                     full_msg = result.final_message or ""
@@ -1791,7 +1803,7 @@ class Orchestrator:
                         # Final message truncation per spec (resume-run backfill)
                         import os as _os
                         try:
-                            max_bytes = int(_os.environ.get("ORCHESTRATOR_EVENTS__MAX_FINAL_MESSAGE_BYTES", "65536"))
+                            max_bytes = 65536
                         except Exception:
                             max_bytes = 65536
                         full_msg = (getattr(res, "final_message", None) or "")
@@ -2122,6 +2134,8 @@ class Orchestrator:
                 import_policy=(instance_info.metadata or {}).get("import_policy", "auto"),
                 import_conflict_policy=(instance_info.metadata or {}).get("import_conflict_policy", "fail"),
                 skip_empty_import=bool((instance_info.metadata or {}).get("skip_empty_import", True)),
+                allow_overwrite_protected_refs=self.allow_overwrite_protected_refs,
+                allow_global_session_volume=self.allow_global_session_volume,
             )
 
             # Update state

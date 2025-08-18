@@ -110,11 +110,17 @@ Examples:
         try:
             # If events file not provided but run-id is, infer path
             if not args.events_file and args.run_id:
-                # Respect ORCHESTRATOR_LOGS_DIR if set
-                import os
-                logs_base = os.environ.get("ORCHESTRATOR_LOGS_DIR", "logs")
-                inferred = Path(logs_base) / args.run_id / "events.jsonl"
+                inferred = Path("logs") / args.run_id / "events.jsonl"
                 args.events_file = inferred
+            # If neither events-file nor run-id provided, show helpful message
+            if not args.events_file and not args.run_id:
+                self.console.print(
+                    "[red]Missing input.[/red] Provide either --events-file <path> or --run-id <id>.\n"
+                    "Examples:\n"
+                    "  orchestrator-tui --run-id run_20250114_123456\n"
+                    "  orchestrator-tui --events-file logs/run_20250114_123456/events.jsonl"
+                )
+                return 2
             # Read from events file
             return await self._run_offline(args)
         except KeyboardInterrupt:
@@ -139,42 +145,41 @@ Examples:
             Exit code
         """
         events_file = args.events_file
-
-        # Check file exists
-        if not events_file.exists():
-            self.console.print(f"[red]Events file not found: {events_file}[/red]")
-            return 1
+        if events_file is None:
+            self.console.print("[red]No events file resolved. Use --events-file or --run-id.[/red]")
+            return 2
 
         # Run appropriate output mode
         if self.output_mode == "tui":
             # Create and run TUI display
-            import os
             refresh_rate = 0.1
-            try:
-                rr = os.environ.get("ORCHESTRATOR_TUI__REFRESH_RATE")
-                if rr is not None:
-                    refresh_rate = float(rr) / 100.0 if float(rr) > 1 else float(rr)
-            except Exception:
-                pass
             display = TUIDisplay(
                 console=self.console, refresh_rate=refresh_rate, state_poll_interval=3.0
             )
             # Apply CLI/env forced display mode via display helper
             display.set_forced_display_mode(self.display_mode)
 
-            # Run TUI with file
+            # Run TUI with file (waits for file creation internally)
             await display.run(None, events_file, args.from_offset)
 
         elif self.output_mode == "streaming":
-            # Stream events as text
+            # Stream events as text (waits for file creation internally)
             await self._stream_events_file(events_file, args)
 
         elif self.output_mode == "json":
             # Output events as JSON
+            # For JSON mode, require the file to already exist
+            if not events_file.exists():
+                self.console.print(f"[red]Events file not found: {events_file}[/red]")
+                return 1
             await self._json_events_file(events_file, args)
 
         elif self.output_mode == "quiet":
             # Minimal output
+            # For quiet mode, require the file to already exist
+            if not events_file.exists():
+                self.console.print(f"[red]Events file not found: {events_file}[/red]")
+                return 1
             await self._quiet_mode_file(events_file, args)
 
         return 0

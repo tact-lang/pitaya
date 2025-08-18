@@ -52,6 +52,8 @@ async def run_instance(
     network_egress: Optional[str] = None,
     max_turns: Optional[int] = None,
     model_mapping_checksum: Optional[str] = None,
+    allow_overwrite_protected_refs: bool = False,
+    allow_global_session_volume: bool = False,
 ) -> InstanceResult:
     """
     Execute a single AI coding instance in an isolated environment.
@@ -127,6 +129,8 @@ async def run_instance(
         network_egress=network_egress,
         max_turns=max_turns,
         model_mapping_checksum=model_mapping_checksum,
+        allow_overwrite_protected_refs=allow_overwrite_protected_refs,
+        allow_global_session_volume=allow_global_session_volume,
     )
 
 

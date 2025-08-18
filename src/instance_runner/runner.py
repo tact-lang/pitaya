@@ -101,6 +101,8 @@ async def run_instance(
     network_egress: Optional[str] = None,
     max_turns: Optional[int] = None,
     model_mapping_checksum: Optional[str] = None,
+    allow_overwrite_protected_refs: bool = False,
+    allow_global_session_volume: bool = False,
 ) -> InstanceResult:
     """
     Execute a single AI coding instance in Docker.
@@ -241,6 +243,8 @@ async def run_instance(
             task_key=task_key,
             network_egress=network_egress,
             max_turns=max_turns,
+            allow_overwrite_protected_refs=allow_overwrite_protected_refs,
+            allow_global_session_volume=allow_global_session_volume,
         )
 
         # Success or non-retryable error
@@ -344,6 +348,8 @@ async def _run_instance_attempt(
     task_key: Optional[str] = None,
     network_egress: Optional[str] = None,
     max_turns: Optional[int] = None,
+    allow_overwrite_protected_refs: bool = False,
+    allow_global_session_volume: bool = False,
 ) -> InstanceResult:
     """Single attempt at running an instance (internal helper for retry logic)."""
     start_time = time.time()
@@ -519,6 +525,7 @@ async def _run_instance_attempt(
                         task_key=task_key,
                         plugin_name=getattr(plugin, "name", "claude-code"),
                         resolved_model_id=resolved_model_id,
+                        allow_global_session_volume=allow_global_session_volume,
                     ),
                     timeout=60,
                 )
@@ -621,6 +628,7 @@ async def _run_instance_attempt(
                 task_key=task_key,
                 run_id=run_id,
                 strategy_execution_id=strategy_execution_id,
+                allow_overwrite_protected_refs=allow_overwrite_protected_refs,
             )
 
             has_changes = str(import_info.get("has_changes", "false")).lower() == "true"

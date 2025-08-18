@@ -215,6 +215,7 @@ class DockerManager:
         *,
         plugin_name: Optional[str] = None,
         resolved_model_id: Optional[str] = None,
+        allow_global_session_volume: bool = False,
     ) -> Container:
         """
         Create a Docker container for instance execution.
@@ -308,12 +309,6 @@ class DockerManager:
 
                     # Determine if we must enforce RO /workspace (spec: review tasks)
                     require_ro = (str(import_policy).lower() == "never")
-                    try:
-                        import os as _os
-                        review_mode_env = _os.environ.get("ORCHESTRATOR_RUNNER__REVIEW_WORKSPACE_MODE", "ro").lower()
-                        require_ro = require_ro and (review_mode_env == "ro")
-                    except Exception:
-                        pass
 
                     def _workspace_is_ro(cont) -> bool:
                         try:
@@ -401,11 +396,9 @@ class DockerManager:
             # Named volume for Claude home as per spec (GHASH)
             import hashlib, json as _json
             eff_sgk = session_group_key or (task_key or instance_id or container_name or "")
-            # Scope: default run; allow global only with explicit env opt-in
-            import os as _os
-            scope = (_os.environ.get("ORCHESTRATOR_RUNNER__SESSION_VOLUME_SCOPE") or "run").lower()
-            allow_global = (_os.environ.get("ORCHESTRATOR_ALLOW_GLOBAL_SESSION_VOLUME") or "0").lower() in ("1","true","yes")
-            if scope == "global" and allow_global:
+            # Scope: default run; allow global only when explicitly enabled via param
+            allow_global = bool(allow_global_session_volume)
+            if allow_global:
                 payload = {"session_group_key": eff_sgk, "plugin": (plugin_name or ""), "model": (resolved_model_id or "")}
                 enc = _json.dumps(payload, separators=(",", ":"), sort_keys=True)
                 ghash = hashlib.sha256(enc.encode("utf-8", errors="ignore")).hexdigest()[:8]
@@ -427,8 +420,8 @@ class DockerManager:
             if platform.system() == "Linux" and os.path.exists("/sys/fs/selinux"):
                 selinux_mode = "z"
 
-            # Review workspace RO mode setting via env (default rw)
-            review_mode = os.environ.get("ORCHESTRATOR_RUNNER__REVIEW_WORKSPACE_MODE", "ro").lower()
+            # Review workspace RO mode: fixed default 'ro'
+            review_mode = "ro"
 
 
             # Decide workspace mount strategy
@@ -486,8 +479,8 @@ class DockerManager:
                 },
                 # Use explicit Mounts; avoid old volumes/binds ambiguity
                 "mounts": mounts,
-                # tmpfs mount for /tmp (configurable)
-                "tmpfs": {"/tmp": f"rw,size={int(os.environ.get('ORCHESTRATOR_RUNNER__TMPFS_SIZE_MB', '512'))}m"},
+                # tmpfs mount for /tmp (fixed sensible default)
+                "tmpfs": {"/tmp": "rw,size=512m"},
                 "working_dir": "/workspace",
                 "read_only": True,  # Lock down filesystem except mounts
                 "user": "node",  # Run as non-root node user
@@ -518,33 +511,34 @@ class DockerManager:
             except Exception:
                 pass
             try:
-                # Docker SDK expects strings like 'no-new-privileges:true' and optional 'seccomp=<value>'
-                # Do NOT set seccomp explicitly by default; Docker applies default seccomp automatically.
-                # Allow override via ORCHESTRATOR_RUNNER__SECCOMP (e.g., 'unconfined' or absolute path to JSON profile).
+                # Docker default seccomp + no-new-privileges
                 secopts = set(config.get("security_opt") or [])
                 secopts.add("no-new-privileges:true")
-                seccomp_override = os.environ.get("ORCHESTRATOR_RUNNER__SECCOMP")
-                if seccomp_override:
-                    secopts.add(f"seccomp={seccomp_override}")
                 config["security_opt"] = list(secopts)
             except Exception:
                 pass
             try:
-                config["pids_limit"] = int(os.environ.get("ORCHESTRATOR_RUNNER__PIDS_LIMIT", "512"))
+                config["pids_limit"] = 512
             except Exception:
                 config["pids_limit"] = 512
             try:
-                nofile_soft = int(os.environ.get("ORCHESTRATOR_RUNNER__ULIMIT_NOFILE_SOFT", "4096"))
-                nofile_hard = int(os.environ.get("ORCHESTRATOR_RUNNER__ULIMIT_NOFILE_HARD", "4096"))
-                config["ulimits"] = (config.get("ulimits") or []) + [Ulimit(name="nofile", soft=nofile_soft, hard=nofile_hard)]
+                config["ulimits"] = (config.get("ulimits") or []) + [Ulimit(name="nofile", soft=4096, hard=4096)]
             except Exception:
                 pass
 
             # Enforce network egress policy
             try:
-                if str(network_egress).lower() == "offline":
-                    # Disable networking for the container
-                    config["network_disabled"] = True
+                eg = str(network_egress).lower()
+                if eg == "offline":
+                    # Align with spec literal: use network_mode='none'
+                    # Ensure network_disabled is not set to avoid conflicts
+                    if "network_disabled" in config:
+                        try:
+                            del config["network_disabled"]
+                        except Exception:
+                            pass
+                    config["network_mode"] = "none"
+                # For proxy/online we rely on default bridge; proxy envs handled below
             except Exception:
                 pass
 
@@ -946,15 +940,8 @@ class DockerManager:
                                         pass
 
                         except json.JSONDecodeError:
-                            # Some lines might not be JSON (e.g., error messages)
-                            # Avoid spamming synchronous debug logs on the event loop.
-                            # Enable via ORCHESTRATOR_RUNNER__VERBOSE_PARSER=1 if needed.
-                            try:
-                                import os as _os
-                                if (_os.environ.get("ORCHESTRATOR_RUNNER__VERBOSE_PARSER") or "").lower() in ("1","true","yes"):
-                                    logger.debug(f"Non-JSON output: {line}")
-                            except Exception:
-                                pass
+                            # Some lines might not be JSON (e.g., error messages). Ignore quietly.
+                            pass
 
             # Run parser with timeout
             try:
@@ -989,17 +976,12 @@ class DockerManager:
 
         Args:
             container: Container to stop
-            timeout: Seconds to wait for graceful shutdown before force kill. If None, uses
-                     ORCHESTRATOR_RUNNER__STOP_TIMEOUT_S or defaults to 1s for fast shutdown.
+            timeout: Seconds to wait for graceful shutdown before force kill. If None, uses 1s default.
         """
         try:
             loop = asyncio.get_event_loop()
             # Docker's stop() sends SIGTERM, waits timeout seconds, then SIGKILL
-            import os as _os
-            try:
-                eff_timeout = int(timeout) if timeout is not None else int(_os.environ.get("ORCHESTRATOR_RUNNER__STOP_TIMEOUT_S", "1"))
-            except Exception:
-                eff_timeout = 1
+            eff_timeout = int(timeout) if timeout is not None else 1
             await loop.run_in_executor(None, lambda: container.stop(timeout=max(0, eff_timeout)))
             logger.info(f"Stopped container {container.name} gracefully")
         except NotFound:
@@ -1236,3 +1218,78 @@ class DockerManager:
             return self.client.containers.get(name)
         except Exception:
             return None
+
+    async def cleanup_unused_volumes(
+        self,
+        *,
+        older_than_hours: float = 24.0,
+        dry_run: bool = False,
+    ) -> dict:
+        """
+        Remove unreferenced session volumes matching orchestrator patterns.
+
+        - Candidates: volumes with names starting with 'orc_home_'
+        - Skip volumes referenced by any container
+        - Respect age threshold via volume CreatedAt
+
+        Returns a dict with keys: {candidates, in_use, too_young, removed, errors}
+        """
+        out = {"candidates": [], "in_use": [], "too_young": [], "removed": [], "errors": []}
+        try:
+            loop = asyncio.get_event_loop()
+            # List all volumes
+            vols = await loop.run_in_executor(None, lambda: self.client.volumes.list())
+            # Build set of referenced volume names
+            try:
+                containers = await loop.run_in_executor(
+                    None, lambda: self.client.containers.list(all=True)
+                )
+                referenced: set[str] = set()
+                for c in containers:
+                    try:
+                        for m in (c.attrs or {}).get("Mounts", []) or []:
+                            if (m.get("Type") == "volume") and m.get("Name"):
+                                referenced.add(str(m.get("Name")))
+                    except Exception:
+                        continue
+            except Exception:
+                referenced = set()
+
+            from datetime import datetime, timezone
+            def _parse_created_at(v) -> datetime:
+                try:
+                    ca = (v.attrs or {}).get("CreatedAt") or (v.attrs or {}).get("Created")
+                    if not ca:
+                        return datetime.fromtimestamp(0, tz=timezone.utc)
+                    s = str(ca).replace("Z", "+00:00")
+                    return datetime.fromisoformat(s)
+                except Exception:
+                    return datetime.fromtimestamp(0, tz=timezone.utc)
+
+            now = datetime.now(timezone.utc)
+            for vol in vols:
+                name = getattr(vol, "name", "") or getattr(vol, "Name", "")
+                if not name or not name.startswith("orc_home_"):
+                    continue
+                out["candidates"].append(name)
+                if name in referenced:
+                    out["in_use"].append(name)
+                    continue
+                created = _parse_created_at(vol)
+                age_h = (now - created).total_seconds() / 3600.0
+                if age_h < float(older_than_hours):
+                    out["too_young"].append(name)
+                    continue
+                if dry_run:
+                    # Do not remove; report as would-remove
+                    out["removed"].append(name)
+                    continue
+                try:
+                    await loop.run_in_executor(None, lambda: vol.remove(force=True))
+                    out["removed"].append(name)
+                except Exception as e:
+                    out["errors"].append({"name": name, "error": str(e)})
+            return out
+        except Exception as e:
+            out["errors"].append({"name": "<list>", "error": str(e)})
+            return out

@@ -119,7 +119,7 @@ Examples:
         parser.add_argument(
             "--model",
             choices=_model_choices,
-            default=os.environ.get("ORCHESTRATOR_DEFAULT_MODEL", "sonnet"),
+            default="sonnet",
             help="Model alias to use (validated via models.yaml)",
         )
 
@@ -135,11 +135,7 @@ Examples:
             default="main",
             help="Base branch to work from (default: main)",
         )
-        parser.add_argument(
-            "--force-import",
-            action="store_true",
-            help="Force import of branches even if they already exist",
-        )
+        # Removed: --force-import (use strategy/config import policies instead)
 
         # Display options
         parser.add_argument(
@@ -216,6 +212,18 @@ Examples:
             metavar="RUN_ID",
             help="Remove containers and state for a specific run",
         )
+        # Volumes cleanup per spec
+        parser.add_argument(
+            "--clean-volumes",
+            action="store_true",
+            help="Remove unreferenced session volumes (orc_home_*) older than a threshold",
+        )
+        parser.add_argument(
+            "--older-than",
+            type=float,
+            default=24.0,
+            help="Age threshold in hours for --clean-volumes (default: 24)",
+        )
         parser.add_argument("--dry-run", action="store_true", help="List cleanup targets without deleting (with --clean-containers)")
         parser.add_argument("--force", action="store_true", help="Bypass prompts for cleanup")
         # Alias per spec examples
@@ -246,11 +254,7 @@ Examples:
         # Convenience alias: --json implies --no-tui --output json
         parser.add_argument("--json", action="store_true", help="Output JSON events (implies --no-tui)")
         # Working tree cleanliness behavior (spec: warn by default; enforce with flag)
-        parser.add_argument(
-            "--require-clean-wt",
-            action="store_true",
-            help="Require a clean working tree (error if dirty)",
-        )
+        # Removed: --require-clean-wt (always warn only)
         # Protected refs overwrite gate
         parser.add_argument(
             "--allow-overwrite-protected-refs",
@@ -263,12 +267,7 @@ Examples:
             choices=["conservative", "balanced", "aggressive"],
             help="Preset for per-container resources: conservative(1CPU/2GiB), balanced(2CPU/4GiB), aggressive(3CPU/6-8GiB)",
         )
-        # Back-compat alias: --allow-dirty (now the default; retained as no-op)
-        parser.add_argument(
-            "--allow-dirty",
-            action="store_true",
-            help="Deprecated (default behavior). Dirty working tree only warns.",
-        )
+        # Removed: --allow-dirty (deprecated)
         # Server extension support removed
         # Session volume scope safety switch (normative; requires explicit consent)
         parser.add_argument(
@@ -277,12 +276,9 @@ Examples:
             help="Allow global session volume scope (shares Claude session across runs)",
         )
 
-        # Diagnostics
-        parser.add_argument(
-            "--docker-smoke",
-            action="store_true",
-            help="Run a Docker create/start smoke test and exit (no auth required)",
-        )
+        # Removed: --safe-fsync (sensible defaults used)
+
+        # Removed: --docker-smoke (dev-only)
 
         return parser
 
@@ -389,10 +385,8 @@ Examples:
             "model", "sonnet"
         )
 
-        # Add force_import if specified
-        if hasattr(args, "force_import") and args.force_import:
-            config["force_import"] = True
-
+        # --force-import removed; rely on import_conflict_policy in config/strategy
+        
         # Parse -S key=value parameters
         if hasattr(args, "strategy_params") and args.strategy_params:
             for param in args.strategy_params:
@@ -496,17 +490,13 @@ Examples:
             self.console.print(f"[red]Error checking git repository: {e}[/red]")
             return False
 
-        # 3b. Check working tree cleanliness (warn by default; enforce with --require-clean-wt)
+        # 3b. Check working tree cleanliness (warn only)
         try:
             import subprocess
             dirty_cmd = ["git", "-C", str(repo_path), "status", "--porcelain"]
             result = subprocess.run(dirty_cmd, capture_output=True, text=True)
             if result.returncode == 0 and result.stdout.strip():
-                if getattr(args, "require_clean_wt", False):
-                    self.console.print("[red]Working tree has uncommitted changes. Use --require-clean-wt only on clean trees.[/red]")
-                    return False
-                else:
-                    self.console.print("[yellow]Warning: Working tree has uncommitted changes. Proceeding is safe (imports touch refs only). Use --require-clean-wt to enforce cleanliness.[/yellow]")
+                self.console.print("[yellow]Warning: Working tree has uncommitted changes. Proceeding is safe (imports touch refs only).[/yellow]")
         except (subprocess.SubprocessError, OSError) as e:
             self.console.print(f"[red]Error checking working tree: {e}[/red]")
             return False
@@ -662,6 +652,44 @@ Examples:
             return 1
         finally:
             await orchestrator.shutdown()
+
+    async def run_clean_volumes(self, args: argparse.Namespace) -> int:
+        """Clean up unreferenced session volumes (orc_home_*) per age threshold."""
+        self.console.print("[yellow]Scanning session volumes (orc_home_*)...[/yellow]")
+        try:
+            from ..instance_runner.docker_manager import DockerManager
+            dm = DockerManager()
+            await dm.initialize()
+            report = await dm.cleanup_unused_volumes(
+                older_than_hours=float(getattr(args, "older_than", 24.0) or 24.0),
+                dry_run=bool(getattr(args, "dry_run", False)),
+            )
+            dm.close()
+            # Summarize
+            cand = report.get("candidates", [])
+            in_use = report.get("in_use", [])
+            too_young = report.get("too_young", [])
+            removed = report.get("removed", [])
+            errors = report.get("errors", [])
+            if args.dry_run:
+                self.console.print(f"[blue]Dry-run[/blue]: would remove {len(removed)} volume(s):")
+                for n in removed:
+                    self.console.print(f"  - {n}")
+            else:
+                self.console.print(f"[green]Removed {len(removed)} volume(s).[/green]")
+            if in_use:
+                self.console.print(f"[dim]In use (skipped): {len(in_use)}[/dim]")
+            if too_young:
+                self.console.print(f"[dim]Too young (skipped): {len(too_young)}[/dim]")
+            if errors:
+                self.console.print(f"[red]Errors: {len(errors)}[/red]")
+                for e in errors[:5]:
+                    self.console.print(f"  - {e}")
+            self.console.print(f"Total candidates: {len(cand)}")
+            return 0
+        except Exception as e:
+            self.console.print(f"[red]Volume cleanup failed: {e}[/red]")
+            return 1
 
     async def run_list_runs(self, args: argparse.Namespace) -> int:
         """List all previous runs."""
@@ -1242,8 +1270,7 @@ Examples:
             return 1
 
         # Fast path: diagnostics smoke test
-        if getattr(args, "docker_smoke", False):
-            return await self._run_docker_smoke(args)
+        # Removed: docker smoke test path
 
         # Show platform recommendations if any
         recommendations = get_platform_recommendations()
@@ -1254,6 +1281,8 @@ Examples:
         # Handle cleanup mode
         if args.clean_containers:
             return await self.run_cleanup(args)
+        if getattr(args, "clean_volumes", False):
+            return await self.run_clean_volumes(args)
 
         # Handle list-runs mode
         if args.list_runs:
@@ -1322,9 +1351,11 @@ Examples:
             cli_config, env_config, dotenv_config, config or {}, defaults
         )
 
+        # Removed: --safe-fsync propagation (use default interval batching)
+
         # Configure container limits from merged config; apply --parallel preset if provided
-        if getattr(args, "allow_overwrite_protected_refs", False):
-            os.environ["ORCHESTRATOR_ALLOW_OVERWRITE_PROTECTED_REFS"] = "1"
+        # Store allow flags for constructor
+        allow_overwrite = bool(getattr(args, "allow_overwrite_protected_refs", False))
 
         # Apply parallel preset before building limits
         preset = getattr(args, "parallel", None)
@@ -1392,8 +1423,7 @@ Examples:
             self.console.print("[dim]Configuration loaded from:[/dim]")
             if cli_config:
                 self.console.print("  - Command line arguments")
-            if env_config:
-                self.console.print("  - ORCHESTRATOR_* environment variables")
+            # No orchestrator-specific environment variables are used
             if dotenv_config:
                 self.console.print("  - .env file")
             if config:
@@ -1403,9 +1433,7 @@ Examples:
             self.console.print("  - Built-in defaults")
 
         # Respect global session volume consent by setting env for runner
-        if getattr(args, "allow_global_session_volume", False):
-            os.environ["ORCHESTRATOR_ALLOW_GLOBAL_SESSION_VOLUME"] = "1"
-            os.environ.setdefault("ORCHESTRATOR_RUNNER__SESSION_VOLUME_SCOPE", "global")
+        allow_global_session = bool(getattr(args, "allow_global_session_volume", False))
 
         # Resolve 'auto' for max_parallel per spec
         if isinstance(max_parallel, str) and max_parallel.lower() == "auto":
@@ -1439,6 +1467,8 @@ Examples:
             runner_timeout_seconds=int(full_config.get("runner", {}).get("timeout", 3600)),
             default_network_egress=str(full_config.get("runner", {}).get("network_egress", "online")),
             branch_namespace=str(full_config.get("orchestration", {}).get("branch_namespace", "flat")),
+            allow_overwrite_protected_refs=allow_overwrite,
+            allow_global_session_volume=allow_global_session,
         )
 
         # Initialize orchestrator
@@ -1454,93 +1484,7 @@ Examples:
             # TUI mode
             return await self._run_with_tui(args, run_id, full_config)
 
-    async def _run_docker_smoke(self, args: argparse.Namespace) -> int:
-        """Run a minimal Docker create/start test mirroring runner settings."""
-        import os
-        import asyncio
-        from docker import from_env
-        from docker.errors import ImageNotFound, DockerException
-        from docker.types import Mount
-
-        # Choose workspace path: use repo or a smoke dir under ORCHESTRATOR_WORKSPACE_BASE
-        base = os.path.expanduser(os.environ.get("ORCHESTRATOR_WORKSPACE_BASE", "~/.orchestrator/workspaces"))
-        ws = os.path.join(base, "smoke")
-        os.makedirs(ws, exist_ok=True)
-
-        image = "claude-code:latest"
-        name = "orchestrator_smoke_test"
-        self.console.print(f"[blue]Docker smoke:[/blue] image={image} workspace={ws}")
-
-        try:
-            client = from_env(timeout=20)
-            # Ensure image exists (local only)
-            try:
-                client.images.get(image)
-            except ImageNotFound:
-                self.console.print(f"[red]Image not found:[/red] {image}. Build with: docker build -t {image} .")
-                return 1
-
-            # Clean any stale container
-            try:
-                client.containers.get(name).remove(force=True)
-            except Exception:
-                pass
-
-            mounts = [
-                Mount(target="/workspace", source=ws, type="bind", read_only=False),
-                Mount(target="/home/node", source="orc_home_smoke_cli", type="volume"),
-            ]
-
-            self.console.print("[dim]Creating container...[/dim]")
-            c = client.containers.create(
-                image=image,
-                name=name,
-                command="sleep infinity",
-                detach=True,
-                labels={"orchestrator": "true"},
-                mounts=mounts,
-                tmpfs={"/tmp": "rw,size=256m"},
-                working_dir="/workspace",
-                read_only=True,
-                user="node",
-                environment={"PYTHONUNBUFFERED": "1"},
-                mem_limit="4g",
-                memswap_limit="4g",
-                nano_cpus=2_000_000_000,
-                auto_remove=False,
-            )
-
-            self.console.print("[dim]Starting container...[/dim]")
-            c.start()
-            await asyncio.sleep(0.5)
-            c.reload()
-            if c.status != "running":
-                self.console.print(f"[red]Container not running:[/red] status={c.status}")
-                try:
-                    logs = c.logs(tail=50).decode("utf-8", errors="replace")
-                    if logs:
-                        self.console.print("[dim]Container logs:[/dim]\n" + logs)
-                except Exception:
-                    pass
-                return 1
-
-            # Quick exec sanity: list workspace
-            exec_id = client.api.exec_create(c.id, "sh -lc 'echo smoke && ls -la'", stdout=True, stderr=True)
-            out = client.api.exec_start(exec_id["Id"], stream=False)
-            self.console.print("[green]Smoke success:[/green] container running; exec output:\n" + out.decode("utf-8", errors="replace"))
-            return 0
-        except DockerException as e:
-            self.console.print(f"[red]Docker error during smoke:[/red] {e}")
-            return 1
-        finally:
-            try:
-                client = from_env(timeout=10)
-                try:
-                    client.containers.get(name).remove(force=True)
-                except Exception:
-                    pass
-            except Exception:
-                pass
+    # Docker smoke test removed (minimal CLI)
 
     async def _run_headless(
         self, args: argparse.Namespace, run_id: str, full_config: Dict[str, Any]

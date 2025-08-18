@@ -87,21 +87,16 @@ class GitOperations:
             Path to the prepared workspace directory
         """
         # Choose a workspace base path that Docker Desktop can mount reliably.
-        # Prefer user-configured base via env, then a per-user directory under $HOME on macOS,
-        # and fall back to system temp on other platforms.
-        custom_base = os.environ.get("ORCHESTRATOR_WORKSPACE_BASE")
-        if custom_base:
-            base_dir = Path(custom_base)
-        else:
-            try:
-                import platform
-                if platform.system() == "Darwin":
-                    # macOS: /Users is shared by default with Docker Desktop
-                    base_dir = Path.home() / ".orchestrator" / "workspaces"
-                else:
-                    base_dir = get_temp_dir()
-            except Exception:
+        # Per-user directory under $HOME on macOS; fall back to system temp elsewhere.
+        try:
+            import platform
+            if platform.system() == "Darwin":
+                # macOS: /Users is shared by default with Docker Desktop
+                base_dir = Path.home() / ".orchestrator" / "workspaces"
+            else:
                 base_dir = get_temp_dir()
+        except Exception:
+            base_dir = get_temp_dir()
 
         if run_id and container_name:
             # Derive a stable workspace path per run + strategy + durable key
@@ -272,6 +267,7 @@ class GitOperations:
         task_key: Optional[str] = None,
         run_id: Optional[str] = None,
         strategy_execution_id: Optional[str] = None,
+        allow_overwrite_protected_refs: bool = False,
     ) -> Dict[str, Optional[str]]:
         """
         Import work from isolated workspace back to host repository.
@@ -333,12 +329,8 @@ class GitOperations:
             # Try non-blocking first, then wait with heartbeat
             start_wait = time.monotonic()
             last_log = 0.0
-            timeout_env = os.environ.get("ORCHESTRATOR_IMPORT_LOCK_TIMEOUT_SEC")
+            # No env-based timeout; wait indefinitely for repo lock
             max_wait = None
-            try:
-                max_wait = float(timeout_env) if timeout_env else None
-            except Exception:
-                max_wait = None
 
             if sys.platform.startswith("win"):
                 import msvcrt
@@ -405,10 +397,9 @@ class GitOperations:
             branch_exists = branch_exists_result[0] == 0
 
             # Disallow creating/updating protected refs unless explicitly allowed
-            allow_env = os.environ.get("ORCHESTRATOR_ALLOW_OVERWRITE_PROTECTED_REFS", "0").lower() in ("1", "true", "yes")
-            if _is_protected_ref(branch_name) and not allow_env:
+            if _is_protected_ref(branch_name) and not allow_overwrite_protected_refs:
                 raise GitError(
-                    f"Refusing to update protected ref '{branch_name}'. Set ORCHESTRATOR_ALLOW_OVERWRITE_PROTECTED_REFS=1 to allow."
+                    f"Refusing to update protected ref '{branch_name}'. Use --allow-overwrite-protected-refs to allow."
                 )
 
             # Read preserved base commit
@@ -523,11 +514,10 @@ class GitOperations:
                 if import_conflict_policy == "fail":
                     raise GitError(f"Branch {branch_name} already exists")
                 elif import_conflict_policy == "overwrite":
-                    # Only allow forced updates for non-protected refs (opt-in via env)
-                    allow_env = os.environ.get("ORCHESTRATOR_ALLOW_OVERWRITE_PROTECTED_REFS", "0").lower() in ("1", "true", "yes")
-                    if _is_protected_ref(target_branch) and not allow_env:
+                    # Only allow forced updates for non-protected refs (explicit opt-in)
+                    if _is_protected_ref(target_branch) and not allow_overwrite_protected_refs:
                         raise GitError(
-                            f"Refusing to overwrite protected ref '{target_branch}'. Set ORCHESTRATOR_ALLOW_OVERWRITE_PROTECTED_REFS=1 to allow."
+                            f"Refusing to overwrite protected ref '{target_branch}'. Use --allow-overwrite-protected-refs to allow."
                         )
                 elif import_conflict_policy == "suffix":
                     # Find next available suffix

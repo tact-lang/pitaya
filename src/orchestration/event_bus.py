@@ -79,13 +79,9 @@ class EventBus:
         # Buffered writer state for runner.jsonl to avoid event-loop blocking
         self._runner_queue: deque[bytes] = deque()
         self._runner_writer_task: Optional[asyncio.Task] = None
-        try:
-            import os as _os
-            self._runner_flush_interval_ms = max(2, int(_os.environ.get("ORCHESTRATOR_EVENTS__RUNNER_FLUSH_INTERVAL_MS", "10")))
-            self._runner_flush_max_batch = max(1, int(_os.environ.get("ORCHESTRATOR_EVENTS__RUNNER_FLUSH_MAX_BATCH", "512")))
-        except Exception:
-            self._runner_flush_interval_ms = 10
-            self._runner_flush_max_batch = 512
+        # Minimal defaults (no env overrides)
+        self._runner_flush_interval_ms = 10
+        self._runner_flush_max_batch = 512
         self._current_offset = 0
         self._lock_file: Optional[TextIO] = None
         self._run_id = run_id
@@ -95,21 +91,10 @@ class EventBus:
         # File watching support
         self._file_watchers: List[asyncio.Task] = []
 
-        # Flush policy (default interval-based per spec)
-        # Env overrides:
-        #   ORCHESTRATOR_EVENTS__FLUSH_POLICY=interval|per_event
-        #   ORCHESTRATOR_EVENTS__FLUSH_INTERVAL_MS
-        #   ORCHESTRATOR_EVENTS__FLUSH_MAX_BATCH (interval mode batch size)
-        import os as _os
-        self._flush_policy = (_os.environ.get("ORCHESTRATOR_EVENTS__FLUSH_POLICY") or "interval").lower()
-        try:
-            self._flush_interval_ms = max(5, int(_os.environ.get("ORCHESTRATOR_EVENTS__FLUSH_INTERVAL_MS", "50")))
-        except Exception:
-            self._flush_interval_ms = 50
-        try:
-            self._flush_max_batch = max(1, int(_os.environ.get("ORCHESTRATOR_EVENTS__FLUSH_MAX_BATCH", "256")))
-        except Exception:
-            self._flush_max_batch = 256
+        # Flush policy (fixed sensible defaults)
+        self._flush_policy = "interval"
+        self._flush_interval_ms = 50
+        self._flush_max_batch = 256
         self._pending_canonical: List[Tuple[Dict[str, Any], Dict[str, Any]]] = []  # (envelope record without start_offset/payload, payload)
         self._pending_lock = asyncio.Lock()
         self._flusher_task: Optional[asyncio.Task] = None
@@ -262,16 +247,14 @@ class EventBus:
         # Notify subscribers
         self._notify_subscribers(event)
 
-        # Optional verbose debug logging for troubleshooting; disabled by default to
-        # avoid event-loop contention due to heavy logging under high event rates.
-        try:
-            import os as _os
-            if (_os.environ.get("ORCHESTRATOR_EVENTS__VERBOSE_DEBUG") or "").lower() in ("1","true","yes"):
+        # Minimal debug logging only when logger configured for DEBUG externally
+        if logger.isEnabledFor(logging.DEBUG):
+            try:
                 keys = ",".join(sorted(list(data.keys()))) if isinstance(data, dict) else "-"
                 iid = instance_id or event.get("instance_id") or "-"
                 logger.debug(f"Emitted event: {event_type} (iid={iid}, keys={keys})")
-        except Exception:
-            pass
+            except Exception:
+                pass
 
     def _utc_ts_ms_z(self) -> str:
         """Return UTC ISO-8601 timestamp with milliseconds and trailing Z."""
@@ -345,14 +328,10 @@ class EventBus:
         }
         self.events.append(mirror)
         self._notify_subscribers(mirror)
-        try:
-            import os as _os
-            if (_os.environ.get("ORCHESTRATOR_EVENTS__VERBOSE_DEBUG") or "").lower() in ("1","true","yes"):
-                logger.debug(
-                    f"canonical.emit: type={type} key={key or '-'} sid={strategy_execution_id or '-'} ts={ts}"
-                )
-        except Exception:
-            pass
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug(
+                f"canonical.emit: type={type} key={key or '-'} sid={strategy_execution_id or '-'} ts={ts}"
+            )
 
     def _sanitize(self, obj: Any) -> Any:
         """Redact secrets recursively: field-name redaction + pattern sweep."""
@@ -396,14 +375,10 @@ class EventBus:
             self._persist_file.flush()
             os.fsync(self._persist_file.fileno())
             self._current_offset += len(line)
-            try:
-                import os as _os
-                if (_os.environ.get("ORCHESTRATOR_EVENTS__VERBOSE_DEBUG") or "").lower() in ("1","true","yes"):
-                    logger.debug(
-                        f"canonical.persist: type={record.get('type')} key={record.get('key','-')} start={start_offset} bytes={len(line)}"
-                    )
-            except Exception:
-                pass
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug(
+                    f"canonical.persist: type={record.get('type')} key={record.get('key','-')} start={start_offset} bytes={len(line)}"
+                )
         except Exception as e:
             logger.error(f"Failed to persist canonical event: {e}")
 
@@ -488,14 +463,10 @@ class EventBus:
             os.fsync(self._persist_file.fileno())
             # Advance current offset
             self._current_offset = offset
-            try:
-                import os as _os
-                if (_os.environ.get("ORCHESTRATOR_EVENTS__VERBOSE_DEBUG") or "").lower() in ("1","true","yes"):
-                    logger.debug(
-                        f"canonical.persist.batch: count={len(lines)} start={base} bytes={sum(len(l) for l in lines)}"
-                    )
-            except Exception:
-                pass
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug(
+                    f"canonical.persist.batch: count={len(lines)} start={base} bytes={sum(len(l) for l in lines)}"
+                )
         except Exception as e:
             logger.error(f"Failed to persist canonical batch: {e}")
 

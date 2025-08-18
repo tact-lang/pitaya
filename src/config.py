@@ -1,8 +1,8 @@
 """
 Configuration management for the orchestrator.
 
-Handles configuration precedence: CLI > ENV > .env > orchestrator.yaml > defaults
-Supports ORCHESTRATOR_* environment variables for all settings.
+Configuration precedence: CLI > .env (auth only) > orchestrator.yaml > defaults.
+No orchestrator-specific environment variables are used.
 """
 
 import os
@@ -12,41 +12,8 @@ from pathlib import Path
 
 
 def get_env_value(key: str, default: Any = None) -> Any:
-    """
-    Get value from ORCHESTRATOR_* environment variable with type conversion.
-
-    Environment variable naming convention:
-    - Nested keys use double underscores: orchestration__max_parallel_instances
-    - Boolean values: 'true', 'yes', '1' = True; 'false', 'no', '0' = False
-    - Numbers are automatically converted to int or float
-    """
-    env_key = f"ORCHESTRATOR_{key.upper()}"
-    value = os.environ.get(env_key)
-
-    if value is None:
-        return default
-
-    # Type conversion
-    # Try boolean first
-    if value.lower() in ("true", "yes", "1"):
-        return True
-    elif value.lower() in ("false", "no", "0"):
-        return False
-
-    # Try int
-    try:
-        return int(value)
-    except ValueError:
-        pass
-
-    # Try float
-    try:
-        return float(value)
-    except ValueError:
-        pass
-
-    # Return as string
-    return value
+    """Deprecated; orchestrator no longer uses ORCHESTRATOR_* env variables."""
+    return default
 
 
 def merge_config(
@@ -205,8 +172,7 @@ def load_env_config() -> Dict[str, Any]:
     """
     Load environment variables into a config dict.
 
-    Supports both standard names (CLAUDE_CODE_OAUTH_TOKEN, ANTHROPIC_API_KEY)
-    and ORCHESTRATOR_* prefixed variables for other settings.
+    Supports standard names (CLAUDE_CODE_OAUTH_TOKEN, ANTHROPIC_API_KEY).
     """
     config: Dict[str, Any] = {}
 
@@ -226,108 +192,7 @@ def load_env_config() -> Dict[str, Any]:
             config["runner"] = {}
         config["runner"]["base_url"] = os.environ["ANTHROPIC_BASE_URL"]
 
-    # Then handle ORCHESTRATOR_* variables for other settings
-    env_mappings = {
-        # Top-level settings
-        "MODEL": "model",
-        # Also support default model name per spec
-        "DEFAULT_MODEL": "model",
-        "STRATEGY": "strategy",
-        "REPO": "repo",
-        "BASE_BRANCH": "base_branch",
-        "RUNS": "runs",
-        "OUTPUT": "output",
-        "STATE_DIR": "state_dir",
-        "LOGS_DIR": "logs_dir",
-        # Server extension support removed
-        "DEBUG": "debug",
-        # Runner settings
-        "RUNNER__OAUTH_TOKEN": "runner.oauth_token",
-        "RUNNER__API_KEY": "runner.api_key",
-        "RUNNER__BASE_URL": "runner.base_url",
-        "RUNNER__TIMEOUT": "runner.timeout",
-        "RUNNER__CPU_LIMIT": "runner.cpu_limit",
-        "RUNNER__MEMORY_LIMIT": "runner.memory_limit",
-        "RUNNER__REVIEW_WORKSPACE_MODE": "runner.review_workspace_mode",
-        "RUNNER__TMPFS_SIZE_MB": "runner.tmpfs_size_mb",
-        # Spec-friendly resource names
-        "CONTAINER_CPU": "runner.cpu_limit",
-        "CONTAINER_MEMORY": "runner.memory_limit",
-        # Orchestration settings
-        "ORCHESTRATION__MAX_PARALLEL_INSTANCES": "orchestration.max_parallel_instances",
-        "ORCHESTRATION__BRANCH_NAMESPACE": "orchestration.branch_namespace",
-        "ORCHESTRATION__SNAPSHOT_INTERVAL": "orchestration.snapshot_interval",
-        "ORCHESTRATION__EVENT_BUFFER_SIZE": "orchestration.event_buffer_size",
-        "ORCHESTRATION__CONTAINER_RETENTION_FAILED": "orchestration.container_retention_failed",
-        "ORCHESTRATION__CONTAINER_RETENTION_SUCCESS": "orchestration.container_retention_success",
-        # Strategy parameters
-        "STRATEGY__N": "strategy.n",
-        "STRATEGY__THRESHOLD": "strategy.threshold",
-        "STRATEGY__MAX_ITERATIONS": "strategy.max_iterations",
-        "STRATEGY__SCORING_MODEL": "strategy.scoring_model",
-        "STRATEGY__FORCE_IMPORT": "strategy.force_import",
-        # Logging settings
-        "LOGGING__LEVEL": "logging.level",
-        "LOGGING__MAX_FILE_SIZE": "logging.max_file_size",
-        "LOGGING__RETENTION_DAYS": "logging.retention_days",
-        # TUI settings
-        "TUI__REFRESH_RATE": "tui.refresh_rate",
-        "TUI__REFRESH_RATE_MS": "tui.refresh_rate_ms",
-        "TUI__SHOW_TIMESTAMPS": "tui.show_timestamps",
-        "TUI__COLOR_SCHEME": "tui.color_scheme",
-        "TUI__FORCE_DISPLAY_MODE": "tui.force_display_mode",
-        # Events retention
-        "EVENTS__RETENTION_DAYS": "events.retention_days",
-        "EVENTS__RETENTION_GRACE_DAYS": "events.retention_grace_days",
-    }
-
-    for env_suffix, config_path in env_mappings.items():
-        value = get_env_value(env_suffix)
-        if value is not None:
-            # Convert path like "runner.timeout" to nested dict
-            parts = config_path.split(".")
-            current = config
-            for part in parts[:-1]:
-                if part not in current:
-                    current[part] = {}
-                current = current[part]
-            current[parts[-1]] = value
-
-    # Dynamic strategy parameters: ORCHESTRATOR_STRATEGY__<NAME>__KEY=VALUE
-    def _auto_convert(val: str):
-        low = val.lower()
-        if low in ("true", "yes", "1"):
-            return True
-        if low in ("false", "no", "0"):
-            return False
-        try:
-            return int(val)
-        except ValueError:
-            pass
-        try:
-            return float(val)
-        except ValueError:
-            pass
-        return val
-
-    for key, value in os.environ.items():
-        if not key.startswith("ORCHESTRATOR_STRATEGY__"):
-            continue
-        try:
-            _, _, rest = key.partition("ORCHESTRATOR_STRATEGY__")
-            strat_name, _, param = rest.partition("__")
-            if not strat_name or not param:
-                continue
-            # Normalize
-            strategy = strat_name.lower().replace(" ", "_")
-            param_key = param.lower()
-            # Convert value types
-            converted = _auto_convert(value)
-            # Place into config under strategies
-            strategies = config.setdefault("strategies", {})
-            strategies.setdefault(strategy, {})[param_key] = converted
-        except Exception:
-            continue
+    # No orchestrator-specific env variables; use CLI or config file
 
     return config
 

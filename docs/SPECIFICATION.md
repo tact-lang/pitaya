@@ -44,7 +44,7 @@ Terminology: “Task” is the orchestration unit scheduled via `ctx.run`; each 
 orchestrator "implement user authentication with OAuth2" --strategy simple --runs 5
 ```
 
-Schedules 5 strategy executions (each strategy schedules one task). Concurrency is still bounded by `max_parallel_tasks`; excess tasks queue. Creates up to 5 branches with different implementations and displays real-time progress in TUI.
+Schedules 5 strategy executions (each strategy schedules one task). Concurrency is still bounded by `max_parallel_instances`; excess tasks queue. Creates up to 5 branches with different implementations and displays real-time progress in TUI.
 
 ### Best-of-N (Inline Scoring)
 
@@ -234,16 +234,16 @@ Events flow unidirectionally upward:
 
 Orchestration ingests runner events for live state and diagnostics, but ONLY canonical `task.*` and `strategy.*` events are written to `events.jsonl`. Runner events are routed to `runner.jsonl` (one line per `instance.*` event) and are not part of the public file contract. A single writer per run writes both files under `logs/<run_id>/`.
 
-The event system uses append-only file storage (`events.jsonl`) with monotonic byte offsets for position tracking. A single writer task computes the `start_offset` (byte position before writing the line), appends the JSON line, and flushes according to the configured flush policy (interval-based batching by default, or per-event with `--safe-fsync=per_event`). The event records this `start_offset`. Clients request events from a specific `start_offset` when recovering after disconnection.
+The event system uses append-only file storage (`events.jsonl`) with monotonic byte offsets for position tracking. A single writer task computes the `start_offset` (byte position before writing the line), appends the JSON line, and flushes using a fixed interval-based batching policy. The event records this `start_offset`. Clients request events from a specific `start_offset` when recovering after disconnection.
 
 **Offset & Writer Semantics**
 
 - Offsets are byte positions (not line counts). Readers MUST open in binary mode and advance offsets by the exact number of bytes consumed.
 - Readers MUST align to newline boundaries: if an offset lands mid-line, scan forward to the next `\n` before parsing.
 - Readers MUST tolerate a truncated final line (e.g., during a crash) by skipping it until a terminating newline appears.
-- Writers MUST be single-process per run (single-writer model), emit UTF-8 JSON per line, and flush according to the configured flush policy (interval-based batching by default; per-event when explicitly configured). The event carries the `start_offset` (byte position before the record was written). This is configured via environment variable (e.g., `ORCHESTRATOR_EVENTS__FLUSH_POLICY=per_event`).
+- Writers MUST be single-process per run (single-writer model), emit UTF-8 JSON per line, and flush using a fixed interval-based batching policy. The event carries the `start_offset` (byte position before the record was written).
   The single-writer invariant is enforced by an OS lockfile `events.jsonl.lock` (see Event Log Contract below).
-  The number of events flushed per interval is bounded by a configured batch size for latency control (see `events.flush_policy.max_batch`).
+  (Implementation detail) The writer uses a small fixed batch size per flush to balance latency and throughput.
   Single durability invariant: `state.json.last_event_start_offset` MUST point to an event the writer has already fsynced. Snapshot persistence MUST never happen ahead of durable event fsync.
 
 **Event Envelope**
@@ -271,6 +271,7 @@ The event system uses append-only file storage (`events.jsonl`) with monotonic b
       "plugin_name": "...",
       "system_prompt": "...",
       "append_system_prompt": "...",
+      
       "runner": {
         "container_cpu": 2,
         "container_memory": "4g",
@@ -296,7 +297,7 @@ Components follow a strict communication pattern: downward direct calls (Orchest
 - `task.started`: `{ key, instance_id, container_name, model }`
 - `task.progress`: `{ key, instance_id, phase, activity?, tool? }` where `phase` is an enum among `{workspace_preparing, container_creating, container_env_preparing, container_env_prepared, container_created, claude_starting, tool_use, assistant, system, result_collection, branch_imported, no_changes, cleanup}`. `activity` is an optional human-readable string; `tool` is the tool name when `phase=tool_use`.
 - `task.completed`: `{ key, instance_id, artifact, metrics, final_message, final_message_truncated, final_message_path }`  # success only
-  `final_message` is truncated when it exceeds a configured byte budget. When truncated, `final_message_truncated=true` and `final_message_path` MUST be a run‑relative path under `logs/<run_id>/` (no absolute host paths) and is retained according to the events retention policy; otherwise `final_message_truncated=false` and `final_message_path` is empty. The budget is configured via environment variable (e.g., `ORCHESTRATOR_EVENTS__MAX_FINAL_MESSAGE_BYTES`).
+  `final_message` is truncated when it exceeds a fixed byte budget. When truncated, `final_message_truncated=true` and `final_message_path` MUST be a run‑relative path under `logs/<run_id>/` (no absolute host paths) and is retained according to the events retention policy; otherwise `final_message_truncated=false` and `final_message_path` is empty. The budget is fixed at 65536 bytes.
 - `task.failed`: `{ key, instance_id, error_type, message, network_egress? }` where `error_type ∈ { docker, api, network, git, timeout, session_corrupted, auth, unknown }` (normative and closed set) and `network_egress` (optional) is one of `online|offline|proxy` when relevant.
 - `task.interrupted`: `{ key, instance_id }`
 - `strategy.started`: `{ name, params }`
@@ -318,10 +319,7 @@ TUI and summaries MUST use the same criteria to avoid ambiguity.
 ### Event Log Contract
 
 - Exactly one writer per run: enforced by `logs/<run_id>/events.jsonl.lock` held for the run duration (OS-level exclusive lock).
-- Writer computes `start_offset` as the byte position before writing each line, appends UTF‑8 JSON + `\n`, and flushes per configured policy:
-  - Default `interval`: batch and fsync every `events.flush_policy.interval_ms` or `max_batch`.
-  - `max_batch` is configurable (default 256) via environment variable `ORCHESTRATOR_EVENTS__FLUSH_MAX_BATCH`.
-  - `per_event`: fsync after each event; slower but safest.
+- Writer computes `start_offset` as the byte position before writing each line, appends UTF‑8 JSON + `\n`, and flushes at a small fixed interval.
 - Truncated last line rule: readers MUST skip any unterminated last line until a newline appears.
 - Snapshots (`state.json`) persist a durable offset reference: the `start_offset` of the last applied event (`last_event_start_offset`). On recovery, readers resume from this position.
 - Timestamp queries: `get_events_since(ts)` MUST locate the first event with `ts ≥ T` (by scanning or index) and return from that event’s `start_offset` to avoid partial-line reads. If `ts` refers to an event that was written but not yet fsynced (writer crash window), readers MUST start from the last durable `start_offset` ≤ that event. Snapshots (`state.json.last_event_start_offset`) MUST reference only fsynced offsets.
@@ -355,7 +353,7 @@ This unidirectional flow prevents circular dependencies and makes the system pre
 
 ## 2.4 Technology Choices
 
-**Python 3.11+** - Minimum 3.11. Modern async performance and improved error messages. Type hints enable clear interfaces between components. Rich ecosystem for required functionality.
+**Python 3.13** - Requires Python 3.13. Modern async performance and improved error messages. Type hints enable clear interfaces between components. Rich ecosystem for required functionality.
 
 **asyncio** - Natural fit for I/O-bound operations (Docker commands, git operations, API calls). Enables high concurrency for managing hundreds of container operations and git commands without thread complexity. Built-in primitives for coordination (locks, queues, events).
 
@@ -417,9 +415,9 @@ The Runner exposes a single async function `run_instance()` that accepts:
 Task vs instance: The orchestration schedules tasks; the runner executes each task as an instance. `instance_id` uniquely identifies the runner instance executing a task and is surfaced in container labels and runner logs.
 - **session_group_key**: Optional key to group tasks that share the same persistent session volume; defaults to the task key if not provided
 - **event_callback**: Function to receive real-time events
-- **container_timeout_seconds**: Maximum execution time (default: 3600). Alias: `timeout_seconds` accepted for backward compatibility.
+- **timeout_seconds**: Maximum execution time (default: 3600).
 - **container_cpu**: CPU cores for the container
-- **container_memory**: Memory limit for the container (e.g., `"4g"`)
+- **container_memory_gb**: Memory limit in GiB (integer)
 - **network_egress**: `online|offline|proxy` (default: `online`); controls Docker networking mode
 - **auth_config**: Authentication configuration (OAuth token or API key)
 - **reuse_container**: Reuse existing container if name matches (default: True)
@@ -516,7 +514,7 @@ Platform-specific mount handling ensures compatibility. The named volume (patter
 `GHASH`:
   • Run scope (default): `GHASH = short8( sha256( JCS({"session_group_key": EFFECTIVE_SGK}) ) )`, where `EFFECTIVE_SGK = session_group_key if provided else durable task key`. Namespacing is provided by the run-scoped volume name `orc_home_{run_id}_g{GHASH}`.
   • Global scope: `GHASH = short8( sha256( JCS({"session_group_key": "...", "plugin": "...", "model": "..."}) ) )` to avoid cross‑tool contamination. Here, `model` is the resolved concrete model ID (not a friendly alias from `models.yaml`).
-When `runner.session_volume_scope="global"`, the named volume omits the `run_id` prefix and uses only `GHASH`. Global scope is advanced and requires `--allow-global-session-volume`.
+In global scope (when explicitly enabled), the named volume omits the `run_id` prefix and uses only `GHASH`. Global scope is advanced and requires `--allow-global-session-volume`.
 Runner MUST set these variables inside the container environment.
 
 **Container Execution**: Containers run with these security constraints:
@@ -538,7 +536,7 @@ fi
 docker run \
   -v "$WORKSPACE_DIR:/workspace${mount_flags}" \
   --mount "type=volume,source=orc_home_${run_id}_s${SIDX}_g${GHASH},target=/home/node" \
-  --tmpfs /tmp:rw,size=<runner.tmpfs_size_mb>m \  # Writable temporary space (configurable)
+  --tmpfs /tmp:rw,size=512m \  # Writable temporary space (fixed)
   --read-only \                     # Entire filesystem read-only except mounts
   --name "$container_name" \
   --cpus="2" \
@@ -558,7 +556,7 @@ The `--read-only` flag locks down the entire container filesystem except for exp
 
 Writable mounts: `/home/node` is a writable named volume that persists across container restarts and is used for session state. `/tmp` is a writable tmpfs. The container root filesystem remains read‑only.
 
-When a task declares `import_policy="never"`, the runner MUST mount the `/workspace` path as read-only when `runner.review_workspace_mode=ro` (default `ro`). If `reuse_container=True` would prevent a read-only remount, the runner MUST start a fresh container (ignoring `reuse_container`) to honor read-only when `review_workspace_mode=ro`. Review/scoring tasks write only to `/tmp` and `/home/node`. When `review_workspace_mode=ro`, attempted writes to `/workspace` MUST error fast with a clear message. Plugins write scratch output to `/tmp` in strict RO mode.
+When a task declares `import_policy="never"`, the runner MUST mount the `/workspace` path as read-only. If `reuse_container=True` would prevent a read-only remount, the runner MUST start a fresh container (ignoring `reuse_container`) to honor read-only. Review/scoring tasks write only to `/tmp` and `/home/node`. Attempted writes to `/workspace` MUST error fast with a clear message. Plugins write scratch output to `/tmp` in strict RO mode.
 
 Hardening requirements:
 
@@ -575,7 +573,7 @@ Hardening requirements:
 
 **Runner Decision Tree**:
 
-1. If `import_policy="never"` and `review_workspace_mode="ro"`, **force** RO `/workspace`.
+1. If `import_policy="never"`, **force** RO `/workspace`.
 2. If a container exists but cannot be remounted read-only, **replace** it (same name, same session volume) and log `runner.container.replaced`.
 
 Priority order when constraints conflict:
@@ -604,7 +602,7 @@ This persistence is crucial because Claude Code maintains session state inside t
 
 Failure classification for offline runs: if a task runs with `offline` and fails due to blocked egress, classify as `error_type="network"`, set `network_egress="offline"` in the payload, and include `egress=offline` in the human message for clarity.
 
-**Session Groups**: To maintain session continuity across multiple tasks (e.g., plan → implement → refine), strategies supply a `session_group_key` in `ctx.run`. Containers and the `/home/node` named volume are keyed by this group (default = the task key). Passing the same `session_group_key` for related tasks ensures they share the same session volume; passing a different key isolates sessions. Volume scope is configurable via `runner.session_volume_scope = "run" | "global"` (default: `"run"`). In `"global"` scope, the volume name omits the `run_id` so sessions can be reused across runs; this requires explicit `--allow-global-session-volume` to prevent cross-contamination between different model/tool configs; in `"run"` scope, volumes are run‑scoped and MUST be unique per strategy execution to avoid Docker's copy-up race when multiple containers mount the same named volume concurrently.
+**Session Groups**: To maintain session continuity across multiple tasks (e.g., plan → implement → refine), strategies supply a `session_group_key` in `ctx.run`. Containers and the `/home/node` named volume are keyed by this group (default = the task key). Passing the same `session_group_key` for related tasks ensures they share the same session volume; passing a different key isolates sessions. By default, volumes are run‑scoped and MUST be unique per strategy execution to avoid Docker's copy-up race when multiple containers mount the same named volume concurrently. A global scope is available but requires explicit `--allow-global-session-volume` consent.
 
 Global scope naming: `orc_home_g{GHASH}`.
 
@@ -744,7 +742,7 @@ Apply the SELinux flag only on Linux systems with SELinux enabled. The `--read-o
 
 Note: This minimal example omits the `/home/node` named volume and `/tmp` tmpfs shown in 3.5; those mounts are required in the full runner configuration.
 
-Reviewer scratch space: For review/scoring tasks using `import_policy="never"` and default `review_workspace_mode="ro"`, tools MUST write any temporary files to `/tmp` or `/home/node` and MUST NOT write to `/workspace`.
+Reviewer scratch space: For review/scoring tasks using `import_policy="never"`, tools MUST write any temporary files to `/tmp` or `/home/node` and MUST NOT write to `/workspace`.
 
 **Branch Import After Completion**: After the container exits, as the final step of `run_instance()`, Git fetch from a local filesystem path is used instead of push coordination:
 
@@ -902,7 +900,7 @@ Key events extracted:
 - Subscription mode: `CLAUDE_CODE_OAUTH_TOKEN`
 - API mode: `ANTHROPIC_API_KEY` and optionally `ANTHROPIC_BASE_URL`
 
-**Prompt Engineering**: System prompts and append-system-prompt options enable customizing Claude's behavior per task. Model selection allows choosing between speed (Sonnet) and capability (Opus). The default model is configurable via `ORCHESTRATOR_DEFAULT_MODEL` (default: `sonnet`).
+**Model Selection**: Models are selected by alias via a shared `models.yaml` mapping. The default alias is `sonnet`.
 
 ## 3.8 Error Handling
 
@@ -1030,7 +1028,7 @@ Shutdown/Interruption Semantics: When the operator interrupts the run (e.g., Ctr
 - Transition all RUNNING tasks to `INTERRUPTED` in state, capturing `interrupted_at`.
 - Emit a canonical `task.interrupted { key, instance_id }` for each such task immediately upon transition and synchronously flush pending events to disk to ensure durability before process exit.
 - For each strategy execution that has not yet produced any successful `task.completed`, emit a canonical `strategy.completed { status: "canceled", reason: "operator_interrupt" }` and flush pending events.
-- Stop any still-running containers in parallel as part of graceful shutdown. Use a short stop timeout (≤1s) by default to avoid the Docker default 10s grace period (PID 1 ignores SIGTERM by default). A management override is available via `ORCHESTRATOR_SHUTDOWN_STOP_TIMEOUT_S`.
+- Stop any still-running containers in parallel as part of graceful shutdown. Use a short stop timeout (≤1s) by default to avoid the Docker default 10s grace period (PID 1 ignores SIGTERM by default).
 
 **Event History**: The `get_events_since()` function retrieves historical events from `events.jsonl` starting at a given `start_offset` (byte position before the line) or timestamp. Accepts run_id, offset/timestamp, optional event type filters, and result limit. The events file is never rotated during an active run; rotation/archival occurs only after the run completes. The system scans the file when no index is present; indexing is optional for long runs.
 Timestamp to offset: When called with a timestamp, the implementation MUST locate the first record with `ts ≥ T` (by scanning or via an index) and begin returning events from that record’s `start_offset`.
@@ -1198,7 +1196,7 @@ These patterns are expressed directly in strategy code using keys like `gen/<i>`
 
 Managing concurrent tasks requires careful resource control:
 
-**Resource Pool**: Maximum parallel tasks configurable (default adaptive). The default limit is `max(2, min(20, floor(host_cpu / runner.container_cpu)))`. This prevents host oversubscription while allowing parallelism. When at capacity, new task requests queue until a slot opens. A warning MUST be logged if the configured value oversubscribes the host (i.e., `max_parallel_tasks * runner.container_cpu > host_cpu`). Operators can also select presets via `--parallel {conservative|balanced|aggressive}`, which set `container_cpu` and `container_memory` together (e.g., conservative: 1 CPU/2GiB, balanced: 2 CPU/4GiB [default], aggressive: 3 CPU/6–8GiB) to keep CPU and RAM in sync.
+**Resource Pool**: Maximum parallel instances configurable (default adaptive). The default limit is `max(2, min(20, floor(host_cpu / runner.cpu_limit)))`. This prevents host oversubscription while allowing parallelism. When at capacity, new task requests queue until a slot opens. A warning MUST be logged if the configured value oversubscribes the host (i.e., `max_parallel_instances * runner.cpu_limit > host_cpu`). Operators can also select presets via `--parallel {conservative|balanced|aggressive}`, which set `runner.cpu_limit` and `runner.memory_limit` together (e.g., conservative: 1 CPU/2GiB, balanced: 2 CPU/4GiB [default], aggressive: 3 CPU/6–8GiB) to keep CPU and RAM in sync.
 
 Host CPU detection:
 
@@ -1212,10 +1210,10 @@ Host CPU detection:
 
 1) Pool slot available
 2) CPU tokens: `sum(running.container_cpu) + new.container_cpu ≤ host_cpu`
-3) Memory tokens: `sum(running.container_memory) + new.container_memory ≤ host_mem * mem_guard_pct` (default `mem_guard_pct=0.8`)
+3) Memory tokens: `sum(running.container_memory_gb) + new.container_memory_gb ≤ host_mem * mem_guard_pct` (default `mem_guard_pct=0.8`)
 4) Disk guard: free space on the workspace filesystem `≥ disk.min_free_gb` and recent Git pack growth slope `≤ disk.max_pack_growth_mib_per_min`
 
-When `max_parallel_tasks="auto"`, the pool size is derived from CPU tokens via the adaptive default above. Memory and disk guards apply regardless of pool size.
+When `max_parallel_instances="auto"`, the pool size is derived from CPU tokens via the adaptive default above. Memory and disk guards apply regardless of pool size.
 
 The engine:
 
@@ -1230,11 +1228,11 @@ The engine:
 
 **Capacity Model**:
 
-- Each task declares `container_cpu` and `container_memory` at scheduling time (defaults/presets apply).
+- Each task declares `container_cpu` and `container_memory_gb` at scheduling time (defaults/presets apply).
 - Scheduler maintains aggregate CPU and memory token ledgers; both MUST be within limits to admit a task.
 - Disk guard is evaluated on each admission attempt; if breached, admission is paused until healthy.
 - Tasks not admitted wait in FIFO order. This prevents oversubscription even with per-task overrides.
-- Oversubscription warnings are emitted when `max_parallel_tasks * runner.container_cpu > host_cpu` or when a single task requests `container_cpu > host_cpu` or `container_memory > host_mem`.
+- Oversubscription warnings are emitted when `max_parallel_instances * runner.cpu_limit > host_cpu` or when a single task requests `container_cpu > host_cpu` or `container_memory_gb > host_mem`.
 
 **Resource Cleanup**: When tasks complete, their slots immediately return to the pool. Failed tasks do not block resources. This ensures maximum utilization without manual intervention.
 
@@ -1622,7 +1620,7 @@ orchestrator --clean-containers
 
 Writer safety options:
 
-- `--safe-fsync=per_event|interval` (default: `interval`): Controls event writer flush policy. `per_event` fsyncs each event for maximum durability at the cost of throughput.
+ 
 
 **Strategy Configuration**:
 
@@ -1686,8 +1684,8 @@ Note: The TUI reads only the canonical public events (`task.*`, `strategy.*`) fr
 
 Additional flags and mappings:
 
-- `--allow-global-session-volume` enables global session volume scope; maps to `runner.session_volume_scope=global` and requires explicit consent.
-- `--parallel {conservative|balanced|aggressive}` sets CPU+RAM presets for containers (maps to `runner.container_cpu` and `runner.container_memory`).
+- `--allow-global-session-volume` enables global session volume scope; requires explicit consent.
+- `--parallel {conservative|balanced|aggressive}` sets CPU+RAM presets for containers (maps to `runner.cpu_limit` and `runner.memory_limit`).
 - Budgets: (removed — budgets not enforced; see Cost Tracking)
 - Disk guard: `--disk-min-free-gb` and `--disk-max-pack-growth-mib-per-min` tune admission backpressure thresholds.
 - Git safety: `--allow-overwrite-protected-refs` must be set to allow forced updates to protected refs.
@@ -1745,19 +1743,12 @@ Configuration follows a strict precedence hierarchy, making defaults sensible wh
 4. `orchestrator.yaml` - Shared team configuration
 5. Built-in defaults
 
-**Authentication Modes**: The orchestrator supports two Claude Code authentication methods:
+**Authentication**: Two credential types are supported. No explicit mode is required; the presence of credentials determines behavior.
 
-- **Subscription mode** (default): Uses `CLAUDE_CODE_OAUTH_TOKEN` for users with Claude Pro subscriptions. Significantly cheaper for heavy usage.
-- **API mode**: Uses `ANTHROPIC_API_KEY` for usage-based billing or custom LLMs.
+- OAuth token (`CLAUDE_CODE_OAUTH_TOKEN`) — subscription access.
+- API key (`ANTHROPIC_API_KEY`, optional `ANTHROPIC_BASE_URL`) — API access and custom endpoints.
 
-Mode selection follows this logic:
-
-1. If `--mode api` specified, use API key
-2. If OAuth token present, use subscription mode
-3. If only API key present, use API mode
-4. Otherwise, error with clear message
-
-Orchestration determines the mode using the above precedence and passes the effective mode to the runner/plugin. The runner/plugins MUST treat this selection as authoritative.
+Selection: If an OAuth token is set, use it. Otherwise, if an API key is set, use it. If neither is set, error with a clear message. A `--mode` flag may be provided but does not override missing credentials; credentials take precedence.
 
 **Custom LLM Support**: When using API mode, `ANTHROPIC_BASE_URL` enables routing to custom endpoints. This allows local LLMs, proxies, or alternative providers that implement Claude's API. The Instance Runner passes this through to Claude Code without modification.
 
@@ -1776,29 +1767,12 @@ Orchestration determines the mode using the above precedence and passes the effe
 
 This separation ensures components remain independent. Adding TUI color schemes does not affect runner configuration.
 
-**Environment Variables**: The system supports extensive environment variables (27 beyond core auth):
+**Environment Variables**: Only authentication-related variables are supported:
 
 ```bash
-# Core paths
-ORCHESTRATOR_STATE_DIR=/custom/state/path
-ORCHESTRATOR_LOGS_DIR=/custom/logs/path
-
-# Debug settings
-ORCHESTRATOR_DEBUG=true
-
-# Strategy parameters
-ORCHESTRATOR_STRATEGY__BEST_OF_N__N=5
-
-# Runner settings
-ORCHESTRATOR_RUNNER__ISOLATION_MODE=full_copy
-
-# TUI settings
-ORCHESTRATOR_TUI__REFRESH_RATE=100          # render cadence in ms (default 100ms)
-ORCHESTRATOR_TUI__FORCE_DISPLAY_MODE=detailed  # detailed|compact|dense (overrides auto)
-ORCHESTRATOR_TUI__ALT_SCREEN=1              # 1 to use alt-screen; 0 to render inline
-
-# Model configuration
-ORCHESTRATOR_DEFAULT_MODEL=sonnet
+CLAUDE_CODE_OAUTH_TOKEN=...
+ANTHROPIC_API_KEY=...
+ANTHROPIC_BASE_URL=...   # optional
 ```
 
 **Configuration Merging**: Complex deep merge with recursive dictionary merging for nested configurations. Arrays are replaced, not merged.
@@ -1813,33 +1787,23 @@ Defaults used by orchestration and runner. Fingerprinting canonicalization treat
 - import_policy: `auto`
 - import_conflict_policy: `fail`
 - skip_empty_import: `true`
-- max_parallel_tasks: `"auto"`  # auto => max(2, min(20, floor(host_cpu / runner.container_cpu)))
+- max_parallel_instances: `"auto"`  # auto => max(2, min(20, floor(host_cpu / runner.cpu_limit)))
 - runner.max_turns: unset (tool decides)
-- runner.session_volume_scope: `run`
-- runner.container_timeout_seconds: `3600`
-- runner.container_cpu: `2`
-- runner.container_memory: `4g`
-- runner.reuse_container: `true`
-- runner.finalize: `true`
-- runner.review_workspace_mode: `ro`  # was rw
-- runner.tmpfs_size_mb: `512`
+- runner.timeout: `3600`
+- runner.cpu_limit: `2`
+- runner.memory_limit: `4g`
  - tui.refresh_rate_ms: `100`
 
-Read-only review enforcement: If `import_policy="never"` and `runner.review_workspace_mode="ro"`, the runner MUST mount `/workspace` read‑only, replacing an existing container if necessary to satisfy RO semantics.
+Read-only review enforcement: If `import_policy="never"`, the runner MUST mount `/workspace` read‑only, replacing an existing container if necessary to satisfy RO semantics.
 
-Events configuration:
-- events.flush_policy.mode: `"interval"`
-- events.flush_policy.interval_ms: `50`
-- events.flush_policy.max_batch: `256`
-- events.max_final_message_bytes: `65536`
+Events configuration (subset):
 - events.retention_days: `30`            # prune terminal runs after this many days
-- events.retention.grace_days: `7`       # wait at least this many days after strategy completion before pruning
+- events.retention_grace_days: `7`       # wait at least this many days after strategy completion before pruning
 
 Retention configuration:
-- logging.retention_days.component_logs: `7`
 - results.retention_days: `null`         # null means do not prune results by age
-- runner.retention.success_hours: `2`
-- runner.retention.failure_hours: `24`
+- orchestration.container_retention_success: `7200`   # seconds (2h)
+- orchestration.container_retention_failed: `86400`   # seconds (24h)
 - orchestration.retention.volume_hours: `24`
 
 All defaults are validated and logged at run start. Fingerprint computation (RFC 8785 JCS) must apply these defaults before hashing.
@@ -1856,8 +1820,8 @@ Defaults that participate in fingerprint canonicalization (set missing values to
 - plugin_name
 - system_prompt
 - append_system_prompt
-- runner.container_cpu
-- runner.container_memory
+- runner.cpu_limit
+- runner.memory_limit
 - runner.network_egress
 - runner.max_turns (when present; drop if null)
 
@@ -1902,8 +1866,7 @@ logs/
 - Never mix logs with TUI display
 
 **Rotation and Cleanup**:
-- Component logs (e.g., `orchestration.jsonl`, `runner.jsonl`, `tui.jsonl`) are pruned by age per `logging.retention_days.component_logs` (default: 7 days).
-- Public event/state data (`logs/<run_id>/events.jsonl`, `logs/<run_id>/state.json`, and `orchestrator_state/<run_id>/state.json`) MUST NOT be pruned while a run is non‑terminal. They become eligible for pruning only after all top‑level strategies emit `strategy.completed` and after a grace period `events.retention.grace_days` (default: 7). `events.retention_days` controls total retention for terminal runs.
+- Public event/state data (`logs/<run_id>/events.jsonl`, `logs/<run_id>/state.json`, and `orchestrator_state/<run_id>/state.json`) MUST NOT be pruned while a run is non‑terminal. They become eligible for pruning only after all top‑level strategies emit `strategy.completed` and after a grace period `events.retention_grace_days` (default: 7). `events.retention_days` controls total retention for terminal runs.
 - Results (`results/<run_id>/`) are retained per `results.retention_days` (default: do not prune unless configured).
 
 Logging captures detailed data to files while minimizing console noise.
@@ -1989,7 +1952,7 @@ These measures provide strong isolation without enterprise complexity and protec
 
 Resource management keeps things simple and functional:
 
-**Parallel Task Limit**: Single configuration value `max_parallel_tasks` (default adaptive: `max(2, min(20, floor(host_cpu / runner.container_cpu)))`). Prevents system overload and API rate limit issues. No complex scheduling or priorities; a simple pool is used. (`max_parallel_instances` is supported as a deprecated alias and MUST log a one-time deprecation warning if used.) A warning MUST be logged if the configured value oversubscribes the host.
+**Parallel Instance Limit**: Single configuration value `max_parallel_instances` (default adaptive: `max(2, min(20, floor(host_cpu / runner.cpu_limit)))`). Prevents system overload and API rate limit issues. No complex scheduling or priorities; a simple pool is used. A warning MUST be logged if the configured value oversubscribes the host.
 
 **Container Resources**: Fixed defaults that work well:
 
@@ -1997,7 +1960,7 @@ Resource management keeps things simple and functional:
 - 4GB memory per container
 - No disk quotas (rely on system capacity)
 
-Override only if needed via `container_cpu` and `container_memory` settings. Most users never touch these.
+Override only if needed via `runner.cpu_limit` and `runner.memory_limit` settings. Most users never touch these.
 
 **Cost Tracking**: Simple accumulation from Claude Code's reported costs. No budgets or limits are implemented. Users monitor costs in real time and cancel when needed.
 
@@ -2123,27 +2086,17 @@ Normative rule: Apply `:z` only on Linux with SELinux; never apply on macOS or W
 - Unix: Uses /tmp
 - Validates write permissions on startup
 
-## 6.7 Operational Controls
+## 6.7 Operational Notes
 
-The following environment variables and behaviors are normative:
-
-- Events flush policy:
-  - `ORCHESTRATOR_EVENTS__FLUSH_POLICY = interval|per_event` (default: interval)
-  - `ORCHESTRATOR_EVENTS__FLUSH_INTERVAL_MS` (default: 50)
-  - `ORCHESTRATOR_EVENTS__FLUSH_MAX_BATCH` (default: 256)
-  In interval mode, implementations MUST batch and fsync off-thread; per-event mode fsyncs synchronously.
-
-- Final message truncation:
-  - `ORCHESTRATOR_EVENTS__MAX_FINAL_MESSAGE_BYTES` (default: 65536)
-  If truncated, implementations MUST set `final_message_truncated=true` and write the full message to a run-relative path under `logs/<run_id>/` in `task.completed`.
+If a `final_message` must be truncated, implementations MUST set `final_message_truncated=true` and write the full message to a run-relative path under `logs/<run_id>/` in `task.completed`.
 
 - Events retention (pruning):
-  - `ORCHESTRATOR_EVENTS__RETENTION_DAYS` (default: 30)
-  - `ORCHESTRATOR_EVENTS__RETENTION_GRACE_DAYS` (default: 7)
+  - `events.retention_days` (default: 30)
+  - `events.retention_grace_days` (default: 7)
   The orchestrator deletes `events.jsonl` and `runner.jsonl` for terminal runs older than the retention + grace window.
 
 - Adaptive parallelism (default):
-  - When `--max-parallel` is not specified, the orchestrator sets `max_parallel_instances = max(2, min(20, floor(host_cpu / container_cpu)))`.
+  - When `--max-parallel` is not specified, the orchestrator sets `max_parallel_instances = max(2, min(20, floor(host_cpu / runner.cpu_limit)))`.
   - The system detects cgroup CPU quota on Linux and warns when configured parallelism oversubscribes host CPUs.
 
 - Error classification mapping:

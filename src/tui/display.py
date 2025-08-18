@@ -64,10 +64,9 @@ class TUIDisplay:
         self.event_processor = EventProcessor(self.state)
         self.event_stream = AsyncEventStream(self.event_processor)
         self.adaptive_display = AdaptiveDisplay()
-        # Optional env override for display mode
-        self._force_display_mode_env = os.environ.get("ORCHESTRATOR_TUI__FORCE_DISPLAY_MODE")
-        # Alt-screen toggle (1 by default). Set ORCHESTRATOR_TUI__ALT_SCREEN=0 to disable.
-        self._alt_screen = os.environ.get("ORCHESTRATOR_TUI__ALT_SCREEN", "1") not in ("0", "false", "False")
+        # Remove env toggles; rely on CLI and defaults
+        self._force_display_mode_env = None
+        self._alt_screen = True
         # Optional CLI override for display mode
         self._force_display_mode_cli: Optional[str] = None
 
@@ -259,15 +258,11 @@ class TUIDisplay:
                     if state:
                         self._reconcile_state(state)
 
-                # Apply forced display mode (CLI first, then env) if provided
+                # Apply forced display mode (CLI only) if provided
                 if self.state.current_run and not self.state.current_run.force_detail_level:
                     mode = (self._force_display_mode_cli or "").strip().lower() if self._force_display_mode_cli else None
                     if mode in ("detailed", "compact", "dense"):
                         self.state.current_run.force_detail_level = mode
-                    elif self._force_display_mode_env:
-                        env_mode = self._force_display_mode_env.strip().lower()
-                        if env_mode in ("detailed", "compact", "dense"):
-                            self.state.current_run.force_detail_level = env_mode
 
                 self.state.last_state_poll = datetime.now()
 
