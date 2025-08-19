@@ -24,6 +24,8 @@ import urllib3
 import yaml
 from rich.console import Console
 
+from . import __version__
+
 from .config import (
     load_env_config,
     load_dotenv_config,
@@ -57,293 +59,278 @@ class OrchestratorCLI:
 
     @classmethod
     def create_parser(cls) -> argparse.ArgumentParser:
-        """Create argument parser for orchestrator."""
+        """Create argument parser for orchestrator with clear grouping and examples."""
         parser = argparse.ArgumentParser(
-            description="Orchestrator - Run multiple AI coding agents in parallel",
+            prog="orchestrator",
+            description=(
+                "Run AI coding agents with pluggable strategies, models, and a rich TUI.\n"
+                "Use -S key=value to pass strategy params."
+            ),
             formatter_class=argparse.RawDescriptionHelpFormatter,
-            epilog="""
-Examples:
-  # Run with simple strategy
-  orchestrator "implement auth" --strategy simple
-  
-  # Run with best-of-n strategy
-  orchestrator "fix the bug in user.py" --strategy best-of-n -S n=5
-  
-  # Run with custom model
-  orchestrator "add tests" --model opus
-  
-  # Use -S for strategy-specific parameters
-  orchestrator "implement auth" --strategy best-of-n -S n=10 -S scorer_prompt="evaluate correctness"
-  
-  # Run multiple strategy executions in parallel
-  orchestrator "fix bug" --strategy simple --runs 5
-  
-  # Resume interrupted run
-  orchestrator --resume run_20250114_123456
-  
-  # Run without TUI (headless)
-  orchestrator "implement feature" --no-tui
-""",
+            epilog=(
+                "Examples:\n"
+                "  # Simple strategy\n"
+                "  orchestrator \"implement auth\" --strategy simple\n\n"
+                "  # Best-of-N with params\n"
+                "  orchestrator \"fix bug in user.py\" --strategy best-of-n -S n=5\n\n"
+                "  # Doc review (pages file, 2 reviewers)\n"
+                "  orchestrator \"Review docs\" --strategy doc-review -S pages_file=pages.yml -S reviewers_per_page=2\n\n"
+                "  # Custom model and multiple runs\n"
+                "  orchestrator \"add tests\" --model opus --runs 3\n\n"
+                "  # Override Docker image\n"
+                "  orchestrator \"task\" --plugin codex --docker-image ghcr.io/me/codex-cli:mytag\n\n"
+                "  # Resume a run\n"
+                "  orchestrator --resume run_20250114_123456\n\n"
+                "  # Headless JSON output\n"
+                "  orchestrator \"implement feature\" --no-tui --output json\n"
+            ),
         )
 
-        # Main argument - the prompt or subcommand (doctor | config)
-        parser.add_argument("prompt", nargs="?", help="Prompt for the AI coding agent, or 'doctor'/'config'")
-        # Optional secondary token for 'config print'
-        parser.add_argument("subcommand", nargs="?", help="Subcommand for special modes (e.g., 'print' for 'config print')")
-
-        # Strategy options
+        # Global flags
         parser.add_argument(
+            "--version", action="version", version=f"%(prog)s {__version__}"
+        )
+
+        # Main argument - the task prompt or subcommand (doctor | config)
+        parser.add_argument(
+            "prompt",
+            nargs="?",
+            help="Task prompt, or 'doctor'/'config' for utility modes",
+        )
+        # Optional secondary token for 'config print'
+        parser.add_argument(
+            "subcommand",
+            nargs="?",
+            help="Subcommand for special modes (e.g., 'print' for 'config print')",
+        )
+
+        # Strategy group
+        g_strategy = parser.add_argument_group("Strategy")
+        g_strategy.add_argument(
             "--strategy",
             choices=list(AVAILABLE_STRATEGIES.keys()),
             default="simple",
             help="Execution strategy (default: simple)",
         )
-        parser.add_argument(
+        g_strategy.add_argument(
             "-S",
             action="append",
             dest="strategy_params",
             metavar="KEY=VALUE",
-            help="Set strategy-specific parameters (can be used multiple times)",
+            help="Strategy parameter (repeatable)",
         )
-        parser.add_argument(
+        g_strategy.add_argument(
             "--set",
             action="append",
             dest="strategy_params",
             metavar="KEY=VALUE",
-            help="Alias for -S to set strategy parameters",
+            help="Alias for -S",
         )
-        parser.add_argument(
-            "--runs",
-            type=int,
-            default=1,
-            help="Number of parallel strategy executions (default: 1)",
+        g_strategy.add_argument(
+            "--runs", type=int, default=1, help="Parallel strategy executions (default: 1)"
         )
 
-        # Model options: accept any string to remain plugin-agnostic
-        parser.add_argument(
-            "--model",
-            type=str,
-            default="sonnet",
-            help="Model to use (plugin-agnostic; aliases are resolved via models.yaml)",
-        )
-
-        # Plugin selection: load available plugins at parse-time
+        # Model & plugin group
         try:
             from .instance_runner.plugins import AVAILABLE_PLUGINS as _APLUG
             _plugin_choices = sorted(list(_APLUG.keys()))
         except Exception:
             _plugin_choices = ["claude-code"]
-        parser.add_argument(
+        g_model = parser.add_argument_group("Model & Plugin")
+        g_model.add_argument(
+            "--model",
+            type=str,
+            default="sonnet",
+            help="Model name/alias (plugin-agnostic; see models.yaml)",
+        )
+        g_model.add_argument(
             "--plugin",
             choices=_plugin_choices,
             default="claude-code",
-            help="Runner plugin to use (e.g., claude-code, codex)",
+            help="Runner plugin (e.g., claude-code, codex)",
+        )
+        g_model.add_argument(
+            "--docker-image",
+            type=str,
+            help="Override Docker image (e.g., myrepo/custom:tag)",
         )
 
-        # Repository options
-        parser.add_argument(
-            "--repo",
-            type=Path,
-            default=Path.cwd(),
-            help="Repository path (default: current directory)",
+        # Repository group
+        g_repo = parser.add_argument_group("Repository")
+        g_repo.add_argument(
+            "--repo", type=Path, default=Path.cwd(), help="Path to git repository"
         )
-        parser.add_argument(
-            "--base-branch",
-            default="main",
-            help="Base branch to work from (default: main)",
+        g_repo.add_argument(
+            "--base-branch", default="main", help="Base branch to work from"
         )
-        # Removed: --force-import (use strategy/config import policies instead)
+        g_repo.add_argument(
+            "--require-clean-wt",
+            action="store_true",
+            help="Fail if working tree is dirty",
+        )
+        g_repo.add_argument(
+            "--allow-overwrite-protected-refs",
+            action="store_true",
+            help="Allow overwriting protected refs (use with extreme caution)",
+        )
 
-        # Display options
-        parser.add_argument(
+        # Display & output group
+        g_display = parser.add_argument_group("Display & Output")
+        g_display.add_argument(
             "--no-tui",
             action="store_true",
-            help="Disable TUI and stream events to console",
+            help="Disable TUI; stream output to console",
         )
-        parser.add_argument(
+        g_display.add_argument(
             "--display",
             choices=["auto", "detailed", "compact", "dense"],
             default="auto",
-            help="Force TUI display density (default: auto)",
+            help="TUI density (default: auto)",
         )
-        parser.add_argument(
+        g_display.add_argument(
             "--display-details",
             choices=["none", "right"],
             default="none",
-            help="Show an optional details pane (default: none)",
+            help="Show details pane (default: none)",
         )
-        parser.add_argument(
+        g_display.add_argument(
             "--output",
             choices=["streaming", "json", "quiet"],
             default="streaming",
-            help="Output format when using --no-tui (default: streaming)",
+            help="Output format when --no-tui (default: streaming)",
         )
-        parser.add_argument(
-            "--no-emoji",
+        g_display.add_argument(
+            "--json",
             action="store_true",
-            help="Disable emojis in console output",
+            help="Convenience: JSON output (implies --no-tui --output json)",
         )
-        parser.add_argument(
+        g_display.add_argument(
+            "--no-emoji", action="store_true", help="Disable emoji in console output"
+        )
+        g_display.add_argument(
             "--show-ids",
             choices=["short", "full"],
             default="short",
-            help="Identifier verbosity in streaming output (default: short)",
+            help="Identifier verbosity in streaming output",
         )
-        parser.add_argument(
+        g_display.add_argument(
             "--verbose",
             action="store_true",
-            help="Increase verbosity of streaming logs (phases like container_created, branch_imported)",
+            help="More verbose streaming logs (container phases, imports)",
         )
 
-        # Authentication mode
-        parser.add_argument(
+        # Auth group
+        g_auth = parser.add_argument_group("Auth")
+        g_auth.add_argument(
             "--mode",
             choices=["subscription", "api"],
-            help="Authentication mode to use (default: auto-detect based on available credentials)",
+            help="Auth mode (default: auto-detect)",
+        )
+        g_auth.add_argument(
+            "--oauth-token",
+            help="OAuth token (or set CLAUDE_CODE_OAUTH_TOKEN)",
+        )
+        g_auth.add_argument(
+            "--api-key",
+            help="API key (or set ANTHROPIC_API_KEY / OPENAI_API_KEY)",
         )
 
-        # Proxy settings (optional) removed
-
-        # Resource limits
-        parser.add_argument(
+        # Execution & limits group
+        g_limits = parser.add_argument_group("Execution & Limits")
+        g_limits.add_argument(
             "--max-parallel",
             type=int,
             default=None,
-            help="Max parallel instances (default: auto = floor(host_cpu/runner.cpu), clamped [2,20])",
+            help="Max parallel instances (auto if omitted)",
         )
-        parser.add_argument(
-            "--timeout",
-            type=int,
-            default=3600,
-            help="Timeout per instance in seconds (default: 3600)",
+        g_limits.add_argument(
+            "--timeout", type=int, default=3600, help="Timeout per instance (seconds)"
         )
-
-        # Authentication
-        parser.add_argument(
-            "--oauth-token",
-            help="OAuth token for API access (or use CLAUDE_CODE_OAUTH_TOKEN env var)",
+        g_limits.add_argument(
+            "--parallel",
+            choices=["conservative", "balanced", "aggressive"],
+            help="Preset resources: 1C/2G, 2C/4G, 3C/6-8G",
         )
-        parser.add_argument(
-            "--api-key", help="API key for access (or use ANTHROPIC_API_KEY env var)"
+        g_limits.add_argument(
+            "--allow-global-session-volume",
+            action="store_true",
+            help="Share agent session across runs (advanced)",
         )
 
-        # Other options
-        parser.add_argument(
-            "--resume", metavar="RUN_ID", help="Resume an interrupted run"
+        # Config, state & logs group
+        g_state = parser.add_argument_group("Config, State & Logs")
+        g_state.add_argument(
+            "--config",
+            type=Path,
+            help="Config file (default: orchestrator.yaml if present)",
         )
-        parser.add_argument(
+        g_state.add_argument(
+            "--state-dir", type=Path, default=Path("./orchestrator_state"), help="State directory"
+        )
+        g_state.add_argument(
+            "--logs-dir", type=Path, default=Path("./logs"), help="Logs directory"
+        )
+        g_state.add_argument(
+            "--redact",
+            choices=["true", "false"],
+            default="true",
+            help="For 'config print': redact secrets (default: true)",
+        )
+        g_state.add_argument(
+            "--ci-artifacts",
+            metavar="OUT_ZIP",
+            help="Create minimal CI artifact zip (summary, branches, JSON)",
+        )
+
+        # Maintenance group
+        g_maint = parser.add_argument_group("Maintenance")
+        g_maint.add_argument("--resume", metavar="RUN_ID", help="Resume an interrupted run")
+        g_maint.add_argument(
             "--resume-fresh",
             metavar="RUN_ID",
-            help="Resume a run with fresh containers (re-run incomplete instances)",
+            help="Resume with fresh containers (re-run incomplete)",
         )
-        parser.add_argument(
-            "--list-runs", action="store_true", help="List all previous runs"
+        g_maint.add_argument("--list-runs", action="store_true", help="List previous runs")
+        g_maint.add_argument("--show-run", metavar="RUN_ID", help="Show run details")
+        g_maint.add_argument("--prune", action="store_true", help="Prune old logs/results")
+        g_maint.add_argument(
+            "--prune-dry-run", action="store_true", help="Show what would be pruned"
         )
-        parser.add_argument(
-            "--show-run", metavar="RUN_ID", help="Show details of a specific run"
-        )
-        parser.add_argument(
-            "--prune",
-            action="store_true",
-            help="Prune old logs/results according to retention settings",
-        )
-        parser.add_argument(
-            "--prune-dry-run",
-            action="store_true",
-            help="Show what would be pruned without deleting",
-        )
-        parser.add_argument(
+        g_maint.add_argument(
             "--clean-containers",
             metavar="RUN_ID",
-            help="Remove containers and state for a specific run",
+            help="Remove containers and state for a run",
         )
-        # Volumes cleanup per spec
-        parser.add_argument(
-            "--clean-volumes",
-            action="store_true",
-            help="Remove unreferenced session volumes (orc_home_*) older than a threshold",
-        )
-        parser.add_argument(
-            "--older-than",
-            type=float,
-            default=24.0,
-            help="Age threshold in hours for --clean-volumes (default: 24)",
-        )
-        parser.add_argument("--dry-run", action="store_true", help="List cleanup targets without deleting (with --clean-containers)")
-        parser.add_argument("--force", action="store_true", help="Bypass prompts for cleanup")
-        # Alias per spec examples
-        parser.add_argument(
+        g_maint.add_argument(
             "--cleanup-run",
             metavar="RUN_ID",
             dest="clean_containers",
             help="Alias for --clean-containers",
         )
-        parser.add_argument(
-            "--config",
-            type=Path,
-            help="Configuration file (default: orchestrator.yaml if exists)",
-        )
-        parser.add_argument(
-            "--state-dir",
-            type=Path,
-            default=Path("./orchestrator_state"),
-            help="State directory (default: ./orchestrator_state)",
-        )
-        parser.add_argument(
-            "--logs-dir",
-            type=Path,
-            default=Path("./logs"),
-            help="Logs directory (default: ./logs)",
-        )
-        parser.add_argument("--debug", action="store_true", help="Enable debug logging")
-        parser.add_argument("--yes", action="store_true", help="Assume yes for confirmations (non-interactive)")
-        # Convenience alias: --json implies --no-tui --output json
-        parser.add_argument("--json", action="store_true", help="Output JSON events (implies --no-tui)")
-        parser.add_argument(
-            "--ci-artifacts",
-            metavar="OUT_ZIP",
-            help="Create a minimal CI artifact zip (summary, branches, per-task JSON)",
-        )
-        # Enforce clean working tree if desired
-        parser.add_argument(
-            "--require-clean-wt",
+        g_maint.add_argument(
+            "--clean-volumes",
             action="store_true",
-            help="Require a clean working tree before running",
+            help="Remove unreferenced session volumes (orc_home_*)",
         )
-        # Working tree cleanliness behavior (spec: warn by default; enforce with flag)
-        # Removed: --require-clean-wt (always warn only)
-        # Protected refs overwrite gate
-        parser.add_argument(
-            "--allow-overwrite-protected-refs",
+        g_maint.add_argument(
+            "--older-than",
+            type=float,
+            default=24.0,
+            help="Age threshold in hours for --clean-volumes",
+        )
+        g_maint.add_argument(
+            "--dry-run",
             action="store_true",
-            help="Allow overwriting protected refs (main/master/release/*/etc). Use with extreme caution.",
+            help="List cleanup targets without deleting",
         )
-        # Parallel presets (sets container CPU+RAM together)
-        parser.add_argument(
-            "--parallel",
-            choices=["conservative", "balanced", "aggressive"],
-            help="Preset for per-container resources: conservative(1CPU/2GiB), balanced(2CPU/4GiB), aggressive(3CPU/6-8GiB)",
-        )
-        # Removed: --allow-dirty (deprecated)
-        # Server extension support removed
-        # Session volume scope safety switch (normative; requires explicit consent)
-        parser.add_argument(
-            "--allow-global-session-volume",
-            action="store_true",
-            help="Allow global session volume scope (shares agent session across runs)",
+        g_maint.add_argument(
+            "--force", action="store_true", help="Bypass confirmations for cleanup"
         )
 
-        # Removed: --safe-fsync (sensible defaults used)
-
-        # Removed: --docker-smoke (dev-only)
-
-        # Config print options (effective only with: orchestrator config print)
-        parser.add_argument(
-            "--redact",
-            choices=["true", "false"],
-            default="true",
-            help="For 'config print': redact secrets (default: true). Set to false only with ORC_ALLOW_UNREDACTED=1.",
-        )
+        # Diagnostics group
+        g_diag = parser.add_argument_group("Diagnostics")
+        g_diag.add_argument("--debug", action="store_true", help="Enable debug logging")
+        g_diag.add_argument("--yes", action="store_true", help="Assume 'yes' for prompts")
 
         return parser
 
@@ -1533,6 +1520,8 @@ Examples:
             cli_config["model"] = args.model
         if hasattr(args, "plugin") and args.plugin:
             cli_config["plugin_name"] = args.plugin
+        if hasattr(args, "docker_image") and args.docker_image:
+            cli_config.setdefault("runner", {})["docker_image"] = args.docker_image
         if args.strategy:
             cli_config["strategy"] = args.strategy
         if args.state_dir:
@@ -1767,6 +1756,7 @@ Examples:
             allow_global_session_volume=allow_global_session,
             default_plugin_name=str(full_config.get("plugin_name", getattr(args, "plugin", "claude-code"))),
             default_model_alias=str(full_config.get("model", getattr(args, "model", "sonnet"))),
+            default_docker_image=full_config.get("runner", {}).get("docker_image"),
         )
 
         # Initialize orchestrator

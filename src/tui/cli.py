@@ -20,6 +20,7 @@ from rich.console import Console
 from .display import TUIDisplay
 from .models import TUIState
 from .event_handler import EventProcessor, AsyncEventStream
+from .. import __version__
 
 
 class OrchestratorTUI:
@@ -35,58 +36,63 @@ class OrchestratorTUI:
 
     @classmethod
     def create_parser(cls) -> argparse.ArgumentParser:
-        """Create argument parser for TUI."""
+        """Create argument parser for TUI with clear grouping and examples."""
         parser = argparse.ArgumentParser(
-            description="Orchestrator TUI - Monitor AI coding agent execution",
+            prog="orchestrator-tui",
+            description="Monitor orchestrator runs from an events file (TUI or text)",
             formatter_class=argparse.RawDescriptionHelpFormatter,
-            epilog="""
-Examples:
-  # Watch events file
-  orchestrator-tui --events-file logs/run_20250114_123456/events.jsonl
-  
-  # Stream events as text
-  orchestrator-tui --events-file events.jsonl --output streaming
-  
-  # Output JSON events
-  orchestrator-tui --events-file events.jsonl --output json
-""",
+            epilog=(
+                "Examples:\n"
+                "  # Watch a run by ID\n"
+                "  orchestrator-tui --run-id run_20250114_123456\n\n"
+                "  # Stream as text from a file\n"
+                "  orchestrator-tui --events-file logs/run_20250114_123456/events.jsonl --output streaming\n\n"
+                "  # Emit JSON events (no TUI)\n"
+                "  orchestrator-tui --events-file events.jsonl --output json\n"
+            ),
         )
 
-        # Input options (file mode only)
+        # Global
         parser.add_argument(
+            "--version", action="version", version=f"%(prog)s {__version__}"
+        )
+
+        # Input
+        g_input = parser.add_argument_group("Input")
+        g_input.add_argument(
             "--events-file", type=Path, help="Read events from file (offline mode)"
         )
+        g_input.add_argument(
+            "--from-offset", type=int, default=0, help="Start reading from byte offset"
+        )
+        g_input.add_argument("--run-id", help="Infer events file by run ID")
 
-        # Display options
-        parser.add_argument(
+        # Display
+        g_display = parser.add_argument_group("Display")
+        g_display.add_argument(
             "--output",
             choices=["tui", "streaming", "json", "quiet"],
             default="tui",
             help="Output mode (default: tui)",
         )
-        parser.add_argument(
+        g_display.add_argument(
             "--display-mode",
             choices=["auto", "detailed", "compact", "dense"],
             default="auto",
-            help="Force display mode for TUI (default: auto)",
+            help="Force display density for TUI",
         )
-        parser.add_argument(
-            "--from-offset",
-            type=int,
-            default=0,
-            help="Start reading events from offset (default: 0)",
-        )
-
-        # Filtering options
-        parser.add_argument("--run-id", help="Filter events by run ID")
-        parser.add_argument("--instance-id", help="Filter events by instance ID")
-        parser.add_argument("--event-types", nargs="+", help="Filter by event types")
-
-        # Other options
-        parser.add_argument(
+        g_display.add_argument(
             "--no-color", action="store_true", help="Disable colored output"
         )
-        parser.add_argument("--debug", action="store_true", help="Enable debug logging")
+
+        # Filters
+        g_filters = parser.add_argument_group("Filters")
+        g_filters.add_argument("--instance-id", help="Filter by instance ID")
+        g_filters.add_argument("--event-types", nargs="+", help="Filter by event type(s)")
+
+        # Diagnostics
+        g_diag = parser.add_argument_group("Diagnostics")
+        g_diag.add_argument("--debug", action="store_true", help="Enable debug logging")
 
         return parser
 

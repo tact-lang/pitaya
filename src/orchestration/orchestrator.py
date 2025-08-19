@@ -70,6 +70,7 @@ class Orchestrator:
         allow_global_session_volume: bool = False,
         default_plugin_name: str = "claude-code",
         default_model_alias: str = "sonnet",
+        default_docker_image: Optional[str] = None,
     ):
         """
         Initialize orchestrator.
@@ -94,6 +95,8 @@ class Orchestrator:
         self.container_retention_success_hours = container_retention_success_hours
         self.runner_timeout_seconds = max(1, int(runner_timeout_seconds))
         self.default_network_egress = str(default_network_egress or "online").lower()
+        # Optional global Docker image override
+        self.default_docker_image = default_docker_image
         # Load model mapping checksum for handshake (single-process still validates equality)
         try:
             from ..utils.model_mapping import load_model_mapping
@@ -1403,6 +1406,7 @@ class Orchestrator:
                 auth_config=self.auth_config,
                 retry_config=self.retry_config,
                 plugin_name=(info.metadata or {}).get("plugin_name", "claude-code"),
+                docker_image=(info.metadata or {}).get("docker_image") or self.default_docker_image,
                 import_policy=(info.metadata or {}).get("import_policy", "auto"),
                 import_conflict_policy=(info.metadata or {}).get("import_conflict_policy", "fail"),
                 skip_empty_import=bool((info.metadata or {}).get("skip_empty_import", True)),
@@ -2174,6 +2178,7 @@ class Orchestrator:
                 container_limits=ContainerLimits(cpu_count=eff_cpu, memory_gb=eff_mem, memory_swap_gb=eff_mem),
                 retry_config=self.retry_config,
                 auth_config=self.auth_config,
+                docker_image=(instance_info.metadata or {}).get("docker_image") or self.default_docker_image,
                 import_policy=(instance_info.metadata or {}).get("import_policy", "auto"),
                 import_conflict_policy=(instance_info.metadata or {}).get("import_conflict_policy", "fail"),
                 skip_empty_import=bool((instance_info.metadata or {}).get("skip_empty_import", True)),
