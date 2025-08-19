@@ -1,7 +1,8 @@
 """
-Claude Code plugin implementation.
+Anthropic plugin implementation.
 
-This plugin integrates Claude Code with the orchestrator's runner interface.
+This plugin integrates the Anthropic coding agent with the orchestrator's
+runner interface.
 """
 
 import logging
@@ -19,7 +20,7 @@ logger = logging.getLogger(__name__)
 
 
 class ClaudeCodePlugin(RunnerPlugin):
-    """Plugin for running Claude Code in containers."""
+    """Plugin for running the Anthropic agent in containers."""
 
     def __init__(self):
         self._parser = ClaudeOutputParser()
@@ -48,7 +49,7 @@ class ClaudeCodePlugin(RunnerPlugin):
     async def validate_environment(
         self, auth_config: Optional[Dict[str, Any]] = None
     ) -> Tuple[bool, Optional[str]]:
-        """Validate Claude Code can run."""
+        """Validate plugin can run with required credentials."""
         # Check for authentication from auth_config first, then environment
         has_auth = False
 
@@ -76,11 +77,7 @@ class ClaudeCodePlugin(RunnerPlugin):
         container: "Container",
         auth_config: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, str]:
-        """
-        Prepare Claude Code environment.
-
-        Returns environment variables for authentication.
-        """
+        """Prepare environment variables for authentication."""
         env_vars = {}
 
         if auth_config:
@@ -108,7 +105,7 @@ class ClaudeCodePlugin(RunnerPlugin):
         container_config: Dict[str, Any],
         session_id: Optional[str] = None,
     ) -> Dict[str, Any]:
-        """Add Claude-specific container configuration."""
+        """Add plugin-specific container configuration (if needed)."""
         # Authentication is already handled by docker_manager.py based on auth_config
         # Session ID is also handled by docker_manager.py
         # This method is kept for future Claude-specific container needs
@@ -126,7 +123,7 @@ class ClaudeCodePlugin(RunnerPlugin):
         operator_resume: bool = False,
         **kwargs,
     ) -> List[str]:
-        """Build Claude Code command."""
+        """Build command for the Anthropic CLI."""
         command = [
             "claude",
             "--model",
@@ -160,7 +157,7 @@ class ClaudeCodePlugin(RunnerPlugin):
         output_line: str,
         parser_state: Dict[str, Any],
     ) -> Optional[Dict[str, Any]]:
-        """Parse Claude Code stream-json output."""
+        """Parse agent stream-json output."""
         # Initialize parser in state if needed
         if "_parser" not in parser_state:
             parser_state["_parser"] = ClaudeOutputParser()
@@ -172,7 +169,7 @@ class ClaudeCodePlugin(RunnerPlugin):
         self,
         parser_state: Dict[str, Any],
     ) -> Dict[str, Any]:
-        """Extract final result from Claude parser."""
+        """Extract final result from the parser."""
         if "_parser" not in parser_state:
             return {
                 "session_id": None,
@@ -211,8 +208,8 @@ class ClaudeCodePlugin(RunnerPlugin):
         ):
             return "session_corrupted", False
         else:
-            # Generic Claude error
-            return "claude", True
+            # Generic agent error (legacy: was 'claude')
+            return "agent", True
 
     async def execute(
         self,
@@ -225,7 +222,7 @@ class ClaudeCodePlugin(RunnerPlugin):
         event_callback: Optional[Any] = None,
         **kwargs,
     ) -> Dict[str, Any]:
-        """Execute Claude Code inside the container and return result data."""
+        """Execute the agent inside the container and return result data."""
         # Build command
         # Extract operator_resume flag (avoid passing duplicate kwarg)
         op_resume = bool(kwargs.pop("operator_resume", False))

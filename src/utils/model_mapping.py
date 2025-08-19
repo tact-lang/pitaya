@@ -2,7 +2,7 @@
 Model mapping loader with checksum support.
 
 Loads models.yaml with friendly->concrete model IDs and computes a checksum for handshake.
-Falls back to identity mapping for Claude Code when the file is absent.
+Falls back to a small identity mapping when the file is absent.
 """
 
 from pathlib import Path
@@ -28,7 +28,7 @@ def load_model_mapping(models_path: Optional[Path] = None) -> Tuple[Dict[str, st
         models_path = Path("models.yaml")
 
     if not models_path.exists():
-        # Fallback identity mapping suitable for Claude Code CLI
+        # Fallback identity mapping used when no mapping file is present
         mapping = {"sonnet": "sonnet", "haiku": "haiku", "opus": "opus"}
         return mapping, _compute_checksum({"models": mapping})
 
@@ -47,4 +47,3 @@ def resolve_model(name: str, mapping: Optional[Dict[str, str]] = None) -> str:
     if name not in mapping:
         raise KeyError(f"Unknown model alias: {name}")
     return mapping[name]
-

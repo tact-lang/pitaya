@@ -28,6 +28,8 @@ class BestOfNConfig(StrategyConfig):
     scorer_prompt: str = (
         "Review this code implementation and provide a score from 1-10 based on quality, completeness, and correctness. Return the score as a JSON object with 'score' and 'feedback' fields."
     )
+    # Optional reviewer model override; defaults to StrategyConfig.model
+    scorer_model: str | None = None
 
     def validate(self) -> None:
         """Validate best-of-n configuration."""
@@ -87,6 +89,8 @@ class BestOfNStrategy(Strategy):
                 "timeout_seconds": config.timeout_seconds,
                 "container_limits": config.container_limits,
                 "scorer_prompt": config.scorer_prompt,
+                # Optional per-phase model override for reviewer
+                "scorer_model": config.scorer_model,
                 # Ensure unique durable keys per candidate
                 "key_prefix": f"cand{index}",
             }

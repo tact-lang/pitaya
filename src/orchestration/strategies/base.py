@@ -89,7 +89,16 @@ class Strategy(ABC):
         config_class = self.get_config_class()
         # Merge stored overrides with any provided kwargs
         all_config = {**self._config_overrides, **kwargs}
-        config = config_class(**all_config)
+        # Filter unknown keys to keep strategies agnostic to extra fields (e.g., plugin_name)
+        try:
+            valid_keys = set(getattr(config_class, "__dataclass_fields__", {}).keys())
+            if valid_keys:
+                filtered = {k: v for k, v in all_config.items() if k in valid_keys}
+            else:
+                filtered = all_config
+        except Exception:
+            filtered = all_config
+        config = config_class(**filtered)
         config.validate()
         return config
 

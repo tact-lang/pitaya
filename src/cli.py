@@ -119,18 +119,25 @@ Examples:
             help="Number of parallel strategy executions (default: 1)",
         )
 
-        # Model options (load from models.yaml mapping if available)
-        try:
-            from .utils.model_mapping import load_model_mapping
-            _mapping, _checksum = load_model_mapping()
-            _model_choices = sorted(list(_mapping.keys())) or ["sonnet", "haiku", "opus"]
-        except Exception:
-            _model_choices = ["sonnet", "haiku", "opus"]
+        # Model options: accept any string to remain plugin-agnostic
         parser.add_argument(
             "--model",
-            choices=_model_choices,
+            type=str,
             default="sonnet",
-            help="Model alias to use (validated via models.yaml)",
+            help="Model to use (plugin-agnostic; aliases are resolved via models.yaml)",
+        )
+
+        # Plugin selection: load available plugins at parse-time
+        try:
+            from .instance_runner.plugins import AVAILABLE_PLUGINS as _APLUG
+            _plugin_choices = sorted(list(_APLUG.keys()))
+        except Exception:
+            _plugin_choices = ["claude-code"]
+        parser.add_argument(
+            "--plugin",
+            choices=_plugin_choices,
+            default="claude-code",
+            help="Runner plugin to use (e.g., claude-code, codex)",
         )
 
         # Repository options
@@ -323,7 +330,7 @@ Examples:
         parser.add_argument(
             "--allow-global-session-volume",
             action="store_true",
-            help="Allow global session volume scope (shares Claude session across runs)",
+            help="Allow global session volume scope (shares agent session across runs)",
         )
 
         # Removed: --safe-fsync (sensible defaults used)
@@ -355,6 +362,9 @@ Examples:
             cli_config.setdefault("runner", {})["oauth_token"] = args.oauth_token
         if hasattr(args, "api_key") and args.api_key:
             cli_config.setdefault("runner", {})["api_key"] = args.api_key
+        # Include plugin selection at top-level for strategy-agnostic wiring
+        if hasattr(args, "plugin") and args.plugin:
+            cli_config["plugin_name"] = args.plugin
 
         # Merge all sources
         full_config = merge_config(
@@ -403,14 +413,14 @@ Examples:
             pass
         # 5. Otherwise, error with clear message
         else:
+            # Do not hard-fail: non-Anthropic plugins (e.g., Codex) may use OPENAI_API_KEY
+            # or run in OSS mode. Warn and proceed with empty AuthConfig.
             self.console.print(
-                "[red]Error: No authentication provided.[/red]\n"
-                "Set CLAUDE_CODE_OAUTH_TOKEN or ANTHROPIC_API_KEY in:\n"
-                "  - .env file\n"
-                "  - Environment variables\n"
-                "  - Command line: --oauth-token or --api-key"
+                "[yellow]Warning: No provider credentials found.\n"
+                "- For Anthropic, set CLAUDE_CODE_OAUTH_TOKEN or ANTHROPIC_API_KEY.\n"
+                "- For OpenAI, ensure OPENAI_API_KEY is set (and OPENAI_BASE_URL if applicable).[/yellow]"
             )
-            sys.exit(1)
+            return AuthConfig(oauth_token=None, api_key=None, base_url=None)
 
         return AuthConfig(oauth_token=oauth_token, api_key=api_key, base_url=base_url)
 
@@ -438,10 +448,8 @@ Examples:
                 elif alias2 in strat_section:
                     config.update(strat_section[alias2])
 
-        # Add model (CLI overrides config)
-        config["model"] = args.model or full_config.get(
-            "model", "sonnet"
-        )
+        # Add model (CLI overrides config); strategies remain plugin-agnostic
+        config["model"] = args.model or full_config.get("model", "sonnet")
 
         # --force-import removed; rely on import_conflict_policy in config/strategy
         
@@ -1213,23 +1221,6 @@ Examples:
                     f"[bold]Strategy #{idx} ({strat_info.strategy_name}):[/bold]"
                 )
 
-                # Find the selected result for best-of-n strategies
-                selected_branch = None
-                if strat_info.strategy_name == "best-of-n" and strat_info.results:
-                    # The first result is typically the selected one
-                    try:
-                        selected_branch = (
-                            strat_info.results[0].branch_name
-                            if strat_info.results
-                            else None
-                        )
-                    except AttributeError:
-                        # Fallback if results are dicts (e.g., from snapshot)
-                        selected_branch = (
-                            strat_info.results[0].get("branch_name")
-                            if strat_info.results
-                            else None
-                        )
 
                 # Display each instance
                 for result in strat_results:
@@ -1296,10 +1287,6 @@ Examples:
                             message = message[:497] + "..."
                         self.console.print(f"    [dim]final_message:[/dim] {message}")
 
-                # Show selected result for best-of-n
-                if selected_branch:
-                    self.console.print(f"  → Selected: {selected_branch}")
-
                 self.console.print()  # Empty line between strategies
 
         else:
@@ -1344,7 +1331,7 @@ Examples:
                 )
                 # Show resume tip when any strategy canceled
                 if strat_canceled > 0:
-                    self.console.print("\n[blue]Scoring interrupted. To resume this run:[/blue]")
+                    self.console.print("\n[blue]Run interrupted. To resume this run:[/blue]")
                     self.console.print(f"  orchestrator --resume {run_id}")
             except Exception:
                 pass
@@ -1389,7 +1376,7 @@ Examples:
             if len(final_branches) > 1:
                 self.console.print(f"  git checkout {final_branches[1]}")
 
-            self.console.print("\n[dim]To merge selected solution:[/dim]")
+            self.console.print("\n[dim]To merge a solution:[/dim]")
             self.console.print(f"  git merge {final_branches[0]}")
 
     async def run_orchestrator(self, args: argparse.Namespace) -> int:
@@ -1544,6 +1531,8 @@ Examples:
             cli_config.setdefault("runner", {})["timeout"] = args.timeout
         if args.model:
             cli_config["model"] = args.model
+        if hasattr(args, "plugin") and args.plugin:
+            cli_config["plugin_name"] = args.plugin
         if args.strategy:
             cli_config["strategy"] = args.strategy
         if args.state_dir:
@@ -1696,14 +1685,21 @@ Examples:
         base_url = full_config.get("runner", {}).get("base_url")
 
         if not oauth_token and not api_key:
-            self.console.print(
-                "[red]Error: No authentication provided.[/red]\n"
-                "Set CLAUDE_CODE_OAUTH_TOKEN or ANTHROPIC_API_KEY in:\n"
-                "  - .env file\n"
-                "  - Environment variables\n"
-                "  - Command line: --oauth-token or --api-key"
-            )
-            return 1
+            # Allow non-Anthropic plugins to continue (e.g., Codex with OPENAI_API_KEY)
+            plugin_name = full_config.get("plugin_name") or getattr(args, "plugin", "claude-code")
+            if str(plugin_name) == "claude-code":
+                self.console.print(
+                    "[red]Error: Missing credentials for the selected provider.[/red]\n"
+                    "Set CLAUDE_CODE_OAUTH_TOKEN or ANTHROPIC_API_KEY in:\n"
+                    "  - .env file\n"
+                    "  - Environment variables\n"
+                    "  - Command line: --oauth-token or --api-key"
+                )
+                return 1
+            else:
+                self.console.print(
+                    "[yellow]Warning: No provider credentials set. Proceeding with selected plugin.[/yellow]"
+                )
 
         auth_config = AuthConfig(
             oauth_token=oauth_token, api_key=api_key, base_url=base_url
@@ -1769,6 +1765,8 @@ Examples:
             branch_namespace=str(full_config.get("orchestration", {}).get("branch_namespace", "flat")),
             allow_overwrite_protected_refs=allow_overwrite,
             allow_global_session_volume=allow_global_session,
+            default_plugin_name=str(full_config.get("plugin_name", getattr(args, "plugin", "claude-code"))),
+            default_model_alias=str(full_config.get("model", getattr(args, "model", "sonnet"))),
         )
 
         # Initialize orchestrator

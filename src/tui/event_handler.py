@@ -124,14 +124,15 @@ class EventProcessor:
             "instance.container_config_ready": self._handle_instance_container_creating,
             "instance.container_create_attempt": self._handle_instance_container_creating,
             "instance.container_created": self._handle_instance_container_created,
-            "instance.claude_starting": self._handle_instance_claude_starting,
+            # Agent start
+            "instance.agent_starting": self._handle_instance_agent_starting,
             "instance.result_collection_started": self._handle_instance_result_collection,
-            # Claude-specific events
-            "instance.claude_system": self._handle_claude_system,
-            "instance.claude_assistant": self._handle_claude_assistant,
-            "instance.claude_tool_use": self._handle_claude_tool_use,
-            "instance.claude_tool_result": self._handle_claude_tool_result,
-            "instance.claude_result": self._handle_claude_result,
+            # Agent stream events
+            "instance.agent_system": self._handle_agent_system,
+            "instance.agent_assistant": self._handle_agent_assistant,
+            "instance.agent_tool_use": self._handle_agent_tool_use,
+            "instance.agent_tool_result": self._handle_agent_tool_result,
+            "instance.agent_result": self._handle_agent_result,
             # Cancellation / lifecycle
             "instance.canceled": self._handle_instance_canceled,
             "state.instance_updated": self._handle_state_instance_updated,
@@ -231,6 +232,13 @@ class EventProcessor:
                 branch_name=data.get("branch_name", ""),
             )
             self.state.current_run.instances[iid] = inst
+        # Set model early if present to avoid showing default placeholder
+        try:
+            m = data.get("model")
+            if m:
+                inst.model = m
+        except Exception:
+            pass
         # Keep total_instances in sync with unique instances only
         self.state.current_run.total_instances = len(self.state.current_run.instances)
         # Best-effort grouping by strategy name when available
@@ -403,13 +411,13 @@ class EventProcessor:
                 "container_env_preparing": "Preparing container env...",
                 "container_env_prepared": "Container env ready",
                 "container_created": "Container created",
-                "claude_starting": "Starting Claude...",
+                "agent_starting": "Starting Agent...",
                 "result_collection": "Collecting results...",
                 "branch_imported": "Branch imported",
                 "no_changes": "No changes",
                 "cleanup": "Cleaning up...",
-                "assistant": "Claude is thinking...",
-                "system": "Claude connected",
+                "assistant": "Agent is thinking...",
+                "system": "Agent connected",
                 "tool_use": f"Using {tool}" if tool else "Tool use",
             }.get(phase)
             if friendly:
@@ -646,7 +654,7 @@ class EventProcessor:
                 status=InstanceStatus.RUNNING,
                 started_at=self._parse_timestamp(event.get("timestamp")),
                 prompt=data.get("prompt"),
-                model=data.get("model", "sonnet"),
+                model=data.get("model", ""),
                 current_activity="Starting...",
                 last_updated=datetime.now(),
             )
@@ -667,7 +675,7 @@ class EventProcessor:
             instance.status = InstanceStatus.RUNNING
             instance.started_at = self._parse_timestamp(event.get("timestamp"))
             instance.prompt = data.get("prompt")
-            instance.model = data.get("model", "sonnet")
+            instance.model = data.get("model", "")
             # Backfill strategy name if available
             if instance.strategy_name == "unknown" and data.get("strategy"):
                 instance.strategy_name = data.get("strategy")
@@ -820,10 +828,10 @@ class EventProcessor:
                     strategy.total_instances += 1
                     break
 
-    # Claude-specific event handlers
+    # Agent/assistant event handlers
 
-    def _handle_claude_system(self, event: Dict[str, Any]) -> None:
-        """Handle Claude system message (connection established)."""
+    def _handle_agent_system(self, event: Dict[str, Any]) -> None:
+        """Handle agent system message (connection established)."""
         if not self.state.current_run:
             return
 
@@ -832,11 +840,11 @@ class EventProcessor:
             return
 
         instance = self.state.current_run.instances[instance_id]
-        instance.current_activity = "Claude connected"
+        instance.current_activity = "Agent connected"
         instance.last_updated = datetime.now()
 
-    def _handle_claude_assistant(self, event: Dict[str, Any]) -> None:
-        """Handle Claude assistant message."""
+    def _handle_agent_assistant(self, event: Dict[str, Any]) -> None:
+        """Handle agent assistant message."""
         if not self.state.current_run:
             return
 
@@ -845,11 +853,11 @@ class EventProcessor:
             return
 
         instance = self.state.current_run.instances[instance_id]
-        instance.current_activity = "Claude is thinking..."
+        instance.current_activity = "Agent is thinking..."
         instance.last_updated = datetime.now()
 
-    def _handle_claude_tool_use(self, event: Dict[str, Any]) -> None:
-        """Handle Claude tool use."""
+    def _handle_agent_tool_use(self, event: Dict[str, Any]) -> None:
+        """Handle agent tool use."""
         if not self.state.current_run:
             return
 
@@ -879,13 +887,13 @@ class EventProcessor:
         instance.current_activity = friendly_name
         instance.last_updated = datetime.now()
 
-    def _handle_claude_tool_result(self, event: Dict[str, Any]) -> None:
-        """Handle Claude tool result."""
+    def _handle_agent_tool_result(self, event: Dict[str, Any]) -> None:
+        """Handle agent tool result."""
         # Could track success/failure of tool uses if needed
         pass
 
-    def _handle_claude_result(self, event: Dict[str, Any]) -> None:
-        """Handle Claude final result."""
+    def _handle_agent_result(self, event: Dict[str, Any]) -> None:
+        """Handle agent final result."""
         if not self.state.current_run:
             return
 
@@ -1005,8 +1013,8 @@ class EventProcessor:
         instance.current_activity = "Container created"
         instance.last_updated = datetime.now()
 
-    def _handle_instance_claude_starting(self, event: Dict[str, Any]) -> None:
-        """Handle Claude starting event."""
+    def _handle_instance_agent_starting(self, event: Dict[str, Any]) -> None:
+        """Handle agent starting event."""
         if not self.state.current_run:
             return
 
@@ -1015,7 +1023,7 @@ class EventProcessor:
             return
 
         instance = self.state.current_run.instances[instance_id]
-        instance.current_activity = "Starting Claude..."
+        instance.current_activity = "Starting Agent..."
         instance.last_updated = datetime.now()
 
     def _handle_instance_result_collection(self, event: Dict[str, Any]) -> None:

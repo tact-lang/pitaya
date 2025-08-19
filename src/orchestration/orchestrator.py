@@ -68,6 +68,8 @@ class Orchestrator:
         branch_namespace: str = "flat",
         allow_overwrite_protected_refs: bool = False,
         allow_global_session_volume: bool = False,
+        default_plugin_name: str = "claude-code",
+        default_model_alias: str = "sonnet",
     ):
         """
         Initialize orchestrator.
@@ -124,6 +126,9 @@ class Orchestrator:
         self.branch_namespace = str(branch_namespace or "flat").lower()
         self.allow_overwrite_protected_refs = bool(allow_overwrite_protected_refs)
         self.allow_global_session_volume = bool(allow_global_session_volume)
+        # Default plugin/model for strategy tasks (strategy-agnostic selection)
+        self.default_plugin_name = str(default_plugin_name or "claude-code")
+        self.default_model_alias = str(default_model_alias or "sonnet")
 
         # Multi-resource admission (CPU, memory, disk guard)
         self._admission_lock = asyncio.Lock()
@@ -475,21 +480,7 @@ class Orchestrator:
             logger.info(f"Found strategy class for {strategy_name}")
             strategy_class = AVAILABLE_STRATEGIES[strategy_name]
 
-            # Preflight plugin capability gating per spec
-            try:
-                from ..instance_runner.plugins import AVAILABLE_PLUGINS as _APLUGS
-                plugin = _APLUGS.get("claude-code")()
-                # Strategies that rely on resume/session continuity must require supports_resume
-                requires_resume = strategy_name in ("iterative",)
-                if requires_resume and not getattr(plugin.capabilities, "supports_resume", False):
-                    raise ValidationError(
-                        f"Strategy '{strategy_name}' requires resume capability but selected plugin does not support it"
-                    )
-            except Exception as _e:
-                # If validation throws, surface as a clean orchestrator error
-                if isinstance(_e, ValidationError):
-                    raise
-                logger.debug(f"Capability gating check skipped/failed: {_e}")
+            # Removed hardcoded capability gating by strategy name; selection is plugin-agnostic
 
             # Execute multiple strategy runs in parallel
             logger.info(f"Runs requested: {runs}")
@@ -1340,8 +1331,8 @@ class Orchestrator:
                 elif et == "instance.container_adopted":
                     # Treat adoption as created for UX
                     phase, activity = "container_created", "Container adopted"
-                elif et == "instance.claude_starting":
-                    phase, activity = "claude_starting", "Starting Claude..."
+                elif et == "instance.agent_starting":
+                    phase, activity = "agent_starting", "Starting Agent..."
                 elif et == "instance.result_collection_started":
                     phase, activity = "result_collection", "Collecting results..."
                 elif et == "instance.branch_imported":
@@ -1350,14 +1341,14 @@ class Orchestrator:
                     phase, activity = "no_changes", "No changes"
                 elif et == "instance.workspace_cleaned":
                     phase, activity = "cleanup", "Workspace cleaned"
-                # Claude tool and message events
-                elif et == "instance.claude_tool_use":
+                # Agent tool and message events
+                elif et == "instance.agent_tool_use":
                     phase, tool = "tool_use", (data.get("tool") or data.get("data", {}).get("tool"))
                     activity = f"Using {tool}" if tool else "Tool use"
-                elif et == "instance.claude_assistant":
-                    phase, activity = "assistant", "Claude is thinking..."
-                elif et == "instance.claude_system":
-                    phase, activity = "system", "Claude connected"
+                elif et == "instance.agent_assistant":
+                    phase, activity = "assistant", "Agent is thinking..."
+                elif et == "instance.agent_system":
+                    phase, activity = "system", "Agent connected"
 
                 if phase and task_key:
                     self.event_bus.emit_canonical(
@@ -1411,6 +1402,7 @@ class Orchestrator:
                 container_limits=ContainerLimits(cpu_count=eff_cpu, memory_gb=eff_mem, memory_swap_gb=eff_mem),
                 auth_config=self.auth_config,
                 retry_config=self.retry_config,
+                plugin_name=(info.metadata or {}).get("plugin_name", "claude-code"),
                 import_policy=(info.metadata or {}).get("import_policy", "auto"),
                 import_conflict_policy=(info.metadata or {}).get("import_conflict_policy", "fail"),
                 skip_empty_import=bool((info.metadata or {}).get("skip_empty_import", True)),
@@ -1956,7 +1948,6 @@ class Orchestrator:
         # Respect resource gating by using the executor queue
         from ..shared import InstanceStatus as _IS
         from ..instance_runner.plugins import AVAILABLE_PLUGINS
-        plugin = AVAILABLE_PLUGINS["claude-code"]()
         from ..instance_runner.docker_manager import DockerManager
         docker_manager = DockerManager()
 
@@ -1995,7 +1986,13 @@ class Orchestrator:
                     else:
                         # Resume only if container exists and plugin supports resume
                         can_resume = False
-                        if info.session_id and plugin.capabilities.supports_resume:
+                        try:
+                            _pname = (info.metadata or {}).get("plugin_name", "claude-code")
+                            _pclass = AVAILABLE_PLUGINS.get(_pname) or AVAILABLE_PLUGINS.get("claude-code")
+                            _plugin = _pclass()  # type: ignore[call-arg]
+                        except Exception:
+                            _plugin = AVAILABLE_PLUGINS["claude-code"]()
+                        if info.session_id and _plugin.capabilities.supports_resume:
                             try:
                                 await asyncio.get_event_loop().run_in_executor(
                                     None, lambda: docker_manager.client.containers.get(info.container_name)
@@ -2475,11 +2472,11 @@ class Orchestrator:
                             elif et == "instance.failed" and iid:
                                 running.discard(iid)
                                 failed_set.add(iid)
-                            elif et == "instance.claude_turn_complete" and iid:
+                            elif et == "instance.agent_turn_complete" and iid:
                                 tm = data.get("turn_metrics", {})
                                 inst_tokens[iid] = inst_tokens.get(iid, 0) + int(tm.get("tokens", 0) or 0)
                                 inst_cost[iid] = inst_cost.get(iid, 0.0) + float(tm.get("cost", 0.0) or 0.0)
-                            elif et == "instance.claude_completed" and iid:
+                            elif et == "instance.agent_completed" and iid:
                                 m = data.get("metrics", {})
                                 if m:
                                     inst_tokens[iid] = int(m.get("total_tokens", inst_tokens.get(iid, 0)))
@@ -2494,62 +2491,30 @@ class Orchestrator:
             strategy_dir = results_dir / "strategy_output"
             strategy_dir.mkdir(exist_ok=True)
 
-            # Save strategy-specific outputs
+            # Save strategy outputs (summary JSON only); strategy-specific metadata is kept in run state
             for strat_id, strat_info in state.strategies.items():
                 if strat_info.results:
-                    # Save strategy-specific data like scores and feedback
-                    strategy_file = (
-                        strategy_dir / f"{strat_info.strategy_name}_{strat_id}.json"
-                    )
+                    strategy_file = strategy_dir / f"{strat_info.strategy_name}_{strat_id}.json"
                     strategy_data = {
                         "strategy_id": strat_id,
                         "strategy_name": strat_info.strategy_name,
                         "config": strat_info.config,
-                        "results": [],
-                    }
-
-                    for result in strat_info.results:
-                        if result and hasattr(result, "metrics") and result.metrics:
-                            # Include metrics like score, feedback for scoring strategies
-                            result_entry = {
-                                "branch_name": result.branch_name,
-                                "success": result.success,
-                                "metrics": result.metrics,
+                        # Do not interpret result metadata; just persist minimal success/branch
+                        "results": [
+                            {
+                                "branch_name": getattr(r, "branch_name", None)
+                                if not isinstance(r, dict)
+                                else r.get("branch_name"),
+                                "success": getattr(r, "success", False)
+                                if not isinstance(r, dict)
+                                else bool(r.get("success", False)),
                             }
-                            strategy_data["results"].append(result_entry)
+                            for r in (strat_info.results or [])
+                        ],
+                    }
 
                     with open(strategy_file, "w") as f:
                         json.dump(strategy_data, f, indent=2)
-
-                    # Best-of-N helpers: best_branch.txt and scores.json
-                    try:
-                        if strat_info.strategy_name == "best-of-n" and strat_info.results:
-                            selected_branch = None
-                            scores: Dict[str, float] = {}
-                            for res in strat_info.results:
-                                # res may be InstanceResult or dict depending on context
-                                branch = getattr(res, "branch_name", None) or (
-                                    res.get("branch_name") if isinstance(res, dict) else None
-                                )
-                                metrics = getattr(res, "metrics", None) or (
-                                    res.get("metrics") if isinstance(res, dict) else {}
-                                )
-                                if metrics:
-                                    if metrics.get("selected") and branch:
-                                        selected_branch = branch
-                                    if branch and metrics.get("score") is not None:
-                                        try:
-                                            scores[branch] = float(metrics.get("score"))
-                                        except Exception:
-                                            pass
-                            if selected_branch:
-                                with open(strategy_dir / "best_branch.txt", "w") as bf:
-                                    bf.write(f"{selected_branch}\n")
-                            if scores:
-                                with open(strategy_dir / "scores.json", "w") as sf:
-                                    json.dump(scores, sf, indent=2)
-                    except Exception:
-                        pass
 
             # Optional Markdown export (summary-focused)
             try:

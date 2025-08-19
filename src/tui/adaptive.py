@@ -243,9 +243,14 @@ class AdaptiveDisplay:
                 InstanceStatus.INTERRUPTED: "magenta",
             }.get(instance.status, "white")
 
+        # Build title with optional model suffix
+        if instance.model:
+            title = f"[bold]{instance.display_name}[/bold] ({instance.model})"
+        else:
+            title = f"[bold]{instance.display_name}[/bold]"
         return Panel(
             table,
-            title=f"[bold]{instance.display_name}[/bold] ({instance.model})",
+            title=title,
             border_style=panel_style,
             padding=(0, 1),
         )

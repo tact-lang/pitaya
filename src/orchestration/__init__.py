@@ -20,7 +20,7 @@ from ..exceptions import (
     StrategyError,
     ValidationError,
     TimeoutError,
-    ClaudeError,
+    AgentError,
 )
 
 __version__ = "0.1.0"
@@ -40,5 +40,5 @@ __all__ = [
     "StrategyError",
     "ValidationError",
     "TimeoutError",
-    "ClaudeError",
+    "AgentError",
 ]

@@ -2,7 +2,7 @@
 Iterative refinement strategy that improves solutions through feedback loops.
 
 This strategy generates an initial solution, gets feedback, then iteratively
-improves it. Each iteration continues in the same Claude session for context.
+improves it. Each iteration continues in the same agent session for context.
 """
 
 from dataclasses import dataclass
@@ -37,7 +37,7 @@ class IterativeStrategy(Strategy):
     """
     Iteratively refine a solution based on feedback.
 
-    Each iteration runs in the same Claude session, allowing
+    Each iteration runs in the same agent session, allowing
     the AI to build on previous context and feedback.
     """
 

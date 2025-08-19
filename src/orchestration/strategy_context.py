@@ -108,7 +108,7 @@ class StrategyContext:
         self,
         prompt: str,
         base_branch: str,
-        model: str = "sonnet",
+        model: str = None,
         metadata: Optional[Dict[str, Any]] = None,
     ) -> InstanceHandle:
         """
@@ -124,6 +124,10 @@ class StrategyContext:
             Handle for tracking the spawned instance
         """
         self._instance_counter += 1
+
+        # Resolve model default from orchestrator when not explicitly provided
+        if not model:
+            model = getattr(self._orchestrator, "default_model_alias", "sonnet")
 
         # Add model to metadata
         if metadata is None:
@@ -173,17 +177,22 @@ class StrategyContext:
         # Allow per-task CPU/memory overrides for admission and container limits
         _task_cpu = task.get("container_cpu")
         _task_mem = task.get("container_memory") or task.get("container_memory_gb")
+        # Resolve defaults (model defaults to orchestrator.default_model_alias)
+        _default_model = getattr(self._orchestrator, "default_model_alias", "sonnet")
         canonical = {
             "schema_version": "1",
             "prompt": task.get("prompt", ""),
             "base_branch": task.get("base_branch", "main"),
-            "model": task.get("model", "sonnet"),
+            "model": task.get("model", _default_model),
             "import_policy": task.get("import_policy", "auto"),
             "import_conflict_policy": task.get("import_conflict_policy", "fail"),
             "skip_empty_import": bool(task.get("skip_empty_import", True)),
             "session_group_key": task.get("session_group_key"),
             "resume_session_id": task.get("resume_session_id"),
-            "plugin_name": task.get("plugin_name", "claude-code"),
+            "plugin_name": task.get(
+                "plugin_name",
+                getattr(self._orchestrator, "default_plugin_name", "claude-code"),
+            ),
             "system_prompt": task.get("system_prompt"),
             "append_system_prompt": task.get("append_system_prompt"),
             "runner": {
@@ -237,7 +246,7 @@ class StrategyContext:
         # Derive model and prompt
         prompt = task.get("prompt", "")
         base_branch = task.get("base_branch", "main")
-        model = task.get("model", "sonnet")
+        model = task.get("model") or _default_model
         session_group_key = task.get("session_group_key") or key
 
         # Global force_import compatibility: treat as overwrite conflict policy
@@ -258,7 +267,7 @@ class StrategyContext:
                     {
                         "op": "run_request",
                         "key": key,
-                        "kind": ("score" if "/score/" in key else "gen"),
+                        "kind": "task",
                         "fingerprint": fingerprint[:16],
                     },
                 )
@@ -279,6 +288,10 @@ class StrategyContext:
             "resume_session_id": task.get("resume_session_id"),
             "network_egress": task.get("network_egress", _default_egress),
             "max_turns": task.get("max_turns"),
+            "plugin_name": task.get(
+                "plugin_name",
+                getattr(self._orchestrator, "default_plugin_name", "claude-code"),
+            ),
             **({"container_cpu": int(_task_cpu)} if isinstance(_task_cpu, (int, float)) else {}),
             **({"container_memory_gb": int(_task_mem)} if isinstance(_task_mem, (int, float)) else {}),
         }

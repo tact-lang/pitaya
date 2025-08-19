@@ -42,8 +42,8 @@ class TimeoutError(OrchestratorError):
     pass
 
 
-class ClaudeError(OrchestratorError):
-    """Raised when Claude Code operations fail."""
+class AgentError(OrchestratorError):
+    """Raised when agent tool operations fail."""
 
     pass
 

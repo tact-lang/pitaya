@@ -9,7 +9,7 @@ from ..exceptions import (
     OrchestratorError,
     DockerError,
     GitError,
-    ClaudeError,
+    AgentError,
     TimeoutError,
     ValidationError,
 )
@@ -45,7 +45,7 @@ __all__ = [
     "InstanceRunnerError",
     "DockerError",
     "GitError",
-    "ClaudeError",
+    "AgentError",
     "TimeoutError",
     "ValidationError",
 ]

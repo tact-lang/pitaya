@@ -54,7 +54,7 @@ class InstanceDisplay:
     status: InstanceStatus = InstanceStatus.QUEUED
     branch_name: Optional[str] = None
     prompt: Optional[str] = None
-    model: str = "sonnet"
+    model: str = ""
 
     # Progress tracking
     current_activity: Optional[str] = None

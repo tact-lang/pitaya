@@ -2,7 +2,7 @@
 Scoring strategy that generates a solution then evaluates it.
 
 This two-phase pattern is primarily useful as a building block
-for other strategies like BestOfN.
+for other strategies sonnet BestOfN.
 """
 
 import json

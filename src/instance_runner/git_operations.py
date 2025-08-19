@@ -290,7 +290,7 @@ class GitOperations:
               - dedupe_reason (str|None)
         """
         try:
-            # Note: We do NOT create commits here. Claude Code handles its own commits.
+            # Note: We do NOT create commits here. The agent tool handles its own commits.
             # We just import whatever commits exist in the workspace.
 
             # Read the base branch name from the preserved file

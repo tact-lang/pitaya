@@ -230,7 +230,7 @@ class DockerManager:
             strategy_execution_id: Strategy execution identifier
             instance_id: Instance identifier
             image: Docker image to use
-            session_id: Claude session to resume
+            session_id: Agent session to resume
             auth_config: Authentication configuration
             reuse_container: Whether to reuse existing container
 
@@ -393,7 +393,7 @@ class DockerManager:
                 sidx = "0"
                 iidx = "0"
 
-            # Named volume for Claude home as per spec (GHASH)
+            # Named volume for agent home as per spec (GHASH)
             import hashlib, json as _json
             eff_sgk = session_group_key or (task_key or instance_id or container_name or "")
             # Scope: default run; allow global only when explicitly enabled via param
@@ -582,7 +582,7 @@ class DockerManager:
             except Exception:
                 pass
 
-            # Add Claude authentication based on auth_config
+            # Add Anthropic authentication based on auth_config (plugin-specific)
             if auth_config:
                 if auth_config.oauth_token:
                     config["environment"][
@@ -603,7 +603,7 @@ class DockerManager:
                     if base_url := os.environ.get("ANTHROPIC_BASE_URL"):
                         config["environment"]["ANTHROPIC_BASE_URL"] = base_url
 
-            # Add session ID for Claude Code resumability (spec section 3.4)
+            # Add session ID for agent-tool resumability (spec section 3.4)
             if session_id:
                 config["environment"]["CLAUDE_CODE_SESSION_ID"] = session_id
 
@@ -870,7 +870,36 @@ class DockerManager:
         try:
             # Convert command to shell string
             cmd_str = " ".join(f'"{arg}"' if " " in arg else arg for arg in command)
-            logger.info(f"Executing Claude Code: {cmd_str}")
+            try:
+                _pname = getattr(plugin, "name", "tool")
+            except Exception:
+                _pname = "tool"
+            logger.info(f"Executing {_pname}: {cmd_str}")
+
+            # Ensure Codex home exists if running Codex (some builds canonicalize CODEX_HOME and require presence)
+            try:
+                if str(getattr(plugin, "name", "")) == "codex":
+                    # Best-effort, ignore errors
+                    _mk = await asyncio.get_event_loop().run_in_executor(
+                        None,
+                        lambda: container.client.api.exec_create(
+                            container.id,
+                            "sh -lc 'mkdir -p /home/node/.codex'",
+                            stdout=False,
+                            stderr=False,
+                            tty=False,
+                            workdir="/workspace",
+                        ),
+                    )
+                    try:
+                        await asyncio.get_event_loop().run_in_executor(
+                            None,
+                            lambda: container.client.api.exec_start(_mk["Id"], detach=True),
+                        )
+                    except Exception:
+                        pass
+            except Exception:
+                pass
 
             # Create exec instance
             loop = asyncio.get_event_loop()
@@ -898,14 +927,35 @@ class DockerManager:
             parser_state: Dict[str, Any] = {}  # Plugin-specific parser state
             start_time = asyncio.get_event_loop().time()
 
+            raw_lines: list[str] = []  # capture non-JSON output for diagnostics
+
             async def parse_stream():
                 # Wrap blocking iterator to make it async
                 turns_seen = 0
+                last_activity = asyncio.get_event_loop().time()
+
+                async def idle_watcher():
+                    # Emit periodic progress if no events for a while
+                    while True:
+                        await asyncio.sleep(5)
+                        now = asyncio.get_event_loop().time()
+                        idle = now - last_activity
+                        if idle >= 10:
+                            try:
+                                if event_callback:
+                                    event_callback({
+                                        "type": "instance.progress",
+                                        "data": {"phase": "model_wait", "idle_seconds": int(idle)},
+                                    })
+                            except Exception:
+                                pass
+
+                watcher = asyncio.create_task(idle_watcher())
                 async for chunk in self._async_iter(output_stream):
                     # Check timeout
                     if asyncio.get_event_loop().time() - start_time > timeout_seconds:
                         raise TimeoutError(
-                            f"Claude Code execution exceeded {timeout_seconds}s timeout"
+                            f"Agent execution exceeded {timeout_seconds}s timeout"
                         )
 
                     # Decode chunk
@@ -927,6 +977,7 @@ class DockerManager:
 
                                 # Allow other tasks to run
                                 await asyncio.sleep(0)
+                                last_activity = asyncio.get_event_loop().time()
 
                                 # Enforce max_turns if configured
                                 if max_turns is not None and isinstance(max_turns, int):
@@ -938,17 +989,55 @@ class DockerManager:
                                                 return
                                     except Exception:
                                         pass
+                            else:
+                                # Non-JSON or unparsed line; emit as diagnostic
+                                try:
+                                    msg = line[:1000]
+                                    raw_lines.append(msg)
+                                    if len(raw_lines) > 200:
+                                        raw_lines.pop(0)
+                                    if event_callback:
+                                        event_callback(
+                                            {
+                                                "type": "log",
+                                                "timestamp": datetime.now(timezone.utc).isoformat(),
+                                                "stream": "stdout",
+                                                "message": msg,
+                                            }
+                                        )
+                                except Exception:
+                                    pass
 
                         except json.JSONDecodeError:
-                            # Some lines might not be JSON (e.g., error messages). Ignore quietly.
-                            pass
+                            # Non-JSON output: emit as diagnostic log event and capture tail
+                            try:
+                                msg = line[:1000]
+                                raw_lines.append(msg)
+                                if len(raw_lines) > 200:
+                                    raw_lines.pop(0)
+                                if event_callback:
+                                    event_callback(
+                                        {
+                                            "type": "log",
+                                            "timestamp": datetime.now(timezone.utc).isoformat(),
+                                            "stream": "stdout",
+                                            "message": msg,
+                                        }
+                                    )
+                                last_activity = asyncio.get_event_loop().time()
+                            except Exception:
+                                pass
+                try:
+                    watcher.cancel()
+                except Exception:
+                    pass
 
             # Run parser with timeout
             try:
                 await asyncio.wait_for(parse_stream(), timeout=timeout_seconds)
             except asyncio.TimeoutError:
                 raise TimeoutError(
-                    f"Claude Code execution exceeded {timeout_seconds}s timeout"
+                    f"Agent execution exceeded {timeout_seconds}s timeout"
                 )
 
             # Check exec result
@@ -957,7 +1046,12 @@ class DockerManager:
             )
 
             if exec_info["ExitCode"] != 0:
-                raise DockerError(f"Command exited with code {exec_info['ExitCode']}")
+                # Include last few lines of output to aid debugging
+                tail = "\n".join(raw_lines[-10:]) if raw_lines else ""
+                msg = f"Command exited with code {exec_info['ExitCode']}"
+                if tail:
+                    msg += f"\nLast output:\n{tail}"
+                raise DockerError(msg)
 
             # Extract final result using plugin
             result_data = await plugin.extract_result(parser_state)
@@ -968,7 +1062,7 @@ class DockerManager:
         except TimeoutError:
             raise
         except (docker.errors.APIError, docker.errors.DockerException, OSError) as e:
-            raise DockerError(f"Failed to execute Claude Code: {e}")
+            raise DockerError(f"Failed to execute agent tool: {e}")
 
     async def stop_container(self, container: Container, timeout: int | None = None) -> None:
         """

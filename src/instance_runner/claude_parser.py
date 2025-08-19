@@ -1,7 +1,7 @@
 """
-Parser for Claude Code's stream-json output format.
+Parser for the Anthropic agent stream-json output format.
 
-Extracts events, metrics, and session information from Claude's structured output.
+Extracts events, metrics, and session information from the tool's structured output.
 """
 
 import json
@@ -13,7 +13,7 @@ logger = logging.getLogger(__name__)
 
 
 class ClaudeOutputParser:
-    """Parses Claude Code's stream-json output format."""
+    """Parses the Anthropic agent's stream-json output format."""
 
     def __init__(self) -> None:
         """Initialize parser state."""
@@ -28,7 +28,7 @@ class ClaudeOutputParser:
         Parse a single line of stream-json output.
 
         Args:
-            line: JSON line from Claude Code output
+            line: JSON line from agent output
 
         Returns:
             Parsed event dict or None if not a valid event

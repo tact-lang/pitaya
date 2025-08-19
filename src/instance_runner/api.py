@@ -63,7 +63,7 @@ async def run_instance(
     complete isolation between parallel executions.
 
     Args:
-        prompt: The instruction for Claude Code to execute
+        prompt: The instruction for the agent tool to execute
         repo_path: Path to the host repository to work on
         base_branch: Starting branch to base work on (default: "main")
         branch_name: Target branch name for the result (provided by orchestration)
@@ -71,8 +71,8 @@ async def run_instance(
         strategy_execution_id: Identifier for the strategy execution
         instance_id: Unique identifier for this instance (auto-generated if not provided)
         container_name: Full container name to use (provided by orchestration)
-        model: Claude model to use (default: "sonnet")
-        session_id: Resume a previous Claude session
+        model: Model to use (default: "sonnet")
+        session_id: Resume a previous agent session
         event_callback: Function to call with real-time events
         timeout_seconds: Maximum execution time (default: 3600)
         container_limits: CPU and memory restrictions
@@ -80,7 +80,7 @@ async def run_instance(
         retry_config: Retry behavior configuration
         reuse_container: Whether to reuse existing container (default: True)
         finalize: Whether to import branch and cleanup (default: True)
-        plugin_name: AI tool plugin name (default: "claude-code")
+        plugin_name: Agent tool plugin name (default: "claude-code")
         docker_image: Override Docker image to use
         system_prompt: System prompt to prepend to instructions
         append_system_prompt: Additional system prompt to append
@@ -95,7 +95,7 @@ async def run_instance(
         InstanceRunnerError: Base exception for all instance runner errors
         DockerError: Docker daemon not available or container issues
         GitError: Repository access or git operation failures
-        ClaudeError: AI tool execution failures
+        AgentError: Agent tool execution failures
         ValidationError: Invalid parameters
     """
     return await _run_instance(

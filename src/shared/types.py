@@ -51,7 +51,7 @@ class RetryConfig:
         "409 Client Error",  # explicit status hint
         "Conflict (\"Conflict.",  # docker's overlap wording
     )
-    claude_error_patterns: tuple = (
+    agent_error_patterns: tuple = (
         "rate limit",
         "API error",
         "connection reset",
@@ -380,11 +380,13 @@ class EventTypes:
     INSTANCE_CONTAINER_STOPPED = "instance.container_stopped"
     INSTANCE_NO_CHANGES = "instance.no_changes"
     INSTANCE_RESULT_COLLECTION_STARTED = "instance.result_collection_started"
-    INSTANCE_CLAUDE_TOOL_USE = "instance.claude_tool_use"
-    INSTANCE_CLAUDE_TOOL_RESULT = "instance.claude_tool_result"
-    INSTANCE_CLAUDE_ASSISTANT = "instance.claude_assistant"
-    INSTANCE_CLAUDE_RESULT = "instance.claude_result"
-    INSTANCE_CLAUDE_COMPLETED = "instance.claude_completed"
+    # Legacy assistant event names (kept for compatibility)
+    # Generic assistant event names
+    INSTANCE_AGENT_TOOL_USE = "instance.agent_tool_use"
+    INSTANCE_AGENT_TOOL_RESULT = "instance.agent_tool_result"
+    INSTANCE_AGENT_ASSISTANT = "instance.agent_assistant"
+    INSTANCE_AGENT_RESULT = "instance.agent_result"
+    INSTANCE_AGENT_COMPLETED = "instance.agent_completed"
 
     # Strategy events
     STRATEGY_STARTED = "strategy.started"

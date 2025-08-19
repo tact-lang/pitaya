@@ -42,7 +42,7 @@ class RetryConfig:
         "409 Client Error",  # explicit status hint
         "Conflict (\"Conflict.",  # docker's overlap wording
     )
-    claude_error_patterns: tuple = (
+    agent_error_patterns: tuple = (
         "rate limit",
         "API error",
         "connection reset",

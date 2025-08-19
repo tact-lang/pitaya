@@ -2,7 +2,7 @@
 Instance Runner - Executes a single AI coding instance in isolation.
 
 This module provides the main entry point for running instances. It knows nothing
-about strategies or UI - just takes a prompt and returns a result with a branch name.
+about strategies or UI — it takes a prompt and returns a result with a branch name.
 """
 
 import asyncio
@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, Optional
 
 from . import (
-    ClaudeError,
+    AgentError,
     DockerError,
     GitError,
     TimeoutError,
@@ -55,9 +55,9 @@ def _is_retryable_error(
             if pattern.lower() in error_lower:
                 return True
 
-    # Check Claude patterns
-    if error_type == "claude":
-        for pattern in retry_config.claude_error_patterns:
+    # Check agent patterns
+    if error_type in ("agent",):
+        for pattern in retry_config.agent_error_patterns:
             if pattern.lower() in error_lower:
                 return True
 
@@ -108,10 +108,10 @@ async def run_instance(
     Execute a single AI coding instance in Docker.
 
     This is the main entry point for the Instance Runner component. It follows
-    a 6-phase execution pipeline to reliably run Claude Code in isolation.
+    a 6-phase execution pipeline to reliably run the agent tool in isolation.
 
     Args:
-        prompt: The instruction for Claude Code
+        prompt: The instruction for the agent tool
         repo_path: Path to host repository (not the isolated clone)
         base_branch: Starting point for the new branch (default: "main")
         branch_name: Target branch name for import (provided by orchestration)
@@ -119,8 +119,8 @@ async def run_instance(
         strategy_execution_id: Strategy execution identifier (provided by orchestration)
         instance_id: Unique identifier (auto-generated if not provided)
         container_name: Full container name including run_id (provided by orchestration)
-        model: Claude model to use (default: "sonnet")
-        session_id: Resume a previous Claude Code session
+        model: Model to use (default: "sonnet")
+        session_id: Resume a previous agent session
         event_callback: Function to receive real-time events
         timeout_seconds: Maximum execution time (default: 3600)
         container_limits: CPU/memory restrictions
@@ -129,7 +129,7 @@ async def run_instance(
         finalize: Stop container after completion (default: True)
         docker_image: Docker image override (uses plugin default if None)
         retry_config: Retry configuration for transient failures
-        plugin_name: Name of the AI tool plugin to use (default: "claude-code")
+        plugin_name: Name of the agent tool plugin to use (default: "claude-code")
         system_prompt: System prompt for the AI tool
         append_system_prompt: Additional system prompt to append
         import_policy: "auto|never|always"
@@ -160,6 +160,7 @@ async def run_instance(
     if docker_image is None:
         docker_image = plugin.docker_image
     # Defensive model validation and resolution (via models.yaml mapping)
+    # For non-validated plugins, allow passthrough model ids to the plugin.
     resolved_model_id = model
     try:
         from ..utils.model_mapping import load_model_mapping
@@ -170,13 +171,23 @@ async def run_instance(
                 "models.yaml checksum mismatch between orchestration and runner"
             )
         allowed_models = set(mapping.keys())
-        if model not in allowed_models:
-            raise ValidationError(f"Unknown model: {model}. Allowed: {sorted(allowed_models)}")
-        resolved_model_id = mapping.get(model, model)
+        if model in allowed_models:
+            resolved_model_id = mapping.get(model, model)
+        else:
+            # Only enforce strict validation for plugins that require mapping
+            if getattr(plugin, "name", "claude-code") == "claude-code":
+                raise ValidationError(
+                    f"Unknown model: {model}. Allowed: {sorted(allowed_models)}"
+                )
+            # For other plugins, keep original model (passthrough)
     except Exception:
-        allowed_models = {"sonnet", "opus", "haiku"}
-        if model not in allowed_models:
-            raise ValidationError(f"Unknown model: {model}. Allowed: {sorted(allowed_models)}")
+        # Fallback strictness only for plugins that require mapping
+        if getattr(plugin, "name", "claude-code") == "claude-code":
+            allowed_models = {"sonnet", "opus", "haiku"}
+            if model not in allowed_models:
+                raise ValidationError(
+                    f"Unknown model: {model}. Allowed: {sorted(allowed_models)}"
+                )
 
     # Validate plugin environment
     # Convert AuthConfig to dict for plugin
@@ -356,7 +367,7 @@ async def _run_instance_attempt(
     started_at = datetime.now(timezone.utc).isoformat()
     workspace_dir = None
     container = None
-    claude_session_id = None  # Track session for error recovery
+    agent_session_id = None  # Track session for error recovery
 
     # Set log path based on run_id and instance_id
     if run_id and instance_id:
@@ -366,14 +377,17 @@ async def _run_instance_attempt(
 
     # Helper to emit events
     def emit_event(event_type: str, data: Dict[str, Any]) -> None:
-        if event_callback:
-            event = {
+        """Emit an event (generic agent namespace)."""
+        if not event_callback:
+            return
+        event_callback(
+            {
                 "type": event_type,
                 "timestamp": datetime.now(timezone.utc).isoformat(),
                 "instance_id": instance_id,
                 "data": data,
             }
-            event_callback(event)
+        )
 
     docker_manager: Optional[DockerManager] = None
     try:
@@ -579,7 +593,7 @@ async def _run_instance_attempt(
                 f"Executing {plugin.name} with model {(resolved_model_id or model)} (alias={model})"
             )
             emit_event(
-                "instance.claude_starting",
+                "instance.agent_starting",
                 {"model": model, "model_id": (resolved_model_id or model), "session_id": session_id},
             )
 
@@ -592,7 +606,7 @@ async def _run_instance_attempt(
                 session_id=session_id,
                 timeout_seconds=timeout_seconds,
                 event_callback=lambda event: emit_event(
-                    f"instance.claude_{event['type']}", event
+                    f"instance.agent_{event['type']}", event
                 ),
                 system_prompt=system_prompt,
                 append_system_prompt=append_system_prompt,
@@ -600,18 +614,19 @@ async def _run_instance_attempt(
                 max_turns=max_turns,
             )
 
-            claude_session_id = result_data.get("session_id")
+            agent_session_id = result_data.get("session_id")
             final_message = result_data.get("final_message", "")
             metrics = result_data.get("metrics", {})
 
             emit_event(
-                "instance.claude_completed",
+                "instance.agent_completed",
                 {
-                    "session_id": claude_session_id,
+                    "session_id": agent_session_id,
                     "metrics": metrics,
                 },
             )
-            emit_event("instance.phase_completed", {"phase": "claude_execution"})
+            # Emit generic phase name
+            emit_event("instance.phase_completed", {"phase": "agent_execution"})
 
             # Phase 5: Result Collection (includes branch import)
             logger.info("Collecting results and importing branch")
@@ -763,7 +778,7 @@ async def _run_instance_attempt(
                 branch_name=final_branch,
                 has_changes=has_changes,
                 final_message=final_message,
-                session_id=claude_session_id,
+                session_id=agent_session_id,
                 container_name=container_name,
                 metrics=metrics,
                 duration_seconds=duration,
@@ -801,7 +816,7 @@ async def _run_instance_attempt(
                 success=False,
                 error=str(e),
                 error_type="timeout",
-                session_id=claude_session_id,
+                session_id=agent_session_id,
                 container_name=container_name,
                 duration_seconds=time.time() - start_time,
                 started_at=started_at,
@@ -812,7 +827,7 @@ async def _run_instance_attempt(
                 status="timeout",
             )
 
-        except (DockerError, GitError, ClaudeError, ValidationError) as e:
+        except (DockerError, GitError, AgentError, ValidationError) as e:
             logger.error(f"Instance {instance_id} failed: {type(e).__name__}: {e}")
             emit_event(
                 "instance.failed",
@@ -840,7 +855,7 @@ async def _run_instance_attempt(
                 success=False,
                 error=str(e),
                 error_type=type(e).__name__.lower().replace("error", ""),
-                session_id=claude_session_id,
+                session_id=agent_session_id,
                 container_name=container_name,
                 duration_seconds=time.time() - start_time,
                 started_at=started_at,
@@ -874,7 +889,7 @@ async def _run_instance_attempt(
                 success=False,
                 error="canceled",
                 error_type="canceled",
-                session_id=claude_session_id,
+                session_id=agent_session_id,
                 container_name=container_name,
                 duration_seconds=time.time() - start_time,
                 started_at=started_at,
@@ -907,7 +922,7 @@ async def _run_instance_attempt(
                 success=False,
                 error=f"Unexpected error: {str(e)}",
                 error_type="unexpected",
-                session_id=claude_session_id,
+                session_id=agent_session_id,
                 container_name=container_name,
                 duration_seconds=time.time() - start_time,
                 started_at=started_at,

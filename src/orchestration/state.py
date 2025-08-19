@@ -595,7 +595,7 @@ class StateManager:
 
             # Update metrics
             if result and result.metrics:
-                # Use the correct key names from claude_parser
+                # Use the correct key names from the plugin parser
                 cost = result.metrics.get("total_cost", 0.0)
                 tokens = result.metrics.get("total_tokens", 0)
                 self.current_state.total_cost += cost
