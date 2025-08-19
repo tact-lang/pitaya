@@ -902,12 +902,14 @@ class DockerManager:
                 pass
 
             # Create exec instance
+            # IMPORTANT: pass the command as a list to preserve argument boundaries
+            # (joining into a single string can cause the tool to misparse long prompts)
             loop = asyncio.get_event_loop()
             exec_instance = await loop.run_in_executor(
                 None,
                 lambda: container.client.api.exec_create(
                     container.id,
-                    cmd_str,
+                    command,  # pass argv list, not joined string
                     stdout=True,
                     stderr=True,
                     tty=False,
