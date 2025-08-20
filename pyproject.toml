@@ -1,7 +1,7 @@
 [project]
 name = "pitaya"
 version = "0.1.0"
-description = "Pitaya — parallel execution of AI coding agents to explore multiple solution paths"
+description = "Pitaya — an orchestrator of AI coding agents (e.g., Claude Code, Codex CLI) with pluggable and custom strategies"
 readme = "README.md"
 requires-python = "==3.13.*"
 dependencies = [
@@ -14,6 +14,25 @@ dependencies = [
     "watchdog>=6.0.0",
     "pyyaml>=6.0.2",
 ]
+license = { file = "LICENSE" }
+keywords = ["ai", "coding", "agents", "automation", "developer-tools", "tui", "docker", "orchestrator", "claude-code", "codex-cli"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Environment :: Console",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: Software Development :: Build Tools",
+  "Topic :: Software Development :: Code Generators",
+]
+authors = [
+  { name = "TON Studio" }
+]
+maintainers = [
+  { name = "TON Studio" }
+]
+urls = { "Repository" = "https://github.com/tact-lang/agent-orchestrator", "Issues" = "https://github.com/tact-lang/agent-orchestrator/issues" }
 
 [project.scripts]
 pitaya = "src.cli:main"
@@ -25,6 +44,18 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src"]
+
+[tool.hatch.build.targets.sdist]
+exclude = [
+  "logs",
+  "results",
+  "pitaya_state",
+  ".venv",
+  ".ruff_cache",
+  ".mypy_cache",
+  ".pytest_cache",
+  "dist",
+]
 
 [tool.uv]
 dev-dependencies = [

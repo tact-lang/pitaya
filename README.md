@@ -2,7 +2,7 @@
 
 <div align="center">
 
-**Scale AI coding horizontally**
+**Orchestrate AI coding agents (Claude Code, Codex CLI, and more)**
 
 [![Python 3.13](https://img.shields.io/badge/python-3.13-blue.svg)](https://www.python.org/downloads/)
 [![Docker](https://img.shields.io/badge/docker-required-blue.svg)](https://www.docker.com/)
@@ -14,11 +14,12 @@
 
 ## Overview
 
-Pitaya runs multiple AI coding agents in parallel, compares their results, and helps you pick the best outcome. Each agent works in an isolated Docker container with its own git branch, so you can explore alternative solution paths safely and quickly.
+Pitaya is an orchestrator for AI coding agents such as Claude Code and Codex CLI. It runs multiple agents in parallel, compares their results, and helps you pick the best outcome. Each agent works in an isolated Docker container with its own git branch, so you can explore alternative solution paths safely and quickly. You can also define arbitrary custom strategies to build your own multi-stage workflows.
 
 - Parallel strategies (simple, best-of-n, iterative, bug-finding, doc-review)
 - Clean TUI with live progress, costs, and artifacts
-- Plugin-agnostic runner (supports multiple tools via plugins)
+- Orchestrates Claude Code, Codex CLI, and others via plugins
+- Define arbitrary custom strategies (Python) for complex flows
 - Strict “agent commits only” mode; artifact-first, no destructive merges
 - Resumable runs with detailed logs and events
 
@@ -32,20 +33,24 @@ Prerequisites
 
 Install (choose one)
 
-- From Git (recommended for quick start):
+- From PyPI (recommended):
 
   ```bash
-  # HTTPS
-  pip install "git+https://github.com/your-org/your-repo.git@main#egg=pitaya"
-
-  # or SSH
-  pip install "git+ssh://git@github.com/your-org/your-repo.git@main#egg=pitaya"
+  pip install pitaya
+  # or
+  pipx install pitaya
+  # or (uv as a tool)
+  uv tool install pitaya
   ```
 
-  Upgrade later with the same command and `--upgrade` flag, or pin a tag:
+  Upgrade:
 
   ```bash
-  pip install --upgrade "git+https://github.com/your-org/your-repo.git@v0.1.0#egg=pitaya"
+  pip install -U pitaya
+  # or
+  pipx upgrade pitaya
+  # or
+  uv tool upgrade pitaya
   ```
 
 - From a local clone (editable dev install):
@@ -206,6 +211,11 @@ pip install -U ruff black mypy pytest pytest-asyncio
 ruff check .
 black .
 ```
+
+## Changelog
+
+- See [CHANGELOG.md](CHANGELOG.md) for release notes and version history.
+- GitHub Releases: https://github.com/tact-lang/agent-orchestrator/releases
 
 ## License
 

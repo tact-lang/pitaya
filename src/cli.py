@@ -62,8 +62,8 @@ class OrchestratorCLI:
         parser = argparse.ArgumentParser(
             prog="pitaya",
             description=(
-                "Pitaya: Run AI coding agents with pluggable strategies, models, and a rich TUI.\n"
-                "Use -S key=value to pass strategy params."
+                "Pitaya: Orchestrate AI coding agents (e.g., Claude Code, Codex CLI) with pluggable and custom strategies,\n"
+                "plus a rich TUI. Use -S key=value to pass strategy params."
             ),
             formatter_class=argparse.RawDescriptionHelpFormatter,
             epilog=(

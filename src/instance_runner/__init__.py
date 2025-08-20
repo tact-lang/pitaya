@@ -1,5 +1,7 @@
 """
-Instance Runner - Executes AI coding instances in isolated Docker containers.
+Instance Runner — executes AI coding agent instances in isolated Docker containers.
+
+Used by Pitaya to orchestrate tools such as Claude Code and Codex CLI.
 """
 
 __version__ = "0.1.0"

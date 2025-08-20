@@ -1,8 +1,9 @@
 """
-Orchestration component for coordinating multiple AI coding instances.
+Orchestration component for coordinating multiple AI coding agents.
 
-This component manages strategies, parallel execution, events, and state.
-It provides the intelligence for running complex multi-instance workflows.
+Pitaya orchestrates agents such as Claude Code and Codex CLI with pluggable
+and custom strategies. This component manages parallel execution, events, and
+state, providing the intelligence for complex multi-instance workflows.
 """
 
 from .orchestrator import Orchestrator

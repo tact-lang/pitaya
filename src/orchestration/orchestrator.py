@@ -1,8 +1,9 @@
 """
-Main orchestration component that coordinates multiple AI coding instances.
+Main orchestration component that coordinates multiple AI coding agents.
 
-This is the central component that manages strategies, parallel execution,
-events, and state. It depends only on the Instance Runner's public API.
+Centers Pitaya's strategy engine: manages pluggable/custom strategies,
+parallel execution, events, and state. Depends only on the Instance Runner's
+public API.
 """
 
 import asyncio
