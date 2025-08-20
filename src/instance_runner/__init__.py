@@ -14,9 +14,6 @@ from ..exceptions import (
     ValidationError,
 )
 
-# For backward compatibility, alias OrchestratorError as InstanceRunnerError
-InstanceRunnerError = OrchestratorError
-
 # Import from public API
 from .api import run_instance
 
@@ -42,7 +39,7 @@ __all__ = [
     "RunnerPlugin",
     "PluginCapabilities",
     # Exceptions
-    "InstanceRunnerError",
+    "OrchestratorError",
     "DockerError",
     "GitError",
     "AgentError",

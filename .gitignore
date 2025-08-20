@@ -69,11 +69,6 @@ test_logs/
 .dockerignore
 docker-compose.override.yml
 
-# Project specific
-test_repo_*
-test_orchestrator_*
-/tmp/test_*
-
 # OS
 .DS_Store
 Thumbs.db
@@ -90,4 +85,4 @@ desktop.ini
 output/
 results/
 runs/
-orchestrator_state/
+pitaya_state/

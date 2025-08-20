@@ -1,5 +1,5 @@
 """
-Event handler for processing orchestrator events.
+Event handler for processing Pitaya events.
 
 Transforms raw events from the event stream into TUI state updates.
 """
@@ -44,7 +44,7 @@ logger = logging.getLogger(__name__)
 
 
 class EventProcessor:
-    """Processes orchestrator events and updates TUI state."""
+    """Processes Pitaya events and updates TUI state."""
 
     def __init__(self, state: TUIState):
         """
@@ -145,7 +145,7 @@ class EventProcessor:
         Args:
             event: Event dictionary with type, timestamp, data
         """
-        # Support canonical events with 'payload' envelope by mapping to legacy shape
+        # Normalize canonical events with 'payload' envelope into the internal shape
         event_type = event.get("type")
         # Canonical normalization: copy envelope fields + payload to a stable shape
         if "payload" in event and isinstance(event["payload"], dict):

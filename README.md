@@ -1,4 +1,4 @@
-# 🎯 Orchestrator
+# 🎯 Pitaya
 
 <div align="center">
 
@@ -10,69 +10,203 @@
 
 </div>
 
----
+> Note: Pitaya is in public beta. Interfaces and defaults may change between releases.
 
-## ⚠️ WARNING: ACTIVE DEVELOPMENT
+## Overview
 
-> **This project is under heavy active development and is NOT recommended for production use or as an external dependency!**
->
-> -   APIs and interfaces are subject to breaking changes without notice
-> -   Features may be incomplete, unstable, or experimental
-> -   Documentation may be outdated or missing
-> -   Use at your own risk for experimentation only
+Pitaya runs multiple AI coding agents in parallel, compares their results, and helps you pick the best outcome. Each agent works in an isolated Docker container with its own git branch, so you can explore alternative solution paths safely and quickly.
 
----
+- Parallel strategies (simple, best-of-n, iterative, bug-finding, doc-review)
+- Clean TUI with live progress, costs, and artifacts
+- Plugin-agnostic runner (supports multiple tools via plugins)
+- Strict “agent commits only” mode; artifact-first, no destructive merges
+- Resumable runs with detailed logs and events
 
-## 🚀 The Problem
+## Quick Start
 
-When using AI for software development, **outcomes vary significantly between runs** - even with identical prompts. Sometimes you get elegant solutions, sometimes overcomplicated ones, sometimes the AI misunderstands entirely.
+Prerequisites
 
-**Orchestrator turns this variability into a strength.**
+- Docker Desktop or Docker Engine running
+- Python 3.13
+- Git repository (the tool operates inside your repo)
 
-## 💡 The Solution
+Install (choose one)
 
-Instead of running one AI coding instance and hoping for the best, Orchestrator runs **multiple instances in parallel**, each exploring different solution paths. Then it implements intelligent strategies to **automatically identify and select the best results**.
+- From Git (recommended for quick start):
+
+  ```bash
+  # HTTPS
+  pip install "git+https://github.com/your-org/your-repo.git@main#egg=pitaya"
+
+  # or SSH
+  pip install "git+ssh://git@github.com/your-org/your-repo.git@main#egg=pitaya"
+  ```
+
+  Upgrade later with the same command and `--upgrade` flag, or pin a tag:
+
+  ```bash
+  pip install --upgrade "git+https://github.com/your-org/your-repo.git@v0.1.0#egg=pitaya"
+  ```
+
+- From a local clone (editable dev install):
+
+  ```bash
+  python -m venv .venv && source .venv/bin/activate
+  pip install -U pip
+  pip install -e .
+  ```
+
+Authenticate
+
+- Anthropic (Claude Code): set either `CLAUDE_CODE_OAUTH_TOKEN` or `ANTHROPIC_API_KEY`
+- OpenAI (Codex plugin): set `OPENAI_API_KEY` (and optionally `OPENAI_BASE_URL`)
+
+Hello world
 
 ```bash
-# Instead of this (hoping for a good result):
-claude "implement authentication"
-
-# Do this (explore 5 paths, pick the best):
-uv run orchestrator "implement authentication" --strategy best-of-n -S n=5
+pitaya "implement authentication" --strategy simple
 ```
 
-## ✨ Features
+Best-of-N with scoring
 
-### 🔄 **Parallel Exploration**
+```bash
+pitaya "fix bug in user.py" --strategy best-of-n -S n=5
+```
 
--   Run N instances of Claude Code simultaneously
--   Each instance works in complete isolation with its own Docker container
--   Every solution gets its own git branch for easy comparison
+Doc review (N reviewers per page, immediate validators, composer)
 
-### 🧠 **Intelligent Selection**
+```bash
+pitaya "Review docs" --strategy doc-review -S pages_file=pages.yml -S reviewers_per_page=2
+```
 
--   **Best-of-N**: Generate multiple solutions, score each one, select the highest rated
--   **Iterative Refinement**: Generate, review, improve in cycles
--   **Custom Strategies**: Build your own multi-stage workflows
+Headless JSON output
 
-### 📊 **Real-Time Monitoring**
+```bash
+pitaya "add tests" --no-tui --output json
+```
 
--   Beautiful TUI dashboard showing all instances
--   Live progress tracking with cost accumulation
--   Adaptive display that scales to dozens of instances
+Override Docker image
 
-### 🔧 **Development Features**
+```bash
+pitaya "task" --plugin codex --docker-image ghcr.io/me/codex-cli:mytag
+```
 
--   **Resumable**: Interrupt anytime with Ctrl+C, resume where you left off
--   **Fault Tolerant**: Automatic retries for transient failures
--   **Cost Aware**: Real-time token usage and cost tracking
+Resume a run
 
-### 🏗️ **Clean Architecture**
+```bash
+pitaya --resume run_20250114_123456
+```
 
--   Three-layer design with clear separation of concerns
--   Event-driven communication between components
--   Extensible plugin system for different AI tools
+## CLI Essentials
 
-## 📜 License
+The CLI is designed to be discoverable and production-ready. Run `pitaya --help` to see grouped options and examples.
 
-MIT License - see [LICENSE](LICENSE) for details.
+Highlights
+
+- Strategy: `--strategy <name>` (use `-S key=value` for strategy params)
+- Model: `--model <alias>` (aliases resolved via `models.yaml` when applicable)
+- Plugin: `--plugin <claude-code|codex>`
+- Parallel runs: `--runs <N>`
+- TUI controls: `--no-tui`, `--output <streaming|json|quiet>`
+- Maintenance: `--list-runs`, `--show-run <id>`, `--prune`, `--clean-containers <id>`
+- Docker image override: `--docker-image <repo/name:tag>`
+
+TUI viewer (offline or live)
+
+```bash
+pitaya-tui --run-id run_20250114_123456
+# or
+pitaya-tui --events-file logs/run_20250114_123456/events.jsonl --output streaming
+```
+
+## Strategies
+
+- simple: one agent, one branch
+- best-of-n: spawn N agents, score and pick the highest-rated branch
+- iterative: loop with propose → review → refine (configurable iterations)
+- bug-finding: search for issues across the repo and propose fixes
+- doc-review: reviewers per page → validators per reviewer → compose final report
+  - Pass pages via `-S pages_file=...`; set `-S reviewers_per_page=<n>` (default 1)
+  - Reviewer reports: `reports/doc-review/raw/REPORT_{slug}__r{n}.md`
+  - Final report: `reports/doc-review/REPORT.md`
+
+Pass strategy options with `-S key=value`. Example: `-S n=5 -S scorer_prompt="evaluate correctness"`.
+
+## Configuration
+
+You can run everything from the CLI, or add an optional `pitaya.yaml` to set defaults:
+
+```yaml
+model: sonnet
+plugin_name: claude-code
+
+runner:
+  timeout: 3600
+  cpu_limit: 2
+  memory_limit: 4g
+  network_egress: online  # online|offline|proxy
+  docker_image: ghcr.io/me/codex-cli:mytag  # optional global override
+
+orchestration:
+  max_parallel_instances: auto
+  branch_namespace: hierarchical
+  snapshot_interval: 30
+
+strategies:
+  best-of-n:
+    n: 5
+  doc-review:
+    reviewers_per_page: 2
+```
+
+CLI overrides config; `-S` only affects the selected strategy.
+
+## Models
+
+Some plugins (e.g., Claude Code) validate model aliases via `models.yaml`. If an alias isn’t defined, Pitaya warns and passes the string through to the plugin.
+
+## Docker & Plugins
+
+- Plugins define default images:
+  - claude-code → `claude-code:latest`
+  - codex → `codex-cli:latest`
+- Override the image for a run with `--docker-image <repo/name:tag>`
+- Full isolation per instance: dedicated container, workspace mount, and session volume
+
+## Logs & Artifacts
+
+- Logs: `logs/<run_id>/events.jsonl` and structured component logs
+- Results: `results/<run_id>/...`
+- Branches: `pitaya/<strategy>/<run_id>/k<short8>` (hierarchical namespace)
+- Resuming: `--resume <run_id>` picks up from the last consistent snapshot
+
+## Troubleshooting
+
+- Cannot connect to Docker: start Docker Desktop / system service; run `docker info`
+- Missing credentials: set `CLAUDE_CODE_OAUTH_TOKEN` or `ANTHROPIC_API_KEY` (Claude), or `OPENAI_API_KEY` (Codex)
+- Model alias not found: add it to `models.yaml` or pass a direct model ID
+- Slow or flaky network: use `--parallel conservative` or `--max-parallel <n>`
+- Clean stale state: `pitaya --prune` and `pitaya --clean-containers <run_id>`
+
+## Contributing
+
+Issues and PRs are welcome. This project is evolving—feedback on UX, strategies, and plugin support is especially helpful.
+
+Local dev quickstart
+
+```bash
+python -m venv .venv && source .venv/bin/activate
+pip install -U pip
+pip install -e .
+
+# Optional dev tools
+pip install -U ruff black mypy pytest pytest-asyncio
+
+# Lint/format (optional)
+ruff check .
+black .
+```
+
+## License
+
+MIT License — see [LICENSE](LICENSE).

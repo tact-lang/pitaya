@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """
-Main CLI for the orchestrator - runs AI coding agents with TUI display.
+Pitaya CLI - runs AI coding agents with TUI display.
 
 This is the primary entry point that combines:
-- Orchestrator execution
-- Strategy selection
+- Strategy execution
 - TUI display
 - All configuration options
 """
@@ -48,7 +47,7 @@ logger = logging.getLogger(__name__)
 
 
 class OrchestratorCLI:
-    """Main orchestrator CLI application."""
+    """Main Pitaya CLI application."""
 
     def __init__(self):
         """Initialize CLI."""
@@ -59,31 +58,31 @@ class OrchestratorCLI:
 
     @classmethod
     def create_parser(cls) -> argparse.ArgumentParser:
-        """Create argument parser for orchestrator with clear grouping and examples."""
+        """Create argument parser for Pitaya with clear grouping and examples."""
         parser = argparse.ArgumentParser(
-            prog="orchestrator",
+            prog="pitaya",
             description=(
-                "Run AI coding agents with pluggable strategies, models, and a rich TUI.\n"
+                "Pitaya: Run AI coding agents with pluggable strategies, models, and a rich TUI.\n"
                 "Use -S key=value to pass strategy params."
             ),
             formatter_class=argparse.RawDescriptionHelpFormatter,
             epilog=(
                 "Examples:\n"
                 "  # Simple strategy\n"
-                "  orchestrator \"implement auth\" --strategy simple\n\n"
+                "  pitaya \"implement auth\" --strategy simple\n\n"
                 "  # Best-of-N with params\n"
-                "  orchestrator \"fix bug in user.py\" --strategy best-of-n -S n=5\n\n"
+                "  pitaya \"fix bug in user.py\" --strategy best-of-n -S n=5\n\n"
                 "  # Doc review (pages file, 2 reviewers)\n"
-                "  orchestrator \"Review docs\" --strategy doc-review -S pages_file=pages.yml -S reviewers_per_page=2\n\n"
+                "  pitaya \"Review docs\" --strategy doc-review -S pages_file=pages.yml -S reviewers_per_page=2\n\n"
                 "  # Custom model and multiple runs\n"
-                "  orchestrator \"add tests\" --model opus --runs 3\n\n"
+                "  pitaya \"add tests\" --model opus --runs 3\n\n"
                 "  # Override Docker image\n"
-                "  orchestrator \"task\" --plugin codex --docker-image ghcr.io/me/codex-cli:mytag\n\n"
+                "  pitaya \"task\" --plugin codex --docker-image ghcr.io/me/codex-cli:mytag\n\n"
                 "  # Resume a run\n"
-                "  orchestrator --resume run_20250114_123456\n\n"
+                "  pitaya --resume run_20250114_123456\n\n"
                 "  # Headless JSON output\n"
-                "  orchestrator \"implement feature\" --no-tui --output json\n"
-            ),
+                "  pitaya \"implement feature\" --no-tui --output json\n"
+        ),
         )
 
         # Global flags
@@ -262,10 +261,10 @@ class OrchestratorCLI:
         g_state.add_argument(
             "--config",
             type=Path,
-            help="Config file (default: orchestrator.yaml if present)",
+            help="Config file (default: pitaya.yaml if present)",
         )
         g_state.add_argument(
-            "--state-dir", type=Path, default=Path("./orchestrator_state"), help="State directory"
+            "--state-dir", type=Path, default=Path("./pitaya_state"), help="State directory"
         )
         g_state.add_argument(
             "--logs-dir", type=Path, default=Path("./logs"), help="Logs directory"
@@ -310,7 +309,7 @@ class OrchestratorCLI:
         g_maint.add_argument(
             "--clean-volumes",
             action="store_true",
-            help="Remove unreferenced session volumes (orc_home_*)",
+            help="Remove unreferenced session volumes (pitaya_home_*)",
         )
         g_maint.add_argument(
             "--older-than",
@@ -598,11 +597,11 @@ class OrchestratorCLI:
 
     def _load_config_file(self, args: argparse.Namespace) -> Optional[Dict[str, Any]]:
         """
-        Load configuration from orchestrator.yaml file.
+        Load configuration from pitaya.yaml file.
 
         Precedence order:
         1. If config file is specified via args, use that
-        2. If orchestrator.yaml exists in current directory, use that
+        2. If pitaya.yaml exists in current directory, use that
         3. Otherwise return None
         """
 
@@ -612,8 +611,8 @@ class OrchestratorCLI:
         if hasattr(args, "config") and args.config:
             config_path = Path(args.config)
         else:
-            # Check for default orchestrator.yaml
-            default_path = Path("orchestrator.yaml")
+            # Check for default pitaya.yaml
+            default_path = Path("pitaya.yaml")
             if default_path.exists():
                 config_path = default_path
 
@@ -654,11 +653,11 @@ class OrchestratorCLI:
                 return 1
         self.console.print(f"[yellow]Cleaning up run {run_id}...[/yellow]")
 
-        # Create orchestrator just for cleanup
+        # Create Pitaya orchestrator instance just for cleanup
         orchestrator = Orchestrator(state_dir=args.state_dir, logs_dir=args.logs_dir)
 
         try:
-            # Initialize orchestrator
+            # Initialize Pitaya
             await orchestrator.initialize()
 
             # Clean up containers for this specific run
@@ -674,8 +673,7 @@ class OrchestratorCLI:
 
                 for container in containers:
                     labels = container.labels or {}
-                    # Accept both legacy and current label keys
-                    c_run_id = labels.get("run_id") or labels.get("orchestrator.run_id")
+                    c_run_id = labels.get("run_id")
                     if c_run_id == run_id:
                         try:
                             if args.dry_run:
@@ -840,8 +838,8 @@ class OrchestratorCLI:
             return 1
 
     async def run_clean_volumes(self, args: argparse.Namespace) -> int:
-        """Clean up unreferenced session volumes (orc_home_*) per age threshold."""
-        self.console.print("[yellow]Scanning session volumes (orc_home_*)...[/yellow]")
+        """Clean up unreferenced session volumes (pitaya_home_*) per age threshold."""
+        self.console.print("[yellow]Scanning session volumes (pitaya_home_*)...[/yellow]")
         try:
             from ..instance_runner.docker_manager import DockerManager
             dm = DockerManager()
@@ -1066,7 +1064,7 @@ class OrchestratorCLI:
             # Show available actions
             self.console.print("\n[dim]Available actions:[/dim]")
             if not completed:
-                self.console.print(f"  Resume: orchestrator --resume {run_id}")
+                self.console.print(f"  Resume: pitaya --resume {run_id}")
             self.console.print(f"  View logs: {args.logs_dir}/{run_id}/")
 
             return 0
@@ -1319,7 +1317,7 @@ class OrchestratorCLI:
                 # Show resume tip when any strategy canceled
                 if strat_canceled > 0:
                     self.console.print("\n[blue]Run interrupted. To resume this run:[/blue]")
-                    self.console.print(f"  orchestrator --resume {run_id}")
+                    self.console.print(f"  pitaya --resume {run_id}")
             except Exception:
                 pass
 
@@ -1368,7 +1366,7 @@ class OrchestratorCLI:
 
     async def run_orchestrator(self, args: argparse.Namespace) -> int:
         """
-        Run the orchestrator with or without TUI.
+        Run Pitaya with or without TUI.
 
         Args:
             args: Parsed command line arguments
@@ -1550,10 +1548,10 @@ class OrchestratorCLI:
         # If both global locations exist, note which one is used
         try:
             home = Path.home()
-            preferred = home / ".orchestrator" / "config.yaml"
-            fallback = home / ".config" / "orchestrator" / "config.yaml"
+            preferred = home / ".pitaya" / "config.yaml"
+            fallback = home / ".config" / "pitaya" / "config.yaml"
             if preferred.exists() and fallback.exists():
-                self.console.print("[dim]Using ~/.orchestrator/config.yaml (XDG fallback ignored).[/dim]")
+                self.console.print("[dim]Using ~/.pitaya/config.yaml (XDG fallback ignored).[/dim]")
         except Exception:
             pass
 
@@ -1597,7 +1595,7 @@ class OrchestratorCLI:
                 lines.append(f"  {k} = {v}  ({disp})")
                 count += 1
                 if count >= 20:
-                    lines.append("  … see `orchestrator config print` for full config")
+                    lines.append("  … see `pitaya config print` for full config")
                     break
             # Insert a concise secrets redaction note for visibility
             lines.insert(0, "  secrets=REDACTED")
@@ -1698,7 +1696,7 @@ class OrchestratorCLI:
         max_parallel = full_config["orchestration"]["max_parallel_instances"]
         state_dir = full_config.get("orchestration", {}).get(
             "state_dir"
-        ) or full_config.get("state_dir", Path("./orchestrator_state"))
+        ) or full_config.get("state_dir", Path("./pitaya_state"))
         logs_dir = full_config.get("orchestration", {}).get(
             "logs_dir"
         ) or full_config.get("logs_dir", Path("./logs"))
@@ -1708,12 +1706,12 @@ class OrchestratorCLI:
             self.console.print("[dim]Configuration loaded from:[/dim]")
             if cli_config:
                 self.console.print("  - Command line arguments")
-            # No orchestrator-specific environment variables are used
+        # No Pitaya-specific environment variables are used
             if dotenv_config:
                 self.console.print("  - .env file")
             if config:
                 self.console.print(
-                    f"  - Config file: {args.config or 'orchestrator.yaml'}"
+                    f"  - Config file: {args.config or 'pitaya.yaml'}"
                 )
             self.console.print("  - Built-in defaults")
 
@@ -1751,7 +1749,7 @@ class OrchestratorCLI:
             container_retention_success_hours=int(full_config.get("orchestration", {}).get("container_retention_success", 7200) // 3600 if isinstance(full_config.get("orchestration", {}).get("container_retention_success", 7200), int) else 2),
             runner_timeout_seconds=int(full_config.get("runner", {}).get("timeout", 3600)),
             default_network_egress=str(full_config.get("runner", {}).get("network_egress", "online")),
-            branch_namespace=str(full_config.get("orchestration", {}).get("branch_namespace", "flat")),
+            branch_namespace=str(full_config.get("orchestration", {}).get("branch_namespace", "hierarchical")),
             allow_overwrite_protected_refs=allow_overwrite,
             allow_global_session_volume=allow_global_session,
             default_plugin_name=str(full_config.get("plugin_name", getattr(args, "plugin", "claude-code"))),
@@ -1784,7 +1782,7 @@ class OrchestratorCLI:
     async def _run_headless(
         self, args: argparse.Namespace, run_id: str, full_config: Dict[str, Any]
     ) -> int:
-        """Run orchestrator in headless mode."""
+        """Run Pitaya in headless mode."""
         output_mode = args.output or "streaming"
 
         # Set up event subscriptions for output
@@ -2006,9 +2004,9 @@ class OrchestratorCLI:
                     state = self.orchestrator.state_manager.current_state
                     if state and state.run_id:
                         self.console.print("\n[blue]To resume this run:[/blue]")
-                        self.console.print(f"  orchestrator --resume {state.run_id}")
+                        self.console.print(f"  pitaya --resume {state.run_id}")
                         self.console.print(
-                            f"  orchestrator --resume-fresh {state.run_id}  # With fresh containers\n"
+                            f"  pitaya --resume-fresh {state.run_id}  # With fresh containers\n"
                         )
             # Shutdown orchestrator
             await self.orchestrator.shutdown()
@@ -2094,7 +2092,7 @@ class OrchestratorCLI:
     async def _run_with_tui(
         self, args: argparse.Namespace, run_id: str, full_config: Dict[str, Any]
     ) -> int:
-        """Run orchestrator with TUI display."""
+        """Run Pitaya with TUI display."""
         # Create TUI display with configured refresh rate
         try:
             rr_ms = int(full_config.get("tui", {}).get("refresh_rate_ms", 100))
@@ -2135,7 +2133,7 @@ class OrchestratorCLI:
         except Exception:
             pass
 
-        # Start orchestrator and TUI together
+        # Start Pitaya and TUI together
         try:
             # Use the passed run_id (already determined in run() method)
 
@@ -2144,7 +2142,7 @@ class OrchestratorCLI:
             # Ensure the logs directory exists
             events_file.parent.mkdir(parents=True, exist_ok=True)
 
-            # Create tasks for both orchestrator and TUI
+            # Create tasks for both Pitaya and TUI
             orchestrator_task = None
             tui_task = None
 
@@ -2176,7 +2174,7 @@ class OrchestratorCLI:
 
             # Start TUI with proper event file waiting
             async def start_tui():
-                # Wait for events file to be created by orchestrator
+                # Wait for events file to be created by Pitaya
                 max_wait = 10  # seconds
                 start_wait = asyncio.get_event_loop().time()
                 while not events_file.exists():
@@ -2219,7 +2217,7 @@ class OrchestratorCLI:
                     shutdown_requested = True
                     break
 
-            # Get the result from orchestrator
+            # Get the result from Pitaya
             result = None
             if not shutdown_requested:
                 for task in done:
@@ -2248,9 +2246,9 @@ class OrchestratorCLI:
             # If shutdown was requested, always show resume command (even during a resume)
             if shutdown_requested:
                 self.console.print("\n[blue]To resume this run:[/blue]")
-                self.console.print(f"  orchestrator --resume {run_id}")
+                self.console.print(f"  pitaya --resume {run_id}")
                 self.console.print(
-                    f"  orchestrator --resume-fresh {run_id}  # With fresh containers\n"
+                    f"  pitaya --resume-fresh {run_id}  # With fresh containers\n"
                 )
                 # Standardized interrupted exit code per spec
                 return 2
@@ -2298,58 +2296,58 @@ class OrchestratorCLI:
                         f"\nStrategy returned {len(result)} final result(s):"
                     )
                     for i, r in enumerate(result):
-                        if r.branch_name:
-                            self.console.print(f"  [{i+1}] Branch: {r.branch_name}")
-                            # Display ALL metrics fields
-                            if r.metrics:
-                                for key, value in sorted(r.metrics.items()):
-                                    # Format the value nicely
-                                    if isinstance(value, float):
-                                        formatted_value = (
-                                            f"{value:.4f}"
-                                            if value < 100
-                                            else f"{value:.2f}"
-                                        )
-                                    elif isinstance(value, bool):
-                                        formatted_value = "Yes" if value else "No"
-                                    elif value is None:
-                                        formatted_value = "N/A"
-                                    else:
-                                        formatted_value = str(value)
-                                    self.console.print(
-                                        f"      {key}: {formatted_value}"
+                        name = r.branch_name or "no-branch"
+                        self.console.print(f"  [{i+1}] Branch: {name}")
+                        # Display ALL metrics fields
+                        if r.metrics:
+                            for key, value in sorted(r.metrics.items()):
+                                # Format the value nicely
+                                if isinstance(value, float):
+                                    formatted_value = (
+                                        f"{value:.4f}"
+                                        if value < 100
+                                        else f"{value:.2f}"
                                     )
-                            # Display final message if present
-                            if r.final_message:
-                                # Truncate very long messages
-                                message = r.final_message
-                                if len(message) > 500:
-                                    message = message[:497] + "..."
-                                self.console.print(f"      [dim]final_message:[/dim] {message}")
-                            
-                            # Display metadata if present
-                            if r.metadata:
-                                # Show specific metadata fields if they exist
-                                metadata_items = []
-                                if "score" in r.metadata:
-                                    metadata_items.append(f"score={r.metadata['score']}")
-                                if "complexity" in r.metadata:
-                                    metadata_items.append(f"complexity={r.metadata['complexity']}")
-                                if "test_coverage" in r.metadata:
-                                    metadata_items.append(f"test_coverage={r.metadata['test_coverage']}%")
-                                if "bug_confirmed" in r.metadata:
-                                    metadata_items.append(f"bug_confirmed={r.metadata['bug_confirmed']}")
-                                if "bug_report_branch" in r.metadata:
-                                    metadata_items.append(f"bug_report_branch={r.metadata['bug_report_branch']}")
-                                    
-                                # Show any other metadata keys not already displayed
-                                displayed_keys = {"score", "complexity", "test_coverage", "bug_confirmed", "bug_report_branch", "strategy_execution_id", "model"}
-                                for key, value in r.metadata.items():
-                                    if key not in displayed_keys:
-                                        metadata_items.append(f"{key}={value}")
-                                
-                                if metadata_items:
-                                    self.console.print(f"      [dim]metadata:[/dim] {', '.join(metadata_items)}")
+                                elif isinstance(value, bool):
+                                    formatted_value = "Yes" if value else "No"
+                                elif value is None:
+                                    formatted_value = "N/A"
+                                else:
+                                    formatted_value = str(value)
+                                self.console.print(
+                                    f"      {key}: {formatted_value}"
+                                )
+                        # Display final message if present
+                        if r.final_message:
+                            # Truncate very long messages
+                            message = r.final_message
+                            if len(message) > 500:
+                                message = message[:497] + "..."
+                            self.console.print(f"      [dim]final_message:[/dim] {message}")
+
+                        # Display metadata if present
+                        if r.metadata:
+                            # Show specific metadata fields if they exist
+                            metadata_items = []
+                            if "score" in r.metadata:
+                                metadata_items.append(f"score={r.metadata['score']}")
+                            if "complexity" in r.metadata:
+                                metadata_items.append(f"complexity={r.metadata['complexity']}")
+                            if "test_coverage" in r.metadata:
+                                metadata_items.append(f"test_coverage={r.metadata['test_coverage']}%")
+                            if "bug_confirmed" in r.metadata:
+                                metadata_items.append(f"bug_confirmed={r.metadata['bug_confirmed']}")
+                            if "bug_report_branch" in r.metadata:
+                                metadata_items.append(f"bug_report_branch={r.metadata['bug_report_branch']}")
+
+                            # Show any other metadata keys not already displayed
+                            displayed_keys = {"score", "complexity", "test_coverage", "bug_confirmed", "bug_report_branch", "strategy_execution_id", "model"}
+                            for key, value in r.metadata.items():
+                                if key not in displayed_keys:
+                                    metadata_items.append(f"{key}={value}")
+
+                            if metadata_items:
+                                self.console.print(f"      [dim]metadata:[/dim] {', '.join(metadata_items)}")
             else:
                 # Fallback to result-based counting
                 if isinstance(result, list) and result:
@@ -2394,9 +2392,9 @@ class OrchestratorCLI:
                 rid = run_id
                 if rid:
                     self.console.print("\n[blue]To resume this run:[/blue]")
-                    self.console.print(f"  orchestrator --resume {rid}")
+                    self.console.print(f"  pitaya --resume {rid}")
                     self.console.print(
-                        f"  orchestrator --resume-fresh {rid}  # With fresh containers\n"
+                        f"  pitaya --resume-fresh {rid}  # With fresh containers\n"
                     )
             return 2
         except (OrchestratorError, DockerError, ValidationError) as e:
@@ -2477,7 +2475,7 @@ class OrchestratorCLI:
             from .utils.platform_utils import get_temp_dir
             td = get_temp_dir()
             td.mkdir(parents=True, exist_ok=True)
-            test = td / "_orc_doctor.tmp"
+            test = td / "_pitaya_doctor.tmp"
             test.write_text("ok")
             test.unlink(missing_ok=True)
             pass_line("temp", str(td))
@@ -2534,7 +2532,7 @@ class OrchestratorCLI:
         global_cfg = load_global_config()
         project_cfg = self._load_config_file(args) or {}
         merged = merge_config({}, env, dotenv, project_cfg, merge_config({}, {}, {}, global_cfg or {}, defaults))
-        allow_unred = os.environ.get("ORC_ALLOW_UNREDACTED") == "1" and str(getattr(args, "redact", "true")).lower() == "false"
+        allow_unred = os.environ.get("PITAYA_ALLOW_UNREDACTED") == "1" and str(getattr(args, "redact", "true")).lower() == "false"
         def _red(k, v):
             if allow_unred:
                 return v

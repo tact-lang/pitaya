@@ -1,5 +1,5 @@
 """
-Main entry point for orchestrator TUI.
+Main entry point for Pitaya TUI.
 
 This module allows the TUI to be run as:
     python -m src.tui

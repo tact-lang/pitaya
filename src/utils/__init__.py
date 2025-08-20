@@ -1,1 +1,1 @@
-"""Utility modules for the orchestrator."""
+"""Utility modules for Pitaya."""

@@ -1,5 +1,7 @@
 # 1. Introduction
 
+> Important: This specification describes an early iteration of the system and may not match the current Pitaya implementation. Some naming, defaults, and behaviors have evolved. For up-to-date usage and guidance, refer to the README and documentation.
+
 ## 1.1 Purpose and Goals
 
 The Orchestrator enables parallel execution of AI coding agents to explore multiple solution paths simultaneously. When using AI for software development, outcomes vary significantly between runs - even with identical prompts. This tool leverages that variability as a strength, running multiple instances in parallel and implementing selection strategies to identify the best results.

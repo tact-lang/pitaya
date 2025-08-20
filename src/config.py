@@ -1,19 +1,14 @@
 """
-Configuration management for the orchestrator.
+Configuration management for Pitaya.
 
-Configuration precedence: CLI > .env (auth only) > orchestrator.yaml > defaults.
-No orchestrator-specific environment variables are used.
+Configuration precedence: CLI > .env (auth only) > pitaya.yaml > defaults.
+No Pitaya-specific environment variables are used.
 """
 
 import os
 import yaml
 from typing import Any, Dict, Optional
 from pathlib import Path
-
-
-def get_env_value(key: str, default: Any = None) -> Any:
-    """Deprecated; orchestrator no longer uses ORCHESTRATOR_* env variables."""
-    return default
 
 
 def merge_config(
@@ -30,13 +25,13 @@ def merge_config(
     1. CLI arguments
     2. Environment variables
     3. .env file
-    4. orchestrator.yaml config file
+    4. pitaya.yaml config file
     5. Defaults
     """
     # Start with defaults
     result = defaults.copy()
 
-    # Overlay file config (orchestrator.yaml)
+    # Overlay file config (pitaya.yaml)
     deep_merge(result, file_config)
 
     # Overlay .env config
@@ -90,16 +85,16 @@ def deep_merge(base: Dict[str, Any], overlay: Dict[str, Any]) -> None:
 
 def load_yaml_config(yaml_path: Optional[Path] = None) -> Dict[str, Any]:
     """
-    Load configuration from orchestrator.yaml file.
+    Load configuration from pitaya.yaml file.
 
     Args:
-        yaml_path: Path to YAML config file (default: orchestrator.yaml in current directory)
+        yaml_path: Path to YAML config file (default: pitaya.yaml in current directory)
 
     Returns:
         Configuration dictionary from YAML file
     """
     if yaml_path is None:
-        yaml_path = Path("orchestrator.yaml")
+        yaml_path = Path("pitaya.yaml")
 
     if not yaml_path.exists():
         return {}
@@ -124,16 +119,16 @@ def load_yaml_config(yaml_path: Optional[Path] = None) -> Dict[str, Any]:
 def load_global_config() -> Dict[str, Any]:
     """Load global user config.
 
-    Preferred path: ~/.orchestrator/config.yaml
-    Fallback path: ~/.config/orchestrator/config.yaml
+    Preferred path: ~/.pitaya/config.yaml
+    Fallback path: ~/.config/pitaya/config.yaml
     If both exist, the preferred path wins.
     """
     try:
         home = Path.home()
     except Exception:
         return {}
-    preferred = home / ".orchestrator" / "config.yaml"
-    fallback = home / ".config" / "orchestrator" / "config.yaml"
+    preferred = home / ".pitaya" / "config.yaml"
+    fallback = home / ".config" / "pitaya" / "config.yaml"
     for p in (preferred, fallback):
         try:
             if p.exists():
@@ -216,7 +211,7 @@ def load_env_config() -> Dict[str, Any]:
             config["runner"] = {}
         config["runner"]["base_url"] = os.environ["ANTHROPIC_BASE_URL"]
 
-    # No orchestrator-specific env variables; use CLI or config file
+    # No Pitaya-specific env variables; use CLI or config file
 
     return config
 
@@ -227,7 +222,7 @@ def get_default_config() -> Dict[str, Any]:
         "model": "sonnet",
         "strategy": "simple",
         "output": "tui",
-        "state_dir": Path("./orchestrator_state"),
+        "state_dir": Path("./pitaya_state"),
         "logs_dir": Path("./logs"),
         "debug": False,
         # Normative defaults per spec §6.1.1 (subset applied where supported)
@@ -248,9 +243,9 @@ def get_default_config() -> Dict[str, Any]:
         "orchestration": {
             # Spec default: auto => max(2, min(20, floor(host_cpu / runner.container_cpu)))
             "max_parallel_instances": "auto",
-            # Branch namespace is hierarchical by default and mandatory for new runs
+            # Branch namespace is hierarchical by default
             # Format: orc/<strategy>/<run_id>/k<short8>
-            "branch_namespace": "hierarchical",  # hierarchical (mandatory); flat kept for legacy resumes
+            "branch_namespace": "hierarchical",
             "snapshot_interval": 30,  # seconds
             "event_buffer_size": 10000,
             "container_retention_failed": 86400,  # 24 hours
@@ -382,12 +377,12 @@ def load_config(
     1. CLI arguments
     2. Environment variables
     3. .env file
-    4. orchestrator.yaml
+    4. pitaya.yaml
     5. Built-in defaults
 
     Args:
         cli_args: Command line arguments (highest precedence)
-        yaml_path: Path to orchestrator.yaml (default: ./orchestrator.yaml)
+        yaml_path: Path to pitaya.yaml (default: ./pitaya.yaml)
         dotenv_path: Path to .env file (default: ./.env)
 
     Returns:

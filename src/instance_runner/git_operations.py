@@ -92,7 +92,7 @@ class GitOperations:
             import platform
             if platform.system() == "Darwin":
                 # macOS: /Users is shared by default with Docker Desktop
-                base_dir = Path.home() / ".orchestrator" / "workspaces"
+                base_dir = Path.home() / ".pitaya" / "workspaces"
             else:
                 base_dir = get_temp_dir()
         except Exception:
@@ -100,9 +100,7 @@ class GitOperations:
 
         if run_id and container_name:
             # Derive a stable workspace path per run + strategy + durable key
-            # Accept both formats:
-            #   orchestrator_{run_id}_s{sidx}_i{iidx}
-            #   orchestrator_{run_id}_s{sidx}_k{khash}[_rXXXX...]
+            # Expected format: pitaya_{run_id}_s{sidx}_k{khash}[_rXXXX...]
             tokens = (container_name or "").split("_")
             sidx = "0"
             khash = ""
@@ -112,29 +110,23 @@ class GitOperations:
                     if t.startswith("s") and t[1:].isdigit():
                         sidx = t[1:]
                         break
-                # Prefer k{hash} if present; else fall back to last token that looks like i{...}
+                # Extract k{hash}
                 for t in tokens:
                     if t.startswith("k") and len(t) > 1:
                         khash = t[1:]
                         break
                 if not khash:
-                    # Look for i{index}; keep its content for backwards-compat
-                    for t in tokens:
-                        if t.startswith("i") and len(t) > 1:
-                            khash = t[1:]
-                            break
-                if not khash:
-                    # Final fallback: short instance_id
+                    # Fallback: short instance_id
                     khash = (instance_id or "")[0:8] or "x"
             except Exception:
                 sidx = "0"
                 khash = (instance_id or "")[0:8] or "x"
 
-            # Path: {base}/orchestrator/${run_id}/i_${sidx}_${khash} (stable across resume suffixes)
-            workspace_dir = base_dir / f"orchestrator/{run_id}/i_{sidx}_{khash}"
+            # Path: {base}/pitaya/${run_id}/i_${sidx}_${khash} (stable across resume suffixes)
+            workspace_dir = base_dir / f"pitaya/{run_id}/i_{sidx}_{khash}"
         else:
             # Fallback for standalone usage
-            workspace_dir = base_dir / f"orchestrator/instance_{instance_id}"
+            workspace_dir = base_dir / f"pitaya/instance_{instance_id}"
 
         # On Windows, ensure path length remains below typical limits
         try:
@@ -146,7 +138,7 @@ class GitOperations:
                 # If the final path would be too long, use a shorter form
                 if len(str(workspace_dir)) > 200:
                     from uuid import uuid4
-                    workspace_dir = base_dir / f"orc/{uuid4().hex[:8]}"
+                    workspace_dir = base_dir / f"pit/{uuid4().hex[:8]}"
         except Exception:
             pass
 
@@ -312,7 +304,7 @@ class GitOperations:
             _raw = _P(out.strip()) if _P(out.strip()).is_absolute() else (repo_path / out.strip())
             # Use realpath (resolve) per spec to avoid duplicate locks on symlinked repos
             git_dir = _raw.resolve()
-            lock_path = git_dir / ".orc_import.lock"
+            lock_path = git_dir / ".pitaya_import.lock"
 
             # Simple cross-platform exclusive lock with diagnostics and wait-loop
             import sys
@@ -422,7 +414,7 @@ class GitOperations:
                 rc, br_head_out = await self._run_command(br_head_cmd)
                 if rc == 0 and br_head_out.strip() == workspace_head:
                     # Check provenance note for same task_key
-                    note_rc, note_out = await self._run_command(["git", "-C", str(repo_path), "notes", "--ref=orchestrator", "show", workspace_head])
+                    note_rc, note_out = await self._run_command(["git", "-C", str(repo_path), "notes", "--ref=pitaya", "show", workspace_head])
                     if note_rc == 0 and task_key and (f"task_key={task_key}" in note_out):
                         dedupe_reason = "same_task_provenance"
                     else:
@@ -432,7 +424,7 @@ class GitOperations:
                             note_lines = [
                                 f"task_key={task_key}; run_id={run_id}; strategy_execution_id={strategy_execution_id}; branch={branch_name}; ts={_ts}"
                             ]
-                            await self._run_command(["git", "-C", str(repo_path), "notes", "--ref=orchestrator", "add", "-f", "-m", "\n".join(note_lines), workspace_head])
+                            await self._run_command(["git", "-C", str(repo_path), "notes", "--ref=pitaya", "add", "-f", "-m", "\n".join(note_lines), workspace_head])
                         except Exception:
                             pass
                         dedupe_reason = "by_commit"
@@ -460,7 +452,7 @@ class GitOperations:
                             import re
                             if re.match(rf"^{branch_name}(_[0-9]+)?$", ref) and obj == workspace_head:
                                 # Check provenance for this task_key
-                                note_rc, note_out = await self._run_command(["git", "-C", str(repo_path), "notes", "--ref=orchestrator", "show", workspace_head])
+                                note_rc, note_out = await self._run_command(["git", "-C", str(repo_path), "notes", "--ref=pitaya", "show", workspace_head])
                                 if note_rc == 0 and task_key and (f"task_key={task_key}" in note_out):
                                     dedupe_reason = "same_task_provenance"
                                     logger.info(f"Found existing suffixed branch {ref} with matching HEAD and provenance; idempotent success")
@@ -472,7 +464,7 @@ class GitOperations:
                                         note_lines = [
                                             f"task_key={task_key}; run_id={run_id}; strategy_execution_id={strategy_execution_id}; branch={ref}; ts={_ts}"
                                         ]
-                                        await self._run_command(["git", "-C", str(repo_path), "notes", "--ref=orchestrator", "add", "-f", "-m", "\n".join(note_lines), workspace_head])
+                                        await self._run_command(["git", "-C", str(repo_path), "notes", "--ref=pitaya", "add", "-f", "-m", "\n".join(note_lines), workspace_head])
                                     except Exception:
                                         pass
                                     duplicate_of_branch = ref
@@ -558,7 +550,7 @@ class GitOperations:
                     note_lines = [
                         f"task_key={task_key}; run_id={run_id}; strategy_execution_id={strategy_execution_id}; branch={target_branch}; ts={_ts}"
                     ]
-                    await self._run_command(["git", "-C", str(repo_path), "notes", "--ref=orchestrator", "add", "-f", "-m", "\n".join(note_lines), workspace_head])
+                    await self._run_command(["git", "-C", str(repo_path), "notes", "--ref=pitaya", "add", "-f", "-m", "\n".join(note_lines), workspace_head])
                 except Exception:
                     pass
                 return {"has_changes": "true", "target_branch": target_branch, "commit": workspace_head, "duplicate_of_branch": duplicate_of_branch, "dedupe_reason": dedupe_reason}

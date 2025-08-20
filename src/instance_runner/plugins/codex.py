@@ -1,7 +1,7 @@
 """
 Codex CLI plugin implementation.
 
-Integrates Codex (open-source Codex CLI) with the orchestrator RunnerPlugin
+Integrates Codex (open-source Codex CLI) with the Pitaya RunnerPlugin
 interface, mirroring the generic agent behavior for event streaming and metrics.
 """
 

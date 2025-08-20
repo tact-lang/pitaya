@@ -1,5 +1,5 @@
 """
-Common exception hierarchy for the orchestrator system.
+Common exception hierarchy for the Pitaya system.
 
 These exceptions are used across all layers (instance_runner, orchestration, tui)
 to maintain consistent error handling as specified in the architecture.
@@ -7,7 +7,7 @@ to maintain consistent error handling as specified in the architecture.
 
 
 class OrchestratorError(Exception):
-    """Base exception for all orchestrator errors."""
+    """Base exception for all Pitaya errors."""
 
     pass
 

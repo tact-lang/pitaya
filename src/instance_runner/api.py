@@ -92,7 +92,7 @@ async def run_instance(
         InstanceResult containing execution outcome, metrics, and branch information
 
     Raises:
-        InstanceRunnerError: Base exception for all instance runner errors
+        OrchestratorError: Base exception for all instance runner errors
         DockerError: Docker daemon not available or container issues
         GitError: Repository access or git operation failures
         AgentError: Agent tool execution failures

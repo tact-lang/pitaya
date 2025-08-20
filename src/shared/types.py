@@ -141,7 +141,7 @@ class RunnerPlugin(ABC):
     """
     Abstract interface for AI coding tool runners.
 
-    Each plugin must implement these methods to integrate with the orchestrator.
+    Each plugin must implement these methods to integrate with Pitaya.
     """
 
     @property
@@ -342,7 +342,7 @@ class InstanceStatus(Enum):
 
 @dataclass
 class Event:
-    """Base event structure for all orchestrator events."""
+    """Base event structure for all Pitaya events."""
 
     type: str  # e.g., "instance.started", "strategy.completed"
     timestamp: str  # ISO format timestamp with timezone
@@ -363,7 +363,7 @@ class Event:
 
 # Event type constants for type safety
 class EventTypes:
-    """Standard event types emitted by the orchestrator system."""
+    """Standard event types emitted by the Pitaya system."""
 
     # Instance Runner events
     INSTANCE_QUEUED = "instance.queued"
@@ -380,7 +380,6 @@ class EventTypes:
     INSTANCE_CONTAINER_STOPPED = "instance.container_stopped"
     INSTANCE_NO_CHANGES = "instance.no_changes"
     INSTANCE_RESULT_COLLECTION_STARTED = "instance.result_collection_started"
-    # Legacy assistant event names (kept for compatibility)
     # Generic assistant event names
     INSTANCE_AGENT_TOOL_USE = "instance.agent_tool_use"
     INSTANCE_AGENT_TOOL_RESULT = "instance.agent_tool_result"

@@ -88,7 +88,7 @@ class DockerManager:
     _hb_tasks: Dict[str, asyncio.Task] = {}
 
     async def start_heartbeat(self, container: Container, interval_s: float = 15.0) -> None:
-        """Start a periodic heartbeat writer inside the container at /home/node/.orc/last_active.
+        """Start a periodic heartbeat writer inside the container at /home/node/.pitaya/last_active.
 
         Emits DEBUG logs indicating exec_create/exec_start success for easier diagnostics.
         """
@@ -105,7 +105,7 @@ class DockerManager:
                 while True:
                     try:
                         # Ensure directory exists and write timestamp
-                        exec1 = container.client.api.exec_create(container.id, "sh -lc 'mkdir -p /home/node/.orc'", stdout=False, stderr=False)
+                        exec1 = container.client.api.exec_create(container.id, "sh -lc 'mkdir -p /home/node/.pitaya'", stdout=False, stderr=False)
                         try:
                             logger.debug("heartbeat: exec_create mkdir id=%s", exec1.get("Id", "-"))
                         except Exception:
@@ -116,7 +116,7 @@ class DockerManager:
                         except Exception:
                             pass
                         ts = _iso_millis(datetime.now(timezone.utc))
-                        exec2 = container.client.api.exec_create(container.id, f"sh -lc 'printf %s {ts} > /home/node/.orc/last_active'", stdout=False, stderr=False)
+                        exec2 = container.client.api.exec_create(container.id, f"sh -lc 'printf %s {ts} > /home/node/.pitaya/last_active'", stdout=False, stderr=False)
                         try:
                             logger.debug("heartbeat: exec_create write id=%s ts=%s", exec2.get("Id", "-"), ts)
                         except Exception:
@@ -133,7 +133,7 @@ class DockerManager:
                 # One final heartbeat on cancel
                 try:
                     ts = _iso_millis(datetime.now(timezone.utc))
-                    exec3 = container.client.api.exec_create(container.id, f"sh -lc 'printf %s {ts} > /home/node/.orc/last_active'", stdout=False, stderr=False)
+                    exec3 = container.client.api.exec_create(container.id, f"sh -lc 'printf %s {ts} > /home/node/.pitaya/last_active'", stdout=False, stderr=False)
                     try:
                         logger.debug("heartbeat: final exec_create id=%s ts=%s", exec3.get("Id", "-"), ts)
                     except Exception:
@@ -382,16 +382,13 @@ class DockerManager:
             # Convert to absolute path
             workspace_dir = workspace_dir.resolve()
 
-            # Extract indices from container name for volume naming
-            # Container name format: orchestrator_{run_id}_s{sidx}_i{iidx}
+            # Extract strategy index from container name for volume naming
+            # Container name format: pitaya_{run_id}_s{sidx}_k{khash}[_rXXXX]
             name_parts = container_name.split("_")
             if len(name_parts) >= 4:
                 sidx = name_parts[-2].lstrip("s")
-                iidx = name_parts[-1].lstrip("i")
             else:
-                # Fallback
                 sidx = "0"
-                iidx = "0"
 
             # Named volume for agent home as per spec (GHASH)
             import hashlib, json as _json
@@ -402,13 +399,13 @@ class DockerManager:
                 payload = {"session_group_key": eff_sgk, "plugin": (plugin_name or ""), "model": (resolved_model_id or "")}
                 enc = _json.dumps(payload, separators=(",", ":"), sort_keys=True)
                 ghash = hashlib.sha256(enc.encode("utf-8", errors="ignore")).hexdigest()[:8]
-                volume_name = f"orc_home_g{ghash}"
+                volume_name = f"pitaya_home_g{ghash}"
             else:
                 payload = {"session_group_key": eff_sgk}
                 enc = _json.dumps(payload, separators=(",", ":"), sort_keys=True)
                 ghash = hashlib.sha256(enc.encode("utf-8", errors="ignore")).hexdigest()[:8]
                 # Scope volumes per-run and per-strategy to avoid concurrent copy-up races
-                volume_name = f"orc_home_{(run_id or 'norun')}_s{sidx}_g{ghash}"
+                volume_name = f"pitaya_home_{(run_id or 'norun')}_s{sidx}_g{ghash}"
             # KHASH based on durable task key if provided
             khash = hashlib.sha256((task_key or "").encode("utf-8", errors="ignore")).hexdigest()[:8] if task_key else ""
 
@@ -467,14 +464,14 @@ class DockerManager:
                 "command": "sleep infinity",  # Keep container running
                 "detach": True,
                 "labels": {
-                    "orchestrator": "true",
+                    "pitaya": "true",
                     "created_at": datetime.now(timezone.utc).isoformat(),
                     "run_id": run_id or "",
                     "strategy_execution_id": strategy_execution_id or "",
                     "strategy_index": sidx,
                     "task_key": task_key or "",
                     "session_group_key": session_group_key or "",
-                    "orchestrator.last_active_ts": datetime.now(timezone.utc).isoformat(),
+                    "pitaya.last_active_ts": datetime.now(timezone.utc).isoformat(),
                     "instance_id": instance_id or "",
                 },
                 # Use explicit Mounts; avoid old volumes/binds ambiguity
@@ -487,9 +484,9 @@ class DockerManager:
                 "environment": {
                     "PYTHONUNBUFFERED": "1",
                     "GIT_AUTHOR_NAME": "AI Agent",
-                    "GIT_AUTHOR_EMAIL": "agent@orchestrator.local",
+                    "GIT_AUTHOR_EMAIL": "agent@pitaya.local",
                     "GIT_COMMITTER_NAME": "AI Agent",
-                    "GIT_COMMITTER_EMAIL": "agent@orchestrator.local",
+                    "GIT_COMMITTER_EMAIL": "agent@pitaya.local",
                     # Normative envs for in-container awareness/debugging
                     "TASK_KEY": task_key or "",
                     "SESSION_GROUP_KEY": session_group_key or "",
@@ -1152,7 +1149,7 @@ class DockerManager:
         self, failed_retention_hours: int = 24, success_retention_hours: int = 2
     ) -> int:
         """
-        Clean up old orchestrator containers.
+        Clean up old Pitaya containers.
 
         Per specification:
         - Failed instances retained for 24 hours
@@ -1171,7 +1168,7 @@ class DockerManager:
                 None,
                 lambda: self.client.containers.list(
                     all=True,  # Include stopped containers
-                    filters={"label": "orchestrator=true"},
+                    filters={"label": "pitaya=true"},
                 ),
             )
 
@@ -1193,7 +1190,7 @@ class DockerManager:
                     status = "unknown"
                     try:
                         status_file = Path(
-                            f"/tmp/orchestrator_status/{container.id[:12]}.status"
+                            f"/tmp/pitaya_status/{container.id[:12]}.status"
                         )
                         if status_file.exists():
                             status = status_file.read_text().strip()
@@ -1212,7 +1209,7 @@ class DockerManager:
                         max_age = failed_retention_hours
                     # Prefer last-active file mtime if present
                     try:
-                        active_file = Path(f"/tmp/orchestrator_status/{container.id[:12]}.active")
+                        active_file = Path(f"/tmp/pitaya_status/{container.id[:12]}.active")
                         if active_file.exists():
                             atime = datetime.fromtimestamp(active_file.stat().st_mtime, tz=timezone.utc)
                             age_hours = (current_time - atime).total_seconds() / 3600
@@ -1222,16 +1219,12 @@ class DockerManager:
                         # Before removal, compute associated resources
                         try:
                             run_id = container.labels.get("run_id", "norun")
-                            sidx = container.labels.get("strategy_index") or container.labels.get("strategy_exec", "0")
-                            iidx = container.labels.get("instance_index", "0")
-                            # Try both legacy (s/i) and new (gHASH) naming
-                            try:
-                                group = container.labels.get("session_group_key") or container.labels.get("task_key") or ""
-                                import hashlib
-                                ghash = hashlib.sha256(group.encode("utf-8")).hexdigest()[:8] if group else "unknown"
-                                volume_name = f"orc_home_{run_id}_s{sidx}_g{ghash}"
-                            except Exception:
-                                volume_name = f"orc_home_{run_id}_s{sidx}_i{iidx}"
+                            sidx = container.labels.get("strategy_index") or "0"
+                            # Compute volume name using session_group_key/task_key GHASH
+                            group = container.labels.get("session_group_key") or container.labels.get("task_key") or ""
+                            import hashlib
+                            ghash = hashlib.sha256(group.encode("utf-8")).hexdigest()[:8] if group else "unknown"
+                            volume_name = f"pitaya_home_{run_id}_s{sidx}_g{ghash}"
                             # Attempt to remove container
                             await self.cleanup_container(container)
                             removed_count += 1
@@ -1256,13 +1249,33 @@ class DockerManager:
                                     )
                             except Exception:
                                 pass
-                            # Remove workspace directory
+                            # Remove workspace directory (best-effort)
                             try:
                                 temp_base = get_temp_dir()
-                                workspace_path = temp_base / f"orchestrator/{run_id}/i_{sidx}_{iidx}"
-                                if workspace_path.exists():
-                                    shutil.rmtree(workspace_path, ignore_errors=True)
-                                    logger.debug(f"Removed workspace {workspace_path}")
+                                # Derive KHASH from container name
+                                khash = ""
+                                try:
+                                    parts = (container.name or "").split("_")
+                                    for p in parts:
+                                        if p.startswith("k") and len(p) > 1:
+                                            khash = p[1:]
+                                            break
+                                except Exception:
+                                    khash = ""
+                                candidates = []
+                                if khash:
+                                    candidates.append(temp_base / f"pitaya/{run_id}/i_{sidx}_{khash}")
+                                # macOS default under $HOME
+                                try:
+                                    from pathlib import Path as _P
+                                    if khash:
+                                        candidates.append(_P.home() / ".pitaya" / "workspaces" / f"pitaya/{run_id}/i_{sidx}_{khash}")
+                                except Exception:
+                                    pass
+                                for workspace_path in candidates:
+                                    if workspace_path.exists():
+                                        shutil.rmtree(workspace_path, ignore_errors=True)
+                                        logger.debug(f"Removed workspace {workspace_path}")
                             except Exception:
                                 pass
                         except Exception as e:
@@ -1297,7 +1310,7 @@ class DockerManager:
         """
         try:
             # Store status in a host file indexed by container ID
-            status_dir = Path("/tmp/orchestrator_status")
+            status_dir = Path("/tmp/pitaya_status")
             status_dir.mkdir(exist_ok=True)
 
             status_file = status_dir / f"{container.id[:12]}.status"
@@ -1322,9 +1335,9 @@ class DockerManager:
         dry_run: bool = False,
     ) -> dict:
         """
-        Remove unreferenced session volumes matching orchestrator patterns.
+        Remove unreferenced session volumes matching Pitaya patterns.
 
-        - Candidates: volumes with names starting with 'orc_home_'
+        - Candidates: volumes with names starting with 'pitaya_home_'
         - Skip volumes referenced by any container
         - Respect age threshold via volume CreatedAt
 
@@ -1365,7 +1378,7 @@ class DockerManager:
             now = datetime.now(timezone.utc)
             for vol in vols:
                 name = getattr(vol, "name", "") or getattr(vol, "Name", "")
-                if not name or not name.startswith("orc_home_"):
+                if not name or not name.startswith("pitaya_home_"):
                     continue
                 out["candidates"].append(name)
                 if name in referenced:

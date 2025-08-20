@@ -1,5 +1,5 @@
 """
-Adaptive display logic for the orchestrator TUI.
+Adaptive display logic for the Pitaya TUI.
 
 Implements three display modes based on instance count:
 - Detailed (<=5 instances): Full instance details with progress

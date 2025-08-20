@@ -1,5 +1,5 @@
 """
-Orchestrator TUI - Interactive display for AI coding agent orchestration.
+Pitaya TUI - Interactive display for AI coding agent orchestration.
 
 Provides real-time monitoring of parallel AI coding agent execution with
 adaptive display modes based on instance count.

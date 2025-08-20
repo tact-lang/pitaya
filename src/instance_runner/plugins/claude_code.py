@@ -1,7 +1,7 @@
 """
 Anthropic plugin implementation.
 
-This plugin integrates the Anthropic coding agent with the orchestrator's
+This plugin integrates the Anthropic coding agent with Pitaya's
 runner interface.
 """
 
@@ -208,7 +208,7 @@ class ClaudeCodePlugin(RunnerPlugin):
         ):
             return "session_corrupted", False
         else:
-            # Generic agent error (legacy: was 'claude')
+            # Generic agent error
             return "agent", True
 
     async def execute(

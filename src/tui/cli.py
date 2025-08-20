@@ -1,5 +1,5 @@
 """
-CLI interface for the orchestrator TUI.
+CLI interface for the Pitaya TUI.
 
 Handles argument parsing and coordinates different output modes:
 - TUI: Rich interactive display
@@ -24,7 +24,7 @@ from .. import __version__
 
 
 class OrchestratorTUI:
-    """Main orchestrator TUI application."""
+    """Main Pitaya TUI application."""
 
     def __init__(self):
         """Initialize TUI application."""
@@ -38,17 +38,17 @@ class OrchestratorTUI:
     def create_parser(cls) -> argparse.ArgumentParser:
         """Create argument parser for TUI with clear grouping and examples."""
         parser = argparse.ArgumentParser(
-            prog="orchestrator-tui",
-            description="Monitor orchestrator runs from an events file (TUI or text)",
+            prog="pitaya-tui",
+            description="Monitor Pitaya runs from an events file (TUI or text)",
             formatter_class=argparse.RawDescriptionHelpFormatter,
             epilog=(
                 "Examples:\n"
                 "  # Watch a run by ID\n"
-                "  orchestrator-tui --run-id run_20250114_123456\n\n"
+                "  pitaya-tui --run-id run_20250114_123456\n\n"
                 "  # Stream as text from a file\n"
-                "  orchestrator-tui --events-file logs/run_20250114_123456/events.jsonl --output streaming\n\n"
+                "  pitaya-tui --events-file logs/run_20250114_123456/events.jsonl --output streaming\n\n"
                 "  # Emit JSON events (no TUI)\n"
-                "  orchestrator-tui --events-file events.jsonl --output json\n"
+                "  pitaya-tui --events-file events.jsonl --output json\n"
             ),
         )
 
@@ -123,8 +123,8 @@ class OrchestratorTUI:
                 self.console.print(
                     "[red]Missing input.[/red] Provide either --events-file <path> or --run-id <id>.\n"
                     "Examples:\n"
-                    "  orchestrator-tui --run-id run_20250114_123456\n"
-                    "  orchestrator-tui --events-file logs/run_20250114_123456/events.jsonl"
+                    "  pitaya-tui --run-id run_20250114_123456\n"
+                    "  pitaya-tui --events-file logs/run_20250114_123456/events.jsonl"
                 )
                 return 2
             # Read from events file

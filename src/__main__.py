@@ -1,7 +1,7 @@
 """
-Main entry point for orchestrator.
+Main entry point for Pitaya.
 
-This module allows the orchestrator to be run as:
+This module allows Pitaya to be run as:
     python -m src
 """
 

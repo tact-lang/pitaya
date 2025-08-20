@@ -1,5 +1,5 @@
 """
-Rich-based TUI display for the orchestrator.
+Rich-based TUI display for Pitaya.
 
 Implements the three-zone layout (header, dashboard, footer) with
 adaptive display based on instance count.
@@ -354,7 +354,7 @@ class TUIDisplay:
             # Keep run metrics unchanged on reconciliation error
             pass
 
-        # Update per-instance basics so UI reflects progress without legacy events
+        # Update per-instance basics so UI reflects progress
         try:
             instances_map = (
                 orchestrator_state.get("instances") if isinstance(orchestrator_state, dict) else getattr(orchestrator_state, "instances", {})
@@ -393,7 +393,7 @@ class TUIDisplay:
             if not run_src:
                 # No active run
                 header_content = Text(
-                    "Orchestrator TUI - No Active Run", style="bold yellow"
+                    "Pitaya TUI - No Active Run", style="bold yellow"
                 )
             else:
                 run = run_src
@@ -488,7 +488,7 @@ class TUIDisplay:
                 target.update(
                     Panel(
                         Align.center(
-                            Text("Waiting for orchestration run...", style="dim")
+                            Text("Waiting for Pitaya run...", style="dim")
                         ),
                         style="dim",
                     )

@@ -1,7 +1,7 @@
 [project]
-name = "orchestrator"
+name = "pitaya"
 version = "0.1.0"
-description = "Parallel execution of AI coding agents to explore multiple solution paths"
+description = "Pitaya — parallel execution of AI coding agents to explore multiple solution paths"
 readme = "README.md"
 requires-python = "==3.13.*"
 dependencies = [
@@ -16,8 +16,8 @@ dependencies = [
 ]
 
 [project.scripts]
-orchestrator = "src.cli:main"
-orchestrator-tui = "src.tui.cli:main"
+pitaya = "src.cli:main"
+pitaya-tui = "src.tui.cli:main"
 
 [build-system]
 requires = ["hatchling"]

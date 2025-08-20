@@ -1,5 +1,5 @@
 """
-Structured logging setup for the orchestrator.
+Structured logging setup for Pitaya.
 
 Implements JSON Lines logging with component separation as per spec section 6.1.
 Each component gets its own log file with structured JSON output.

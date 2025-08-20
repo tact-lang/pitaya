@@ -184,8 +184,7 @@ class EventBus:
         # Update statistics
         self.event_counts[event_type] += 1
 
-        # Do not persist legacy events to events.jsonl; canonical-only per spec
-        # Persist runner-level events to runner.jsonl for diagnostics (best-effort)
+        # Only persist canonical events to events.jsonl; runner-level events go to runner.jsonl
         try:
             if self._runner_file and isinstance(event_type, str) and (event_type.startswith("instance.") or event_type.startswith("runner.")):
                 line = (json.dumps(event, separators=(",", ":")) + "\n").encode("utf-8")
@@ -318,8 +317,7 @@ class EventBus:
                             pass
             except Exception as e:
                 logger.error(f"Failed to enqueue canonical event: {e}")
-        # Also push an in-memory mirror for UI (map to legacy fields)
-        # In-memory mirror in canonical form for in-process consumers
+        # Also push an in-memory mirror for UI in canonical form
         mirror = {
             "type": type,
             "ts": ts,

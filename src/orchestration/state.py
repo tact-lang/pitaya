@@ -380,7 +380,7 @@ class StateManager:
                     limit=None,
                 )
 
-                # Apply canonical + state events for recovery
+                # Apply canonical events for recovery
                 if all_events:
                     await self.rebuild_from_events(all_events)
                     self.current_state.last_event_start_offset = next_offset
@@ -408,10 +408,6 @@ class StateManager:
                         continue
                     if et in ("task.completed", "task.failed", "task.interrupted"):
                         terminal_iids.add(iid)
-                    if et == "state.instance_updated":
-                        data = ev.get("data", {})
-                        if data.get("new_state") in (InstanceStatus.COMPLETED.value, InstanceStatus.FAILED.value, InstanceStatus.INTERRUPTED.value):
-                            terminal_iids.add(iid)
 
                 for iid, info in list(self.current_state.instances.items()):
                     if info.state == InstanceStatus.RUNNING and iid not in terminal_iids:
@@ -433,7 +429,7 @@ class StateManager:
 
         return self.current_state
 
-    # Removed legacy load_snapshot; use load_and_recover_state for recovery.
+    # Snapshot loading uses load_and_recover_state.
 
     def register_instance(
         self,
@@ -896,11 +892,7 @@ class StateManager:
             logger.info("Stopped periodic snapshots")
 
     def apply_event(self, event: Dict[str, Any]) -> None:
-        """Apply a single event to reconstruct state.
-
-        Handles both internal state.* events (legacy) and canonical
-        task.* / strategy.* events written to events.jsonl.
-        """
+        """Apply a single event to reconstruct state from canonical events."""
         if not self.current_state:
             logger.warning("No current state to apply event to")
             return
@@ -923,93 +915,8 @@ class StateManager:
         except Exception:
             pass
 
-        if event_type == "state.run_initialized":
-            # This would typically create a new state, but during replay
-            # the state should already be loaded from snapshot
-            pass
-
-        elif event_type == "state.instance_registered":
-            instance_id = data.get("instance_id")
-            if instance_id and instance_id not in self.current_state.instances:
-                info = InstanceInfo(
-                    instance_id=instance_id,
-                    strategy_name=data.get("strategy_name", ""),
-                    prompt=data.get("prompt", ""),
-                    base_branch=data.get("base_branch", ""),
-                    branch_name=data.get("branch_name", ""),
-                    container_name=data.get("container_name", ""),
-                    state=InstanceStatus(data.get("state", "queued")),
-                    metadata=data.get("metadata", {}),
-                )
-                self.current_state.instances[instance_id] = info
-                self.current_state.total_instances += 1
-
-        elif event_type == "state.instance_updated":
-            instance_id = data.get("instance_id")
-            if instance_id and instance_id in self.current_state.instances:
-                info = self.current_state.instances[instance_id]
-                new_state = InstanceStatus(data.get("new_state"))
-                old_state = info.state
-
-                info.state = new_state
-
-                # Update session_id if provided in event (e.g., during runtime)
-                if "session_id" in data and data.get("session_id"):
-                    info.session_id = data.get("session_id")
-
-                if new_state == InstanceStatus.RUNNING and data.get("started_at"):
-                    info.started_at = datetime.fromisoformat(data["started_at"])
-
-                elif new_state == InstanceStatus.INTERRUPTED:
-                    # Record interruption time if provided
-                    ts = data.get("interrupted_at")
-                    if ts:
-                        try:
-                            info.interrupted_at = datetime.fromisoformat(ts)
-                        except Exception:
-                            pass
-
-                elif new_state in (InstanceStatus.COMPLETED, InstanceStatus.FAILED):
-                    if data.get("completed_at"):
-                        info.completed_at = datetime.fromisoformat(data["completed_at"])
-
-                    if new_state == InstanceStatus.COMPLETED:
-                        if old_state != InstanceStatus.COMPLETED:
-                            self.current_state.completed_instances += 1
-                    else:
-                        if old_state != InstanceStatus.FAILED:
-                            self.current_state.failed_instances += 1
-
-                    # Update metrics
-                    cost = data.get("cost", 0.0)
-                    tokens = data.get("tokens", 0)
-                    if cost or tokens:
-                        self.current_state.total_cost += cost
-                        self.current_state.total_tokens += tokens
-
-        elif event_type == "state.strategy_registered":
-            strategy_id = data.get("strategy_id")
-            if strategy_id and strategy_id not in self.current_state.strategies:
-                self.current_state.strategies[strategy_id] = StrategyExecution(
-                    strategy_id=strategy_id,
-                    strategy_name=data.get("strategy_name", ""),
-                    config=data.get("config", {}),
-                )
-
-        elif event_type == "state.strategy_updated":
-            strategy_id = data.get("strategy_id")
-            if strategy_id and strategy_id in self.current_state.strategies:
-                strategy = self.current_state.strategies[strategy_id]
-                strategy.state = data.get("new_state", "running")
-
-                if data.get("completed_at"):
-                    strategy.completed_at = datetime.fromisoformat(data["completed_at"])
-
-                # Note: Strategy results aren't included in events to keep them small
-                # Full results are stored in the final snapshot
-
         # Canonical strategy events
-        elif event_type == "strategy.started":
+        if event_type == "strategy.started":
             sid = event.get("strategy_execution_id") or data.get("strategy_id")
             if sid and sid not in self.current_state.strategies:
                 self.current_state.strategies[sid] = StrategyExecution(

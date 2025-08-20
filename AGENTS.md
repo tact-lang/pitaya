@@ -7,15 +7,15 @@
   - `tui/` (Rich-based dashboard)
   - `utils/`, `shared/`, `exceptions.py`
 - `docs/` — specs (see `SPECIFICATION.md`)
-- `logs/`, `results/`, `orchestrator_state/` — runtime artifacts (git-ignored)
+- `logs/`, `results/`, `pitaya_state/` — runtime artifacts (git-ignored)
 
 ## Build, Test, and Development
 - Python: 3.13 is required.
 - Install deps (uv recommended):
   - `uv sync` (installs project and dev deps)
 - Run CLI:
-  - `uv run orchestrator "fix bug" --strategy best-of-n -S n=3`
-  - `uv run orchestrator-tui --run-id <run_id>`
+  - `uv run pitaya "fix bug" --strategy best-of-n -S n=3`
+  - `uv run pitaya-tui --run-id <run_id>`
   - Without uv: `python -m src.cli "prompt"` or `python -m src.tui.cli --run-id <run_id>`
 - Build Docker image used by the runner: `docker build -t claude-code .`
 
@@ -25,8 +25,8 @@
   - `uv run ruff check src`
   - `uv run black src`
 - Deterministic names:
-  - Containers: `orchestrator_{run_id}_s{strategy_index}_k<hash>`
-  - Branches: `{strategy}_{run_id}_k<hash>`
+  - Containers: `pitaya_{run_id}_s{strategy_index}_k<hash>`
+  - Branches: `pitaya/<strategy>/{run_id}/k<hash>`
 
 ## Testing
 - Frameworks: `pytest`, `pytest-asyncio` (see `pyproject.toml`).

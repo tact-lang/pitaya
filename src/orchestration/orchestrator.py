@@ -54,7 +54,7 @@ class Orchestrator:
     def __init__(
         self,
         max_parallel_instances: Optional[int] = None,
-        state_dir: Path = Path("./orchestrator_state"),
+        state_dir: Path = Path("./pitaya_state"),
         logs_dir: Path = Path("./logs"),
         container_limits: Optional[ContainerLimits] = None,
         retry_config: Optional[RetryConfig] = None,
@@ -108,10 +108,10 @@ class Orchestrator:
         # Log auth config for debugging
         if self.auth_config:
             logger.info(
-                f"Orchestrator initialized with auth_config: oauth_token={'***' if self.auth_config.oauth_token else None}, api_key={'***' if self.auth_config.api_key else None}"
+                f"Pitaya initialized with auth_config: oauth_token={'***' if self.auth_config.oauth_token else None}, api_key={'***' if self.auth_config.api_key else None}"
             )
         else:
-            logger.warning("Orchestrator initialized with NO auth_config")
+            logger.warning("Pitaya initialized with NO auth_config")
 
         # Core components
         self.event_bus: Optional[EventBus] = None
@@ -250,15 +250,15 @@ class Orchestrator:
             self._executor_tasks.append(task)
 
         logger.info(
-            f"Orchestrator initialized with {self.max_parallel_instances} max parallel instances and {num_executors} executor tasks"
+            f"Pitaya initialized with {self.max_parallel_instances} max parallel instances and {num_executors} executor tasks"
         )
         self._initialized = True
 
     # Server extension support removed
 
     async def shutdown(self) -> None:
-        """Shutdown orchestrator cleanly."""
-        logger.info("Shutting down orchestrator")
+        """Shutdown Pitaya cleanly."""
+        logger.info("Shutting down Pitaya")
 
         # Signal shutdown
         self._shutdown = True
@@ -801,17 +801,14 @@ class Orchestrator:
             _strategy_segment = _strategy_segment.strip("-/._") or "unknown"
         except Exception:
             _strategy_segment = str(strategy_name or "unknown")
-        if key:
-            import hashlib
-            # Namespace durable key by strategy execution to avoid collisions across parallel runs
-            khash = hashlib.sha256(f"{strategy_execution_id}|{key}".encode("utf-8")).hexdigest()[:8]
-            container_name = f"orchestrator_{run_id_val}_s{sidx}_k{khash}"
-            # Enforce hierarchical namespace per spec; legacy flat kept only for old resumes
-            branch_name = f"orc/{_strategy_segment}/{run_id_val}/k{khash}"
-        else:
-            container_name = f"orchestrator_{run_id_val}_s{sidx}_i{instance_index}"
-            # Even without durable key, keep branches under reserved orc/ namespace using synthetic leaf
-            branch_name = f"orc/{_strategy_segment}/{run_id_val}/i{instance_index}"
+        import hashlib
+        # Use durable key when provided, else derive from instance_id for stability
+        durable_key = key or str(instance_id)
+        # Namespace durable key by strategy execution to avoid collisions across parallel runs
+        khash = hashlib.sha256(f"{strategy_execution_id}|{durable_key}".encode("utf-8")).hexdigest()[:8]
+        container_name = f"pitaya_{run_id_val}_s{sidx}_k{khash}"
+        # Enforce hierarchical namespace per spec with pitaya namespace
+        branch_name = f"pitaya/{_strategy_segment}/{run_id_val}/k{khash}"
         logger.debug(
             f"spawn_instance: iid={instance_id} container={container_name} branch={branch_name}"
         )
@@ -820,7 +817,7 @@ class Orchestrator:
         try:
             if len(branch_name) > 200:
                 # Prefer trimming the middle run_id segment if needed
-                head = f"orc/{_strategy_segment}/"
+                head = f"pitaya/{_strategy_segment}/"
                 tail = branch_name.split("/")[-1]
                 room = 200 - (len(head) + 1 + len(tail))
                 if room > 8:  # keep at least some of run_id
@@ -828,7 +825,7 @@ class Orchestrator:
                     branch_name = f"{head}{short_run}/{tail}"
                 else:
                     # Last resort: fallback strategy segment
-                    branch_name = f"orc/unknown/{tail}"[-200:]
+                    branch_name = f"pitaya/unknown/{tail}"[-200:]
         except Exception:
             pass
 
@@ -1288,7 +1285,7 @@ class Orchestrator:
                         last_active_write["t"] = now
                         def _write_last_active():
                             from pathlib import Path as _P
-                            p = _P(f"/tmp/orchestrator_status/{cid}.active")
+                            p = _P(f"/tmp/pitaya_status/{cid}.active")
                             try:
                                 p.parent.mkdir(parents=True, exist_ok=True)
                             except Exception:
@@ -2525,7 +2522,7 @@ class Orchestrator:
             try:
                 md_path = results_dir / "summary.md"
                 with open(md_path, "w") as f:
-                    f.write(f"# Orchestrator Run Summary: {run_id}\n\n")
+                    f.write(f"# Pitaya Run Summary: {run_id}\n\n")
                     f.write(f"Prompt: {state.prompt}\n\n")
                     f.write(f"Repository: {state.repo_path}\n\n")
                     f.write(
