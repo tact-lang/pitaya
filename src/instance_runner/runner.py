@@ -402,6 +402,7 @@ async def _run_instance_attempt(
                 "total_attempts": total_attempts,
                 "is_retry": attempt_number > 1,
                 "session_id": session_id,
+                "log_path": log_path,
             },
         )
 
@@ -594,7 +595,12 @@ async def _run_instance_attempt(
             )
             emit_event(
                 "instance.agent_starting",
-                {"model": model, "model_id": (resolved_model_id or model), "session_id": session_id},
+                {
+                    "model": model,
+                    "model_id": (resolved_model_id or model),
+                    "session_id": session_id,
+                    "operator_resume": bool(operator_resume),
+                },
             )
 
             # Execute via plugin interface
@@ -612,6 +618,7 @@ async def _run_instance_attempt(
                 append_system_prompt=append_system_prompt,
                 operator_resume=operator_resume,
                 max_turns=max_turns,
+                stream_log_path=log_path,
             )
 
             agent_session_id = result_data.get("session_id")

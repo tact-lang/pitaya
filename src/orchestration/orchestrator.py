@@ -1385,8 +1385,11 @@ class Orchestrator:
             # Effective per-task container limits
             eff_cpu = max(1, int((info.metadata or {}).get("container_cpu", self.container_limits.cpu_count)))
             eff_mem = max(1, int((info.metadata or {}).get("container_memory_gb", self.container_limits.memory_gb)))
+            # When resuming, pass a simple continuation prompt to the agent
+            op_resume = bool((info.metadata or {}).get("operator_resume", False))
+            effective_prompt = "Continue" if op_resume else info.prompt
             result = await run_instance(
-                prompt=info.prompt,
+                prompt=effective_prompt,
                 repo_path=self.state_manager.current_state.repo_path,
                 base_branch=info.base_branch,
                 branch_name=info.branch_name,
@@ -1397,7 +1400,7 @@ class Orchestrator:
                 container_name=info.container_name,
                 model=info.metadata.get("model", "sonnet"),
                 session_id=(info.session_id or (info.metadata or {}).get("resume_session_id")),
-                operator_resume=bool((info.metadata or {}).get("operator_resume", False)),
+                operator_resume=op_resume,
                 event_callback=event_callback,
                 timeout_seconds=self.runner_timeout_seconds,
                 container_limits=ContainerLimits(cpu_count=eff_cpu, memory_gb=eff_mem, memory_swap_gb=eff_mem),
@@ -2008,7 +2011,12 @@ class Orchestrator:
                             self.state_manager.update_instance_state(iid, _IS.QUEUED)
                             await _enqueue(iid)
                             scheduled_ids.append(iid)
-                            logger.info(f"resume_run: scheduled resume iid={iid} container={info.container_name}")
+                            try:
+                                logger.info(
+                                    f"resume_run: scheduled resume iid={iid} container={info.container_name} session_id={info.session_id} plugin={(info.metadata or {}).get('plugin_name','claude-code')}"
+                                )
+                            except Exception:
+                                logger.info(f"resume_run: scheduled resume iid={iid} container={info.container_name}")
                         else:
                             # Fresh re-run: no session to resume or container missing; schedule a new container
                             try:

@@ -145,10 +145,18 @@ class ClaudeCodePlugin(RunnerPlugin):
         if "append_system_prompt" in kwargs and kwargs["append_system_prompt"]:
             command.extend(["--append-system-prompt", kwargs["append_system_prompt"]])
 
-        # Add the prompt only when not in operator resume mode
-        # Operator resume continues the session without re-sending the prompt
-        if not (session_id and operator_resume):
+        # Always pass the prompt when provided. On resume, Orchestrator supplies
+        # a minimal continuation prompt (e.g., "Continue") so the agent keeps going.
+        if prompt:
             command.append(prompt)
+            try:
+                if session_id and operator_resume:
+                    logger.debug(
+                        "claude-code: operator_resume=True; including continuation prompt with session_id=%s",
+                        str(session_id)[:16],
+                    )
+            except Exception:
+                pass
 
         return command
 
@@ -235,6 +243,9 @@ class ClaudeCodePlugin(RunnerPlugin):
         )
 
         # Execute and parse via docker manager
+        # Optional raw stream log path (tee everything to file)
+        stream_log_path = kwargs.get("stream_log_path")
+
         result_data = await docker_manager.execute_command(
             container=container,
             command=command,
@@ -244,6 +255,7 @@ class ClaudeCodePlugin(RunnerPlugin):
             ),
             timeout_seconds=timeout_seconds,
             max_turns=kwargs.get("max_turns"),
+            stream_log_path=stream_log_path,
         )
 
         return result_data
