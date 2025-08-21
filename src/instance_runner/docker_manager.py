@@ -850,6 +850,7 @@ class DockerManager:
         event_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
         timeout_seconds: int = 3600,
         max_turns: Optional[int] = None,
+        stream_log_path: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Execute AI tool command in container and parse output.
@@ -913,6 +914,13 @@ class DockerManager:
                     workdir="/workspace",
                 ),
             )
+            try:
+                if stream_log_path:
+                    if 'raw_f' in locals() and raw_f is not None:
+                        raw_f.write(f"exec_id={exec_instance.get('Id')}\n")
+                        raw_f.flush()
+            except Exception:
+                pass
 
             # Start exec and get output stream
             output_stream = await loop.run_in_executor(
@@ -927,6 +935,33 @@ class DockerManager:
             start_time = asyncio.get_event_loop().time()
 
             raw_lines: list[str] = []  # capture non-JSON output for diagnostics
+
+            # Optional raw stream tee to file (writes everything verbatim)
+            raw_f = None
+            if stream_log_path:
+                try:
+                    p = Path(stream_log_path)
+                    p.parent.mkdir(parents=True, exist_ok=True)
+                    raw_f = p.open("a", encoding="utf-8", errors="replace")
+                    ts = datetime.now(timezone.utc).isoformat()
+                    # Header with minimal context; avoid leaking secrets
+                    try:
+                        cname = getattr(container, "name", None) or "unknown"
+                        cid = (getattr(container, "id", None) or "unknown")[:12]
+                    except Exception:
+                        cname = "unknown"
+                        cid = "unknown"
+                    header = (
+                        f"=== EXEC START {ts} ===\n"
+                        f"container_id={cid} name={cname}\n"
+                        f"workdir=/workspace\n"
+                        f"command={' '.join(command)}\n"
+                        f"plugin={getattr(plugin, 'name', 'tool')}\n"
+                    )
+                    raw_f.write(header)
+                    raw_f.flush()
+                except Exception:
+                    raw_f = None
 
             async def parse_stream():
                 # Wrap blocking iterator to make it async
@@ -958,8 +993,24 @@ class DockerManager:
                         )
 
                     # Decode chunk
+                    raw_chunk = chunk
                     if isinstance(chunk, bytes):
+                        try:
+                            # Tee raw bytes to file before any processing
+                            if raw_f is not None:
+                                raw_f.write(raw_chunk.decode("utf-8", errors="replace"))
+                                raw_f.flush()
+                        except Exception:
+                            pass
                         chunk = chunk.decode("utf-8", errors="replace")
+                    else:
+                        # Chunk already str
+                        try:
+                            if raw_f is not None:
+                                raw_f.write(str(chunk))
+                                raw_f.flush()
+                        except Exception:
+                            pass
 
                     # Parse lines
                     for line in chunk.strip().split("\n"):
@@ -1050,18 +1101,38 @@ class DockerManager:
                 msg = f"Command exited with code {exec_info['ExitCode']}"
                 if tail:
                     msg += f"\nLast output:\n{tail}"
+                try:
+                    if raw_f is not None:
+                        ts = datetime.now(timezone.utc).isoformat()
+                        raw_f.write(f"\n=== EXEC END {ts} exit={exec_info.get('ExitCode', 'nonzero')} ===\n")
+                        raw_f.flush()
+                except Exception:
+                    pass
                 raise DockerError(msg)
 
             # Extract final result using plugin
             result_data = await plugin.extract_result(parser_state)
 
             logger.info("Command execution completed successfully")
+            try:
+                if raw_f is not None:
+                    ts = datetime.now(timezone.utc).isoformat()
+                    raw_f.write(f"\n=== EXEC END {ts} exit={exec_info.get('ExitCode', 0)} ===\n")
+                    raw_f.flush()
+            except Exception:
+                pass
             return result_data
 
         except TimeoutError:
             raise
         except (docker.errors.APIError, docker.errors.DockerException, OSError) as e:
             raise DockerError(f"Failed to execute agent tool: {e}")
+        finally:
+            try:
+                if raw_f is not None:
+                    raw_f.close()
+            except Exception:
+                pass
 
     async def stop_container(self, container: Container, timeout: int | None = None) -> None:
         """

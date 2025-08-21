@@ -150,6 +150,11 @@ class CodexPlugin(RunnerPlugin):
         # Final positional: the prompt
         if prompt:
             cmd.append(prompt)
+        else:
+            try:
+                logger.debug("codex: omitted prompt (resume flow) session_id=%s", str(session_id)[:16])
+            except Exception:
+                pass
 
         return cmd
 
@@ -193,6 +198,9 @@ class CodexPlugin(RunnerPlugin):
         command = await self.build_command(
             prompt=prompt, model=model, session_id=session_id, **kwargs
         )
+        # Optional raw stream log path (tee everything to file)
+        stream_log_path = kwargs.get("stream_log_path")
+
         result = await docker_manager.execute_command(
             container=container,
             command=command,
@@ -202,6 +210,7 @@ class CodexPlugin(RunnerPlugin):
             ),
             timeout_seconds=timeout_seconds,
             max_turns=kwargs.get("max_turns"),
+            stream_log_path=stream_log_path,
         )
         return result
 
