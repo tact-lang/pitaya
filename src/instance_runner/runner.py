@@ -579,7 +579,7 @@ async def _run_instance_attempt(
             # Verify only git (mandatory for import). The AI CLI is validated implicitly during execute.
             try:
                 await docker_manager.verify_container_tools(container, ["git"])
-            except DockerError as e:
+            except DockerError:
                 # Surface failure; git is required
                 raise
 

@@ -10,6 +10,13 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, Any, Optional, Callable, TYPE_CHECKING
 import asyncio
+from .models import (
+    TUIState,
+    RunDisplay,
+    StrategyDisplay,
+    InstanceDisplay,
+    InstanceStatus,
+)
 
 # Watchdog is optional; fall back to pure polling when unavailable
 WATCHDOG_AVAILABLE = True
@@ -32,13 +39,7 @@ else:
     except Exception:
         Observer = None  # type: ignore
 
-from .models import (
-    TUIState,
-    RunDisplay,
-    StrategyDisplay,
-    InstanceDisplay,
-    InstanceStatus,
-)
+    
 
 logger = logging.getLogger(__name__)
 
@@ -1305,7 +1306,6 @@ class AsyncEventStream:
 
                     # Use regular file operations instead of aiofiles for more reliable reading
                     try:
-                        import os
                         with open(self._events_file, "rb") as f:
                             # Seek to last position
                             f.seek(self._last_position)

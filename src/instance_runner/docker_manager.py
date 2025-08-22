@@ -391,18 +391,18 @@ class DockerManager:
                 sidx = "0"
 
             # Named volume for agent home as per spec (GHASH)
-            import hashlib, json as _json
+            import hashlib
             eff_sgk = session_group_key or (task_key or instance_id or container_name or "")
             # Scope: default run; allow global only when explicitly enabled via param
             allow_global = bool(allow_global_session_volume)
             if allow_global:
                 payload = {"session_group_key": eff_sgk, "plugin": (plugin_name or ""), "model": (resolved_model_id or "")}
-                enc = _json.dumps(payload, separators=(",", ":"), sort_keys=True)
+                enc = json.dumps(payload, separators=(",", ":"), sort_keys=True)
                 ghash = hashlib.sha256(enc.encode("utf-8", errors="ignore")).hexdigest()[:8]
                 volume_name = f"pitaya_home_g{ghash}"
             else:
                 payload = {"session_group_key": eff_sgk}
-                enc = _json.dumps(payload, separators=(",", ":"), sort_keys=True)
+                enc = json.dumps(payload, separators=(",", ":"), sort_keys=True)
                 ghash = hashlib.sha256(enc.encode("utf-8", errors="ignore")).hexdigest()[:8]
                 # Scope volumes per-run and per-strategy to avoid concurrent copy-up races
                 volume_name = f"pitaya_home_{(run_id or 'norun')}_s{sidx}_g{ghash}"
@@ -547,13 +547,13 @@ class DockerManager:
                     pass
             # Provide normative env hints inside the container for debugging/compliance
             try:
-                import hashlib, json as _json
+                import hashlib
                 eff_sgk = session_group_key or (task_key or instance_id or container_name)
                 # KHASH short8 over TASK_KEY
                 durable = (task_key or (instance_id or ""))
                 khash = hashlib.sha256(str(durable).encode("utf-8", errors="ignore")).hexdigest()[:8]
                 # GHASH run-scope short8 over JCS({"session_group_key": EFFECTIVE_SGK})
-                payload = _json.dumps({"session_group_key": eff_sgk}, separators=(",", ":"), sort_keys=True)
+                payload = json.dumps({"session_group_key": eff_sgk}, separators=(",", ":"), sort_keys=True)
                 ghash = hashlib.sha256(payload.encode("utf-8", errors="ignore")).hexdigest()[:8]
                 config["environment"].update({
                     "TASK_KEY": str(durable),
@@ -649,11 +649,6 @@ class DockerManager:
             # Summarize environment without leaking secrets
             try:
                 env = config.get("environment", {}) or {}
-                redacted = {
-                    "CLAUDE_CODE_OAUTH_TOKEN": "***" if "CLAUDE_CODE_OAUTH_TOKEN" in env else None,
-                    "ANTHROPIC_API_KEY": "***" if "ANTHROPIC_API_KEY" in env else None,
-                    "ANTHROPIC_BASE_URL": env.get("ANTHROPIC_BASE_URL"),
-                }
                 logger.debug(
                     "Container config ready: env_keys=%d, cpu=%.2f, mem=%s, swap=%s",
                     len(env),
@@ -914,28 +909,6 @@ class DockerManager:
                     workdir="/workspace",
                 ),
             )
-            try:
-                if stream_log_path:
-                    if 'raw_f' in locals() and raw_f is not None:
-                        raw_f.write(f"exec_id={exec_instance.get('Id')}\n")
-                        raw_f.flush()
-            except Exception:
-                pass
-
-            # Start exec and get output stream
-            output_stream = await loop.run_in_executor(
-                None,
-                lambda: container.client.api.exec_start(
-                    exec_instance["Id"], stream=True
-                ),
-            )
-
-            # Parse output with timeout
-            parser_state: Dict[str, Any] = {}  # Plugin-specific parser state
-            start_time = asyncio.get_event_loop().time()
-
-            raw_lines: list[str] = []  # capture non-JSON output for diagnostics
-
             # Optional raw stream tee to file (writes everything verbatim)
             raw_f = None
             if stream_log_path:
@@ -959,9 +932,24 @@ class DockerManager:
                         f"plugin={getattr(plugin, 'name', 'tool')}\n"
                     )
                     raw_f.write(header)
+                    raw_f.write(f"exec_id={exec_instance.get('Id')}\n")
                     raw_f.flush()
                 except Exception:
                     raw_f = None
+
+            # Start exec and get output stream
+            output_stream = await loop.run_in_executor(
+                None,
+                lambda: container.client.api.exec_start(
+                    exec_instance["Id"], stream=True
+                ),
+            )
+
+            # Parse output with timeout
+            parser_state: Dict[str, Any] = {}  # Plugin-specific parser state
+            start_time = asyncio.get_event_loop().time()
+
+            raw_lines: list[str] = []  # capture non-JSON output for diagnostics
 
             async def parse_stream():
                 # Wrap blocking iterator to make it async

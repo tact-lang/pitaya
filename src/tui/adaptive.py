@@ -10,13 +10,12 @@ Implements three display modes based on instance count:
 from rich.console import RenderableType
 from rich.panel import Panel
 from rich.table import Table
-from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn
 from rich.text import Text
 from rich.align import Align
 from rich.console import Group
 
 from .models import RunDisplay, InstanceDisplay, InstanceStatus
-from datetime import datetime, timezone
+from datetime import datetime
 
 
 class AdaptiveDisplay:

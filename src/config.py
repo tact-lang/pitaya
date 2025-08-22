@@ -256,11 +256,6 @@ def get_default_config() -> Dict[str, Any]:
             "threshold": 0.8,
             "max_iterations": 3,
         },
-        "logging": {
-            "level": "INFO",
-            "max_file_size": 10485760,  # 10MB
-            "retention_days": 7,  # component logs only
-        },
         # Events retention (terminal runs only after grace)
         "events": {
             "retention_days": 30,
@@ -276,8 +271,8 @@ def get_default_config() -> Dict[str, Any]:
         },
         "logging": {
             "level": "INFO",
-            "max_file_size": 10485760,
-            "retention_days": 7,
+            "max_file_size": 10485760,  # 10MB
+            "retention_days": 7,  # component logs only
             "redaction": {
                 "custom_patterns": [],
             },

@@ -12,6 +12,7 @@ import logging
 import os
 import socket
 import uuid
+import re as _re
 from collections import defaultdict, deque
 from datetime import datetime, timezone
 from pathlib import Path
@@ -22,7 +23,6 @@ logger = logging.getLogger(__name__)
 
 
 # Two-stage redaction patterns
-import re as _re
 _SENSITIVE_KEYS = ("token", "api_key", "apikey", "authorization", "password", "secret", "cookie")
 _PATTERNS = [
     _re.compile(r"(?i)(authorization\s*:\s*Bearer)\s+[A-Za-z0-9._\-]+"),
@@ -212,6 +212,18 @@ class EventBus:
         except Exception:
             pass
 
+        # Notify subscribers
+        self._notify_subscribers(event)
+
+        # Minimal debug logging only when logger configured for DEBUG externally
+        if logger.isEnabledFor(logging.DEBUG):
+            try:
+                keys = ",".join(sorted(list(data.keys()))) if isinstance(data, dict) else "-"
+                iid = instance_id or event.get("instance_id") or "-"
+                logger.debug(f"Emitted event: {event_type} (iid={iid}, keys={keys})")
+            except Exception:
+                pass
+
     async def _runner_flush_loop(self) -> None:
         """Background flush loop for runner.jsonl writes.
 
@@ -244,18 +256,6 @@ class EventBus:
                     logger.debug(f"runner.flush error: {e}")
         except asyncio.CancelledError:
             return
-
-        # Notify subscribers
-        self._notify_subscribers(event)
-
-        # Minimal debug logging only when logger configured for DEBUG externally
-        if logger.isEnabledFor(logging.DEBUG):
-            try:
-                keys = ",".join(sorted(list(data.keys()))) if isinstance(data, dict) else "-"
-                iid = instance_id or event.get("instance_id") or "-"
-                logger.debug(f"Emitted event: {event_type} (iid={iid}, keys={keys})")
-            except Exception:
-                pass
 
     def _utc_ts_ms_z(self) -> str:
         """Return UTC ISO-8601 timestamp with milliseconds and trailing Z."""
@@ -475,7 +475,7 @@ class EventBus:
             self._current_offset = offset
             if logger.isEnabledFor(logging.DEBUG):
                 logger.debug(
-                    f"canonical.persist.batch: count={len(lines)} start={base} bytes={sum(len(l) for l in lines)}"
+                    f"canonical.persist.batch: count={len(lines)} start={base} bytes={sum(len(line) for line in lines)}"
                 )
         except Exception as e:
             logger.error(f"Failed to persist canonical batch: {e}")
@@ -587,7 +587,6 @@ class EventBus:
                         # Scan to find first record with ts >= timestamp
                         # Note: this is O(N); acceptable for v1
                         from datetime import datetime as _dt
-                        ts_bytes = None
                         try:
                             # Ensure tz-aware parse; if naive, treat as UTC
                             ts_target = timestamp if timestamp.tzinfo else timestamp.replace(tzinfo=timezone.utc)

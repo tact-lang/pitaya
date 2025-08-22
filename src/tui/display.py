@@ -11,7 +11,6 @@ import logging
 from datetime import datetime, timezone
 from typing import Optional, Any
 from pathlib import Path
-import os
 
 from rich.console import Console
 from rich.layout import Layout
@@ -562,7 +561,6 @@ class TUIDisplay:
             try:
                 msgs = getattr(self.event_processor, "_messages", {}).get(inst.instance_id, [])
                 if msgs:
-                    from rich.markdown import Markdown
                     # Render as a simple bulleted list
                     tbl.add_row("Messages:", "\n".join(f"• {m}" for m in msgs))
             except Exception:
@@ -781,9 +779,4 @@ class TUIDisplay:
             # Fallback to direct reference (riskier but better than blank)
             self._render_run = self.state.current_run
 
-    def set_forced_display_mode(self, mode: Optional[str]) -> None:
-        """Set a CLI-forced display mode (detailed|compact|dense)."""
-        if mode and mode in {"detailed", "compact", "dense"}:
-            self._force_display_mode_cli = mode
-        else:
-            self._force_display_mode_cli = None
+    

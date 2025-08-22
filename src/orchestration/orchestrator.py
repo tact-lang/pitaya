@@ -196,7 +196,8 @@ class Orchestrator:
 
         # Resolve max_parallel_instances (simple adaptive default)
         try:
-            import os, math
+            import os
+            import math
             host_cpu = max(1, os.cpu_count() or 1)
             # cgroup-aware effective CPUs (best-effort)
             try:
@@ -749,7 +750,8 @@ class Orchestrator:
             raise
 
         # Generate instance ID (normative stable 16-hex over JCS-like canonical JSON)
-        import hashlib, json as _json
+        import hashlib
+        import json as _json
         def _drop_nulls(o):
             if isinstance(o, dict):
                 return {k: _drop_nulls(v) for k, v in o.items() if v is not None}
@@ -802,7 +804,6 @@ class Orchestrator:
             _strategy_segment = _strategy_segment.strip("-/._") or "unknown"
         except Exception:
             _strategy_segment = str(strategy_name or "unknown")
-        import hashlib
         # Use durable key when provided, else derive from instance_id for stability
         durable_key = key or str(instance_id)
         # Namespace durable key by strategy execution to avoid collisions across parallel runs
@@ -921,7 +922,6 @@ class Orchestrator:
                                     "dedupe_reason": getattr(info.result, "dedupe_reason", None),
                                 }
                                 # Final message truncation per spec (backfill path)
-                                import os as _os
                                 try:
                                     max_bytes = 65536
                                 except Exception:
@@ -1097,7 +1097,8 @@ class Orchestrator:
 
     async def _admission_wait(self, cpu_need: int, mem_need_gb: int) -> None:
         """Wait until CPU+memory tokens available and disk guard healthy."""
-        import shutil, time as _time, os as _os
+        import shutil
+        import time as _time
         repo_path = getattr(self, "repo_path", Path.cwd())
         pack_dir = repo_path / ".git" / "objects" / "pack"
         start = _time.monotonic()
@@ -1167,7 +1168,8 @@ class Orchestrator:
         Removes workspace directories recorded in InstanceResult.workspace_path for FAILED or TIMEOUT results.
         """
         try:
-            import shutil, os
+            import shutil
+            import os
             if not self.state_manager or not self.state_manager.current_state:
                 return
             items = []
@@ -1460,7 +1462,6 @@ class Orchestrator:
                         "dedupe_reason": getattr(result, "dedupe_reason", None),
                     }
                     # Final message truncation per spec
-                    import os as _os
                     try:
                         max_bytes = 65536
                     except Exception:
@@ -1844,7 +1845,6 @@ class Orchestrator:
                         }
                         logger.debug(f"backfill: task.completed iid={iid} key={task_key}")
                         # Final message truncation per spec (resume-run backfill)
-                        import os as _os
                         try:
                             max_bytes = 65536
                         except Exception:
@@ -2194,7 +2194,7 @@ class Orchestrator:
 
             # Update state
             self.state_manager.update_instance_state(
-                instance_id=instance_info.instance_id, state=_IS.COMPLETED, result=result
+                instance_id=instance_info.instance_id, state=InstanceStatus.COMPLETED, result=result
             )
 
             return result
@@ -2204,7 +2204,7 @@ class Orchestrator:
 
             # Mark as failed
             self.state_manager.update_instance_state(
-                instance_id=instance_info.instance_id, state=_IS.FAILED, result=InstanceResult(success=False, error=str(e), error_type="rerun_failed", branch_name=instance_info.branch_name, status="failed")
+                instance_id=instance_info.instance_id, state=InstanceStatus.FAILED, result=InstanceResult(success=False, error=str(e), error_type="rerun_failed", branch_name=instance_info.branch_name, status="failed")
             )
 
             # Return a failed result

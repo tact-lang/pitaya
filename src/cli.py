@@ -803,45 +803,10 @@ class OrchestratorCLI:
         return True
 
     async def run_clean_volumes(self, args: argparse.Namespace) -> int:
-        """Clean unreferenced session volumes older than threshold."""
-        if not args.yes:
-            if not sys.stdout.isatty():
-                self.console.print("[red]Operation requires confirmation. Re-run with --yes.[/red]")
-                # Spec: non-TTY prompts fail with error exit code (1)
-                return 1
-            self.console.print(
-                f"[yellow]Remove unreferenced session volumes older than {args.older_than}h? (y/N)[/yellow] ",
-                end="",
-            )
-            try:
-                choice = input().strip().lower()
-            except Exception:
-                choice = "n"
-            if choice not in ("y", "yes"):
-                self.console.print("Aborted.")
-                return 1
-        try:
-            from .instance_runner.docker_manager import DockerManager
-            mgr = DockerManager()
-            await mgr.initialize()
-            removed = await mgr.prune_session_volumes(older_than_hours=float(args.older_than), dry_run=bool(args.dry_run))
-            mgr.close()
-            if args.dry_run:
-                self.console.print(f"[yellow]Dry run: would remove {removed} volume(s)[/yellow]")
-            else:
-                self.console.print(f"[green]Removed {removed} volume(s)[/green]")
-            return 0
-        except Exception as e:
-            self.console.print(f"[red]Failed cleaning volumes: {e}[/red]")
-            if args.debug:
-                self.console.print_exception()
-            return 1
-
-    async def run_clean_volumes(self, args: argparse.Namespace) -> int:
         """Clean up unreferenced session volumes (pitaya_home_*) per age threshold."""
         self.console.print("[yellow]Scanning session volumes (pitaya_home_*)...[/yellow]")
         try:
-            from ..instance_runner.docker_manager import DockerManager
+            from .instance_runner.docker_manager import DockerManager
             dm = DockerManager()
             await dm.initialize()
             report = await dm.cleanup_unused_volumes(
@@ -1407,7 +1372,8 @@ class OrchestratorCLI:
             # Setup periodic cleanup and size-based rotation for logs
             # Convert configured byte limit to MB for rotation helper
             try:
-                max_bytes = full_config.get("logging", {}).get("max_file_size", 10485760)
+                cfg = locals().get("full_config") or {}
+                max_bytes = (cfg.get("logging", {}) or {}).get("max_file_size", 10485760)
                 max_mb = int(max_bytes / (1024 * 1024)) if isinstance(max_bytes, (int, float)) else 100
             except Exception:
                 max_mb = 100

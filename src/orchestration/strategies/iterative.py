@@ -69,7 +69,7 @@ class IterativeStrategy(Strategy):
 
         # Start with the initial implementation
         current_branch = base_branch
-        session_id = None
+        _ = None  # placeholder for session id continuity
         final_result = None
         feedback = ""
 
@@ -105,7 +105,7 @@ class IterativeStrategy(Strategy):
             # Update for next iteration
             final_result = result
             current_branch = result.branch_name
-            session_id = result.session_id  # Continue in same session
+            _ = result.session_id  # Continue in same session (kept implicitly)
 
             # Get feedback for next iteration (if not last)
             if iteration < config.iterations - 1:

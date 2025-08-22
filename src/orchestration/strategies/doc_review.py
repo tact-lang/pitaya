@@ -133,7 +133,7 @@ class DocReviewStrategy(Strategy):
             result: InstanceResult
             try:
                 result = await ctx.wait(handle)
-            except Exception as e:
+            except Exception:
                 # Reviewer failed
                 return None
 
