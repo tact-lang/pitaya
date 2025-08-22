@@ -172,10 +172,8 @@ Some plugins (e.g., Claude Code) validate model aliases via `models.yaml`. If an
 
 ## Docker & Plugins
 
-- Plugins define default images:
-  - claude-code → `claude-code:latest`
-  - codex → `codex-cli:latest`
-- Override the image for a run with `--docker-image <repo/name:tag>`
+- Unified agent image: `pitaya-agents:latest` (includes Claude Code and Codex CLIs)
+- Plugins default to `pitaya-agents:latest`; override per run with `--docker-image <repo/name:tag>`
 - Full isolation per instance: dedicated container, workspace mount, and session volume
 
 ## Logs & Artifacts

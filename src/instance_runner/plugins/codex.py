@@ -33,7 +33,7 @@ class CodexPlugin(RunnerPlugin):
 
     @property
     def docker_image(self) -> str:  # pragma: no cover - simple property
-        return "codex-cli:latest"
+        return "pitaya-agents:latest"
 
     @property
     def capabilities(self) -> PluginCapabilities:
