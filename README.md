@@ -225,6 +225,15 @@ Plugins accept model identifiers as provided. Claude Code commonly uses `sonnet`
 - Use `--oauth-token` (subscription) or `--api-key` (API mode). Optional `--base-url` is respected as `ANTHROPIC_BASE_URL`.
 - Env alternatives: `CLAUDE_CODE_OAUTH_TOKEN`, `ANTHROPIC_API_KEY`, and `ANTHROPIC_BASE_URL`.
 
+## Custom Strategies
+
+- Use built-ins (e.g., `simple`, `best-of-n`, `iterative`) or point to a local file:
+  - Class-based: `pitaya "task" --strategy ./examples/custom_strategy.py -S model=sonnet`
+  - Explicit class: `pitaya "task" --strategy ./examples/custom_strategy.py:MyCustomStrategy`
+- Define a class subclassing `Strategy` (see `src/orchestration/strategies/base.py`).
+  - Minimal boilerplate: set `NAME = "your-name"`, implement `execute(self, prompt, base_branch, ctx)`.
+  - Use `self.logger` for logging, no logging imports needed.
+
 ## Logs & Artifacts
 
 - Logs: `logs/<run_id>/events.jsonl` and structured component logs
