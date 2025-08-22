@@ -88,10 +88,15 @@ class CodexPlugin(RunnerPlugin):
         if "OPENAI_API_KEY" not in env or not env.get("OPENAI_API_KEY"):
             try:
                 from dotenv import dotenv_values  # type: ignore
+
                 values = dotenv_values()
                 if values and values.get("OPENAI_API_KEY"):
                     env["OPENAI_API_KEY"] = str(values.get("OPENAI_API_KEY"))
-                if values and values.get("OPENAI_BASE_URL") and "OPENAI_BASE_URL" not in env:
+                if (
+                    values
+                    and values.get("OPENAI_BASE_URL")
+                    and "OPENAI_BASE_URL" not in env
+                ):
                     env["OPENAI_BASE_URL"] = str(values.get("OPENAI_BASE_URL"))
             except Exception:
                 pass
@@ -152,7 +157,10 @@ class CodexPlugin(RunnerPlugin):
             cmd.append(prompt)
         else:
             try:
-                logger.debug("codex: omitted prompt (resume flow) session_id=%s", str(session_id)[:16])
+                logger.debug(
+                    "codex: omitted prompt (resume flow) session_id=%s",
+                    str(session_id)[:16],
+                )
             except Exception:
                 pass
 

@@ -135,12 +135,16 @@ def setup_structured_logging(
     stderr_debug_handler = None
     if no_tui and not quiet:
         console_handler = logging.StreamHandler(sys.stdout)
-        console_handler.setFormatter(logging.Formatter("%(levelname)s %(name)s: %(message)s"))
+        console_handler.setFormatter(
+            logging.Formatter("%(levelname)s %(name)s: %(message)s")
+        )
         console_handler.setLevel(console_level)
         # Spec: in debug mode, stream full logs to stderr in addition to files
         if debug:
             stderr_debug_handler = logging.StreamHandler(sys.stderr)
-            stderr_debug_handler.setFormatter(logging.Formatter("%(levelname)s %(name)s: %(message)s"))
+            stderr_debug_handler.setFormatter(
+                logging.Formatter("%(levelname)s %(name)s: %(message)s")
+            )
             stderr_debug_handler.setLevel(logging.DEBUG)
 
     # Configure loggers for each module

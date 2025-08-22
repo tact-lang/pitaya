@@ -144,11 +144,7 @@ class CodexOutputParser:
 
         # Patch / edit operations
         if et in {"patch_apply_start", "file_edit_start", "write_start"}:
-            path = (
-                data.get("file")
-                or obj.get("file")
-                or obj.get("path")
-            )
+            path = data.get("file") or obj.get("file") or obj.get("path")
             return {
                 "type": "tool_use",
                 "timestamp": self._ts(obj),
@@ -171,7 +167,11 @@ class CodexOutputParser:
         if et in {"task_complete", "complete", "shutdown_complete"}:
             self._seen_shutdown = True
             # Prefer explicit last_agent_message, else last seen assistant message
-            final = data.get("last_agent_message") or data.get("message") or self.last_message
+            final = (
+                data.get("last_agent_message")
+                or data.get("message")
+                or self.last_message
+            )
             if not isinstance(final, str) and final is not None:
                 final = str(final)
             # Update tokens from payload if present
@@ -181,7 +181,11 @@ class CodexOutputParser:
             eff_out = max(self.tokens_out, tout)
             tt = int(data.get("total_tokens", eff_in + eff_out) or (eff_in + eff_out))
             eff_total = max(self.total_tokens, tt, eff_in + eff_out)
-            self.tokens_in, self.tokens_out, self.total_tokens = eff_in, eff_out, eff_total
+            self.tokens_in, self.tokens_out, self.total_tokens = (
+                eff_in,
+                eff_out,
+                eff_total,
+            )
             return {
                 "type": "result",
                 "timestamp": self._ts(obj),

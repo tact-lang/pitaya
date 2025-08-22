@@ -81,9 +81,12 @@ class ScoringStrategy(Strategy):
         except Exception as e:
             # Map TaskFailed to a failure result to keep strategy semantics
             from ...shared import InstanceResult as _IR
+
             err_type = getattr(e, "error_type", "unknown")
             msg = getattr(e, "message", str(e))
-            generation_result = _IR(success=False, error=msg, error_type=err_type, status="failed")
+            generation_result = _IR(
+                success=False, error=msg, error_type=err_type, status="failed"
+            )
 
         # If generation failed, the strategy fails
         if not generation_result.success:
@@ -105,7 +108,9 @@ ORIGINAL TASK: {prompt}"""
             # Review/scoring tasks should not create branches; run read-only when configured
             "import_policy": "never",
         }
-        score_key = ctx.key(*prefix, "score", generation_handle.instance_id, "attempt-1")
+        score_key = ctx.key(
+            *prefix, "score", generation_handle.instance_id, "attempt-1"
+        )
         scoring_handle = await ctx.run(scoring_task, key=score_key)
         try:
             scoring_result = await ctx.wait(scoring_handle)

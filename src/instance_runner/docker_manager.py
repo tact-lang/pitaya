@@ -41,6 +41,7 @@ warnings.filterwarnings("ignore", category=ResourceWarning)
 # Workaround: suppress benign "I/O operation on closed file" from urllib3 during close
 try:  # pragma: no cover - environment dependent
     import urllib3.response as _u3r  # type: ignore
+
     _original_close = _u3r.HTTPResponse.close  # type: ignore[attr-defined]
 
     def _patched_close(self):  # type: ignore[no-redef]
@@ -83,11 +84,13 @@ class DockerManager:
         except Exception:
             # Ignore errors during close
             pass
-        
+
     # Heartbeat task registry
     _hb_tasks: Dict[str, asyncio.Task] = {}
 
-    async def start_heartbeat(self, container: Container, interval_s: float = 15.0) -> None:
+    async def start_heartbeat(
+        self, container: Container, interval_s: float = 15.0
+    ) -> None:
         """Start a periodic heartbeat writer inside the container at /home/node/.pitaya/last_active.
 
         Emits DEBUG logs indicating exec_create/exec_start success for easier diagnostics.
@@ -97,33 +100,58 @@ class DockerManager:
         cid = getattr(container, "id", None) or ""
         if not cid or cid in self._hb_tasks:
             return
+
         def _iso_millis(dt: datetime) -> str:
             s = dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")
             return s[:-3] + "Z"
+
         async def _hb():
             try:
                 while True:
                     try:
                         # Ensure directory exists and write timestamp
-                        exec1 = container.client.api.exec_create(container.id, "sh -lc 'mkdir -p /home/node/.pitaya'", stdout=False, stderr=False)
+                        exec1 = container.client.api.exec_create(
+                            container.id,
+                            "sh -lc 'mkdir -p /home/node/.pitaya'",
+                            stdout=False,
+                            stderr=False,
+                        )
                         try:
-                            logger.debug("heartbeat: exec_create mkdir id=%s", exec1.get("Id", "-"))
+                            logger.debug(
+                                "heartbeat: exec_create mkdir id=%s",
+                                exec1.get("Id", "-"),
+                            )
                         except Exception:
                             pass
                         try:
                             container.client.api.exec_start(exec1["Id"], detach=True)
-                            logger.debug("heartbeat: exec_start mkdir ok id=%s", exec1.get("Id", "-"))
+                            logger.debug(
+                                "heartbeat: exec_start mkdir ok id=%s",
+                                exec1.get("Id", "-"),
+                            )
                         except Exception:
                             pass
                         ts = _iso_millis(datetime.now(timezone.utc))
-                        exec2 = container.client.api.exec_create(container.id, f"sh -lc 'printf %s {ts} > /home/node/.pitaya/last_active'", stdout=False, stderr=False)
+                        exec2 = container.client.api.exec_create(
+                            container.id,
+                            f"sh -lc 'printf %s {ts} > /home/node/.pitaya/last_active'",
+                            stdout=False,
+                            stderr=False,
+                        )
                         try:
-                            logger.debug("heartbeat: exec_create write id=%s ts=%s", exec2.get("Id", "-"), ts)
+                            logger.debug(
+                                "heartbeat: exec_create write id=%s ts=%s",
+                                exec2.get("Id", "-"),
+                                ts,
+                            )
                         except Exception:
                             pass
                         try:
                             container.client.api.exec_start(exec2["Id"], detach=True)
-                            logger.debug("heartbeat: exec_start write ok id=%s", exec2.get("Id", "-"))
+                            logger.debug(
+                                "heartbeat: exec_start write ok id=%s",
+                                exec2.get("Id", "-"),
+                            )
                         except Exception:
                             pass
                     except Exception:
@@ -133,19 +161,31 @@ class DockerManager:
                 # One final heartbeat on cancel
                 try:
                     ts = _iso_millis(datetime.now(timezone.utc))
-                    exec3 = container.client.api.exec_create(container.id, f"sh -lc 'printf %s {ts} > /home/node/.pitaya/last_active'", stdout=False, stderr=False)
+                    exec3 = container.client.api.exec_create(
+                        container.id,
+                        f"sh -lc 'printf %s {ts} > /home/node/.pitaya/last_active'",
+                        stdout=False,
+                        stderr=False,
+                    )
                     try:
-                        logger.debug("heartbeat: final exec_create id=%s ts=%s", exec3.get("Id", "-"), ts)
+                        logger.debug(
+                            "heartbeat: final exec_create id=%s ts=%s",
+                            exec3.get("Id", "-"),
+                            ts,
+                        )
                     except Exception:
                         pass
                     try:
                         container.client.api.exec_start(exec3["Id"], detach=True)
-                        logger.debug("heartbeat: final exec_start ok id=%s", exec3.get("Id", "-"))
+                        logger.debug(
+                            "heartbeat: final exec_start ok id=%s", exec3.get("Id", "-")
+                        )
                     except Exception:
                         pass
                 except Exception:
                     pass
                 return
+
         self._hb_tasks[cid] = asyncio.create_task(_hb())
 
     async def stop_heartbeat(self, container: Container) -> None:
@@ -243,15 +283,17 @@ class DockerManager:
                 f"create_container entry: name={container_name}, image={image}, reuse={reuse_container}, ws={workspace_dir}"
             )
             if event_callback:
-                event_callback({
-                    "type": "instance.container_create_entry",
-                    "data": {
-                        "container_name": container_name,
-                        "workspace_dir": str(workspace_dir),
-                        "image": image,
-                        "reuse": bool(reuse_container),
-                    },
-                })
+                event_callback(
+                    {
+                        "type": "instance.container_create_entry",
+                        "data": {
+                            "container_name": container_name,
+                            "workspace_dir": str(workspace_dir),
+                            "image": image,
+                            "reuse": bool(reuse_container),
+                        },
+                    }
+                )
 
             # Ensure required image exists locally; fail fast with clear message
             loop = asyncio.get_event_loop()
@@ -259,10 +301,12 @@ class DockerManager:
                 img_check_start = time.monotonic()
                 logger.info(f"Checking Docker image exists: {image}")
                 if event_callback:
-                    event_callback({
-                        "type": "instance.container_image_check",
-                        "data": {"image": image},
-                    })
+                    event_callback(
+                        {
+                            "type": "instance.container_image_check",
+                            "data": {"image": image},
+                        }
+                    )
                 # Bound the image-inspect call with a timeout to avoid hangs
                 img_future = loop.run_in_executor(
                     None, lambda: self.client.images.get(image)
@@ -274,10 +318,12 @@ class DockerManager:
                 )
             except asyncio.TimeoutError:
                 if event_callback:
-                    event_callback({
-                        "type": "instance.container_image_check_timeout",
-                        "data": {"image": image, "timeout_s": 10},
-                    })
+                    event_callback(
+                        {
+                            "type": "instance.container_image_check_timeout",
+                            "data": {"image": image, "timeout_s": 10},
+                        }
+                    )
                 raise DockerError(
                     "Docker image check timed out after 10s. Docker daemon may be unresponsive; try restarting Docker Desktop."
                 )
@@ -308,7 +354,7 @@ class DockerManager:
                     )
 
                     # Determine if we must enforce RO /workspace (spec: review tasks)
-                    require_ro = (str(import_policy).lower() == "never")
+                    require_ro = str(import_policy).lower() == "never"
 
                     def _workspace_is_ro(cont) -> bool:
                         try:
@@ -327,21 +373,36 @@ class DockerManager:
                         try:
                             old_id = getattr(existing, "id", "")[:12]
                             if event_callback:
-                                event_callback({
-                                    "type": "runner.container.replaced",
-                                    "data": {"old_id": old_id, "reason": "ro_required"},
-                                })
+                                event_callback(
+                                    {
+                                        "type": "runner.container.replaced",
+                                        "data": {
+                                            "old_id": old_id,
+                                            "reason": "ro_required",
+                                        },
+                                    }
+                                )
                             try:
-                                await asyncio.wait_for(loop.run_in_executor(None, existing.stop), timeout=15)
+                                await asyncio.wait_for(
+                                    loop.run_in_executor(None, existing.stop),
+                                    timeout=15,
+                                )
                             except Exception:
                                 pass
                             try:
-                                await asyncio.wait_for(loop.run_in_executor(None, existing.remove), timeout=15)
+                                await asyncio.wait_for(
+                                    loop.run_in_executor(None, existing.remove),
+                                    timeout=15,
+                                )
                             except Exception:
                                 pass
-                            logger.info("Replaced existing container to enforce RO /workspace")
+                            logger.info(
+                                "Replaced existing container to enforce RO /workspace"
+                            )
                         except Exception:
-                            logger.warning("Failed to replace existing container; creating new")
+                            logger.warning(
+                                "Failed to replace existing container; creating new"
+                            )
                         # Fall through to creation of a new one
                     else:
                         # Reuse the existing container as-is (start if needed)
@@ -392,22 +453,39 @@ class DockerManager:
 
             # Named volume for agent home as per spec (GHASH)
             import hashlib
-            eff_sgk = session_group_key or (task_key or instance_id or container_name or "")
+
+            eff_sgk = session_group_key or (
+                task_key or instance_id or container_name or ""
+            )
             # Scope: default run; allow global only when explicitly enabled via param
             allow_global = bool(allow_global_session_volume)
             if allow_global:
-                payload = {"session_group_key": eff_sgk, "plugin": (plugin_name or ""), "model": (resolved_model_id or "")}
+                payload = {
+                    "session_group_key": eff_sgk,
+                    "plugin": (plugin_name or ""),
+                    "model": (resolved_model_id or ""),
+                }
                 enc = json.dumps(payload, separators=(",", ":"), sort_keys=True)
-                ghash = hashlib.sha256(enc.encode("utf-8", errors="ignore")).hexdigest()[:8]
+                ghash = hashlib.sha256(
+                    enc.encode("utf-8", errors="ignore")
+                ).hexdigest()[:8]
                 volume_name = f"pitaya_home_g{ghash}"
             else:
                 payload = {"session_group_key": eff_sgk}
                 enc = json.dumps(payload, separators=(",", ":"), sort_keys=True)
-                ghash = hashlib.sha256(enc.encode("utf-8", errors="ignore")).hexdigest()[:8]
+                ghash = hashlib.sha256(
+                    enc.encode("utf-8", errors="ignore")
+                ).hexdigest()[:8]
                 # Scope volumes per-run and per-strategy to avoid concurrent copy-up races
                 volume_name = f"pitaya_home_{(run_id or 'norun')}_s{sidx}_g{ghash}"
             # KHASH based on durable task key if provided
-            khash = hashlib.sha256((task_key or "").encode("utf-8", errors="ignore")).hexdigest()[:8] if task_key else ""
+            khash = (
+                hashlib.sha256(
+                    (task_key or "").encode("utf-8", errors="ignore")
+                ).hexdigest()[:8]
+                if task_key
+                else ""
+            )
 
             # Platform detection for SELinux flag
             import platform
@@ -420,12 +498,11 @@ class DockerManager:
             # Review workspace RO mode: fixed default 'ro'
             review_mode = "ro"
 
-
             # Decide workspace mount strategy
             mounts: List[Mount] = []
             volumes: Dict[str, Dict[str, str]] = {}
             ws_source = normalize_path_for_docker(workspace_dir)
-            ws_ro = (import_policy == "never" and review_mode == "ro")
+            ws_ro = import_policy == "never" and review_mode == "ro"
             if selinux_mode:
                 # Use volumes mapping to apply ':z' (and 'ro' when needed)
                 mode = "z,ro" if ws_ro else "z"
@@ -446,14 +523,16 @@ class DockerManager:
                     f"Mounts prepared: workspace={mounts[0].source} -> /workspace (ro={mounts[0].read_only}), home=volume:{volume_name} -> /home/node"
                 )
                 if event_callback:
-                    event_callback({
-                        "type": "instance.container_mounts_prepared",
-                        "data": {
-                            "workspace_source": mounts[0].source,
-                            "workspace_read_only": bool(mounts[0].read_only),
-                            "home_volume": volume_name,
-                        },
-                    })
+                    event_callback(
+                        {
+                            "type": "instance.container_mounts_prepared",
+                            "data": {
+                                "workspace_source": mounts[0].source,
+                                "workspace_read_only": bool(mounts[0].read_only),
+                                "home_volume": volume_name,
+                            },
+                        }
+                    )
             except Exception:
                 pass
 
@@ -519,7 +598,9 @@ class DockerManager:
             except Exception:
                 config["pids_limit"] = 512
             try:
-                config["ulimits"] = (config.get("ulimits") or []) + [Ulimit(name="nofile", soft=4096, hard=4096)]
+                config["ulimits"] = (config.get("ulimits") or []) + [
+                    Ulimit(name="nofile", soft=4096, hard=4096)
+                ]
             except Exception:
                 pass
 
@@ -548,26 +629,47 @@ class DockerManager:
             # Provide normative env hints inside the container for debugging/compliance
             try:
                 import hashlib
-                eff_sgk = session_group_key or (task_key or instance_id or container_name)
+
+                eff_sgk = session_group_key or (
+                    task_key or instance_id or container_name
+                )
                 # KHASH short8 over TASK_KEY
-                durable = (task_key or (instance_id or ""))
-                khash = hashlib.sha256(str(durable).encode("utf-8", errors="ignore")).hexdigest()[:8]
+                durable = task_key or (instance_id or "")
+                khash = hashlib.sha256(
+                    str(durable).encode("utf-8", errors="ignore")
+                ).hexdigest()[:8]
                 # GHASH run-scope short8 over JCS({"session_group_key": EFFECTIVE_SGK})
-                payload = json.dumps({"session_group_key": eff_sgk}, separators=(",", ":"), sort_keys=True)
-                ghash = hashlib.sha256(payload.encode("utf-8", errors="ignore")).hexdigest()[:8]
-                config["environment"].update({
-                    "TASK_KEY": str(durable),
-                    "SESSION_GROUP_KEY": str(eff_sgk),
-                    "KHASH": khash,
-                    "GHASH": ghash,
-                })
+                payload = json.dumps(
+                    {"session_group_key": eff_sgk},
+                    separators=(",", ":"),
+                    sort_keys=True,
+                )
+                ghash = hashlib.sha256(
+                    payload.encode("utf-8", errors="ignore")
+                ).hexdigest()[:8]
+                config["environment"].update(
+                    {
+                        "TASK_KEY": str(durable),
+                        "SESSION_GROUP_KEY": str(eff_sgk),
+                        "KHASH": khash,
+                        "GHASH": ghash,
+                    }
+                )
             except Exception:
                 pass
             # Proxy egress support: pass host proxy envs when requested
             try:
                 if str(network_egress).lower() == "proxy":
                     import os as _os
-                    for k in ("HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "no_proxy"):
+
+                    for k in (
+                        "HTTP_PROXY",
+                        "HTTPS_PROXY",
+                        "NO_PROXY",
+                        "http_proxy",
+                        "https_proxy",
+                        "no_proxy",
+                    ):
                         if k in _os.environ:
                             config["environment"][k] = _os.environ[k]
             except Exception:
@@ -607,7 +709,9 @@ class DockerManager:
             # Allow plugin to adjust container configuration pre-creation
             try:
                 if plugin is not None and hasattr(plugin, "prepare_container"):
-                    config = await plugin.prepare_container(config, session_id=session_id)
+                    config = await plugin.prepare_container(
+                        config, session_id=session_id
+                    )
             except Exception:
                 # Continue with base config if plugin hook fails
                 pass
@@ -672,12 +776,16 @@ class DockerManager:
                 pass
 
             # Create container with a bounded timeout to avoid hangs
-            logger.info(f"Creating Docker container via API: name={container_name}, image={image}")
+            logger.info(
+                f"Creating Docker container via API: name={container_name}, image={image}"
+            )
             if event_callback:
-                event_callback({
-                    "type": "instance.container_create_attempt",
-                    "data": {"container_name": container_name, "image": image},
-                })
+                event_callback(
+                    {
+                        "type": "instance.container_create_attempt",
+                        "data": {"container_name": container_name, "image": image},
+                    }
+                )
             create_start = time.monotonic()
             create_future = loop.run_in_executor(
                 None, lambda: self.client.containers.create(**config)
@@ -691,29 +799,42 @@ class DockerManager:
                 )
             except asyncio.TimeoutError:
                 if event_callback:
-                    event_callback({
-                        "type": "instance.container_create_timeout",
-                        "data": {"container_name": container_name, "timeout_s": 20},
-                    })
+                    event_callback(
+                        {
+                            "type": "instance.container_create_timeout",
+                            "data": {"container_name": container_name, "timeout_s": 20},
+                        }
+                    )
                 raise DockerError(
                     f"Docker create timed out after 20s for {container_name}. Check Docker Desktop and volume sharing."
                 )
             except (docker.errors.APIError, docker.errors.DockerException) as e:
                 # Handle name conflicts gracefully to avoid races during parallel creation
                 msg = str(e)
-                status_code = getattr(e, "status_code", None) or getattr(getattr(e, "response", None), "status_code", None)
+                status_code = getattr(e, "status_code", None) or getattr(
+                    getattr(e, "response", None), "status_code", None
+                )
                 is_conflict = False
                 try:
-                    is_conflict = (status_code == 409) or ("already in use" in msg) or ("Conflict" in msg)
+                    is_conflict = (
+                        (status_code == 409)
+                        or ("already in use" in msg)
+                        or ("Conflict" in msg)
+                    )
                 except Exception:
                     is_conflict = False
 
                 if is_conflict:
                     if event_callback:
-                        event_callback({
-                            "type": "instance.container_create_conflict",
-                            "data": {"container_name": container_name, "error": msg},
-                        })
+                        event_callback(
+                            {
+                                "type": "instance.container_create_conflict",
+                                "data": {
+                                    "container_name": container_name,
+                                    "error": msg,
+                                },
+                            }
+                        )
                     # Attempt to adopt the existing container by this name. This addresses races where
                     # a parallel attempt (or a previous retry) created the container just before us.
                     adopt_start = time.monotonic()
@@ -725,19 +846,27 @@ class DockerManager:
                             existing2 = await asyncio.wait_for(get_future2, timeout=5)
                             # Ensure it's started
                             try:
-                                await asyncio.wait_for(loop.run_in_executor(None, existing2.reload), timeout=5)
+                                await asyncio.wait_for(
+                                    loop.run_in_executor(None, existing2.reload),
+                                    timeout=5,
+                                )
                             except Exception:
                                 pass
                             if existing2.status != "running":
                                 try:
-                                    await asyncio.wait_for(loop.run_in_executor(None, existing2.start), timeout=15)
+                                    await asyncio.wait_for(
+                                        loop.run_in_executor(None, existing2.start),
+                                        timeout=15,
+                                    )
                                 except Exception:
                                     pass
                                 # Give it a moment to reach running
                                 for _ in range(10):
                                     await asyncio.sleep(0.2)
                                     try:
-                                        await loop.run_in_executor(None, existing2.reload)
+                                        await loop.run_in_executor(
+                                            None, existing2.reload
+                                        )
                                     except Exception:
                                         pass
                                     if existing2.status == "running":
@@ -749,10 +878,17 @@ class DockerManager:
                                 time.monotonic() - adopt_start,
                             )
                             if event_callback:
-                                event_callback({
-                                    "type": "instance.container_adopted",
-                                    "data": {"container_name": container_name, "container_id": getattr(existing2, "id", "")[:12]},
-                                })
+                                event_callback(
+                                    {
+                                        "type": "instance.container_adopted",
+                                        "data": {
+                                            "container_name": container_name,
+                                            "container_id": getattr(
+                                                existing2, "id", ""
+                                            )[:12],
+                                        },
+                                    }
+                                )
                             container = existing2
                             break
                         except NotFound:
@@ -766,19 +902,29 @@ class DockerManager:
                     if not container:
                         # Could not adopt; surface a clearer error
                         if event_callback:
-                            event_callback({
-                                "type": "instance.container_create_failed",
-                                "data": {"container_name": container_name, "error": msg},
-                            })
+                            event_callback(
+                                {
+                                    "type": "instance.container_create_failed",
+                                    "data": {
+                                        "container_name": container_name,
+                                        "error": msg,
+                                    },
+                                }
+                            )
                         raise DockerError(
                             f"Docker create name conflict for {container_name} but adoption failed: {e}"
                         )
                 else:
                     if event_callback:
-                        event_callback({
-                            "type": "instance.container_create_failed",
-                            "data": {"container_name": container_name, "error": str(e)},
-                        })
+                        event_callback(
+                            {
+                                "type": "instance.container_create_failed",
+                                "data": {
+                                    "container_name": container_name,
+                                    "error": str(e),
+                                },
+                            }
+                        )
                     raise DockerError(f"Docker create failed for {container_name}: {e}")
 
             # Start container (bounded timeout) unless already running
@@ -798,19 +944,29 @@ class DockerManager:
                     )
                 except asyncio.TimeoutError:
                     if event_callback:
-                        event_callback({
-                            "type": "instance.container_start_timeout",
-                            "data": {"container_name": container_name, "timeout_s": 15},
-                        })
+                        event_callback(
+                            {
+                                "type": "instance.container_start_timeout",
+                                "data": {
+                                    "container_name": container_name,
+                                    "timeout_s": 15,
+                                },
+                            }
+                        )
                     raise DockerError(
                         f"Docker start timed out after 15s for {container_name}."
                     )
                 except (docker.errors.APIError, docker.errors.DockerException) as e:
                     if event_callback:
-                        event_callback({
-                            "type": "instance.container_start_failed",
-                            "data": {"container_name": container_name, "error": str(e)},
-                        })
+                        event_callback(
+                            {
+                                "type": "instance.container_start_failed",
+                                "data": {
+                                    "container_name": container_name,
+                                    "error": str(e),
+                                },
+                            }
+                        )
                     raise DockerError(f"Docker start failed for {container_name}: {e}")
 
             # Wait for container to be running
@@ -821,17 +977,24 @@ class DockerManager:
                 if container.status == "running":
                     break
             else:
-                raise DockerError(f"Container {container_name} failed to reach running state")
+                raise DockerError(
+                    f"Container {container_name} failed to reach running state"
+                )
 
             logger.info(
                 f"Created container {container_name} (ID: {container.id[:12]}) in %.2fs",
                 time.monotonic() - phase_start,
             )
             if event_callback:
-                event_callback({
-                    "type": "instance.container_created",
-                    "data": {"container_name": container_name, "container_id": container.id[:12]},
-                })
+                event_callback(
+                    {
+                        "type": "instance.container_created",
+                        "data": {
+                            "container_name": container_name,
+                            "container_id": container.id[:12],
+                        },
+                    }
+                )
             return container
 
         except DockerException as e:
@@ -887,7 +1050,9 @@ class DockerManager:
                     try:
                         await asyncio.get_event_loop().run_in_executor(
                             None,
-                            lambda: container.client.api.exec_start(_mk["Id"], detach=True),
+                            lambda: container.client.api.exec_start(
+                                _mk["Id"], detach=True
+                            ),
                         )
                     except Exception:
                         pass
@@ -965,10 +1130,15 @@ class DockerManager:
                         if idle >= 10:
                             try:
                                 if event_callback:
-                                    event_callback({
-                                        "type": "instance.progress",
-                                        "data": {"phase": "model_wait", "idle_seconds": int(idle)},
-                                    })
+                                    event_callback(
+                                        {
+                                            "type": "instance.progress",
+                                            "data": {
+                                                "phase": "model_wait",
+                                                "idle_seconds": int(idle),
+                                            },
+                                        }
+                                    )
                             except Exception:
                                 pass
 
@@ -1020,7 +1190,10 @@ class DockerManager:
                                 # Enforce max_turns if configured
                                 if max_turns is not None and isinstance(max_turns, int):
                                     try:
-                                        if str(parsed.get("type", "")).lower() == "turn_complete":
+                                        if (
+                                            str(parsed.get("type", "")).lower()
+                                            == "turn_complete"
+                                        ):
                                             turns_seen += 1
                                             if turns_seen >= max_turns:
                                                 # Stop parsing further events
@@ -1038,7 +1211,9 @@ class DockerManager:
                                         event_callback(
                                             {
                                                 "type": "log",
-                                                "timestamp": datetime.now(timezone.utc).isoformat(),
+                                                "timestamp": datetime.now(
+                                                    timezone.utc
+                                                ).isoformat(),
                                                 "stream": "stdout",
                                                 "message": msg,
                                             }
@@ -1057,7 +1232,9 @@ class DockerManager:
                                     event_callback(
                                         {
                                             "type": "log",
-                                            "timestamp": datetime.now(timezone.utc).isoformat(),
+                                            "timestamp": datetime.now(
+                                                timezone.utc
+                                            ).isoformat(),
                                             "stream": "stdout",
                                             "message": msg,
                                         }
@@ -1092,7 +1269,9 @@ class DockerManager:
                 try:
                     if raw_f is not None:
                         ts = datetime.now(timezone.utc).isoformat()
-                        raw_f.write(f"\n=== EXEC END {ts} exit={exec_info.get('ExitCode', 'nonzero')} ===\n")
+                        raw_f.write(
+                            f"\n=== EXEC END {ts} exit={exec_info.get('ExitCode', 'nonzero')} ===\n"
+                        )
                         raw_f.flush()
                 except Exception:
                     pass
@@ -1105,7 +1284,9 @@ class DockerManager:
             try:
                 if raw_f is not None:
                     ts = datetime.now(timezone.utc).isoformat()
-                    raw_f.write(f"\n=== EXEC END {ts} exit={exec_info.get('ExitCode', 0)} ===\n")
+                    raw_f.write(
+                        f"\n=== EXEC END {ts} exit={exec_info.get('ExitCode', 0)} ===\n"
+                    )
                     raw_f.flush()
             except Exception:
                 pass
@@ -1122,7 +1303,9 @@ class DockerManager:
             except Exception:
                 pass
 
-    async def stop_container(self, container: Container, timeout: int | None = None) -> None:
+    async def stop_container(
+        self, container: Container, timeout: int | None = None
+    ) -> None:
         """
         Stop a container gracefully with SIGTERM, then SIGKILL if needed.
 
@@ -1134,14 +1317,18 @@ class DockerManager:
             loop = asyncio.get_event_loop()
             # Docker's stop() sends SIGTERM, waits timeout seconds, then SIGKILL
             eff_timeout = int(timeout) if timeout is not None else 1
-            await loop.run_in_executor(None, lambda: container.stop(timeout=max(0, eff_timeout)))
+            await loop.run_in_executor(
+                None, lambda: container.stop(timeout=max(0, eff_timeout))
+            )
             logger.info(f"Stopped container {container.name} gracefully")
         except NotFound:
             logger.debug(f"Container {container.name} not found")
         except (docker.errors.APIError, docker.errors.DockerException) as e:
             logger.error(f"Failed to stop container {container.name}: {e}")
 
-    async def verify_container_tools(self, container: Container, tools: list[str]) -> None:
+    async def verify_container_tools(
+        self, container: Container, tools: list[str]
+    ) -> None:
         """Verify required tools are available in the container.
 
         Raises DockerError if any tool is missing.
@@ -1164,7 +1351,9 @@ class DockerManager:
                     )
                     await loop.run_in_executor(
                         None,
-                        lambda: container.client.api.exec_start(exec_id["Id"], stream=False),
+                        lambda: container.client.api.exec_start(
+                            exec_id["Id"], stream=False
+                        ),
                     )
                     inspect = await loop.run_in_executor(
                         None,
@@ -1178,7 +1367,9 @@ class DockerManager:
             if not found:
                 missing.append(tool)
         if missing:
-            raise DockerError(f"Required tools missing in container: {', '.join(missing)}")
+            raise DockerError(
+                f"Required tools missing in container: {', '.join(missing)}"
+            )
 
     async def cleanup_container(self, container: Container, force: bool = True) -> None:
         """
@@ -1268,9 +1459,13 @@ class DockerManager:
                         max_age = failed_retention_hours
                     # Prefer last-active file mtime if present
                     try:
-                        active_file = Path(f"/tmp/pitaya_status/{container.id[:12]}.active")
+                        active_file = Path(
+                            f"/tmp/pitaya_status/{container.id[:12]}.active"
+                        )
                         if active_file.exists():
-                            atime = datetime.fromtimestamp(active_file.stat().st_mtime, tz=timezone.utc)
+                            atime = datetime.fromtimestamp(
+                                active_file.stat().st_mtime, tz=timezone.utc
+                            )
                             age_hours = (current_time - atime).total_seconds() / 3600
                     except Exception:
                         pass
@@ -1280,9 +1475,18 @@ class DockerManager:
                             run_id = container.labels.get("run_id", "norun")
                             sidx = container.labels.get("strategy_index") or "0"
                             # Compute volume name using session_group_key/task_key GHASH
-                            group = container.labels.get("session_group_key") or container.labels.get("task_key") or ""
+                            group = (
+                                container.labels.get("session_group_key")
+                                or container.labels.get("task_key")
+                                or ""
+                            )
                             import hashlib
-                            ghash = hashlib.sha256(group.encode("utf-8")).hexdigest()[:8] if group else "unknown"
+
+                            ghash = (
+                                hashlib.sha256(group.encode("utf-8")).hexdigest()[:8]
+                                if group
+                                else "unknown"
+                            )
                             volume_name = f"pitaya_home_{run_id}_s{sidx}_g{ghash}"
                             # Attempt to remove container
                             await self.cleanup_container(container)
@@ -1323,18 +1527,30 @@ class DockerManager:
                                     khash = ""
                                 candidates = []
                                 if khash:
-                                    candidates.append(temp_base / f"pitaya/{run_id}/i_{sidx}_{khash}")
+                                    candidates.append(
+                                        temp_base / f"pitaya/{run_id}/i_{sidx}_{khash}"
+                                    )
                                 # macOS default under $HOME
                                 try:
                                     from pathlib import Path as _P
+
                                     if khash:
-                                        candidates.append(_P.home() / ".pitaya" / "workspaces" / f"pitaya/{run_id}/i_{sidx}_{khash}")
+                                        candidates.append(
+                                            _P.home()
+                                            / ".pitaya"
+                                            / "workspaces"
+                                            / f"pitaya/{run_id}/i_{sidx}_{khash}"
+                                        )
                                 except Exception:
                                     pass
                                 for workspace_path in candidates:
                                     if workspace_path.exists():
-                                        shutil.rmtree(workspace_path, ignore_errors=True)
-                                        logger.debug(f"Removed workspace {workspace_path}")
+                                        shutil.rmtree(
+                                            workspace_path, ignore_errors=True
+                                        )
+                                        logger.debug(
+                                            f"Removed workspace {workspace_path}"
+                                        )
                             except Exception:
                                 pass
                         except Exception as e:
@@ -1402,7 +1618,13 @@ class DockerManager:
 
         Returns a dict with keys: {candidates, in_use, too_young, removed, errors}
         """
-        out = {"candidates": [], "in_use": [], "too_young": [], "removed": [], "errors": []}
+        out = {
+            "candidates": [],
+            "in_use": [],
+            "too_young": [],
+            "removed": [],
+            "errors": [],
+        }
         try:
             loop = asyncio.get_event_loop()
             # List all volumes
@@ -1424,9 +1646,12 @@ class DockerManager:
                 referenced = set()
 
             from datetime import datetime, timezone
+
             def _parse_created_at(v) -> datetime:
                 try:
-                    ca = (v.attrs or {}).get("CreatedAt") or (v.attrs or {}).get("Created")
+                    ca = (v.attrs or {}).get("CreatedAt") or (v.attrs or {}).get(
+                        "Created"
+                    )
                     if not ca:
                         return datetime.fromtimestamp(0, tz=timezone.utc)
                     s = str(ca).replace("Z", "+00:00")

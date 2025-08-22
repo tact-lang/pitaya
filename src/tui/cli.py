@@ -88,7 +88,9 @@ class OrchestratorTUI:
         # Filters
         g_filters = parser.add_argument_group("Filters")
         g_filters.add_argument("--instance-id", help="Filter by instance ID")
-        g_filters.add_argument("--event-types", nargs="+", help="Filter by event type(s)")
+        g_filters.add_argument(
+            "--event-types", nargs="+", help="Filter by event type(s)"
+        )
 
         # Diagnostics
         g_diag = parser.add_argument_group("Diagnostics")
@@ -153,7 +155,9 @@ class OrchestratorTUI:
         """
         events_file = args.events_file
         if events_file is None:
-            self.console.print("[red]No events file resolved. Use --events-file or --run-id.[/red]")
+            self.console.print(
+                "[red]No events file resolved. Use --events-file or --run-id.[/red]"
+            )
             return 2
 
         # Run appropriate output mode

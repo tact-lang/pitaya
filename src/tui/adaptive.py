@@ -36,7 +36,9 @@ class AdaptiveDisplay:
             s = "default"
         self._color_scheme = s
 
-    def render_dashboard(self, run: RunDisplay, display_mode: str, frame_now=None) -> RenderableType:
+    def render_dashboard(
+        self, run: RunDisplay, display_mode: str, frame_now=None
+    ) -> RenderableType:
         """
         Render dashboard based on display mode.
 
@@ -50,6 +52,7 @@ class AdaptiveDisplay:
         renderer = self._mode_renderers.get(display_mode, self._render_compact)
         try:
             import logging
+
             logger = logging.getLogger(__name__)
             logger.debug(
                 f"render_dashboard mode={display_mode} strategies={len(run.strategies)} instances={len(run.instances)}"
@@ -103,7 +106,10 @@ class AdaptiveDisplay:
             }
             strategy_instances = sorted(
                 strategy_instances,
-                key=lambda i: (status_order.get(i.status, 3), i.started_at or datetime.now())
+                key=lambda i: (
+                    status_order.get(i.status, 3),
+                    i.started_at or datetime.now(),
+                ),
             )
             # Create instance panels
             instance_panels = []
@@ -132,7 +138,9 @@ class AdaptiveDisplay:
         # Return all strategy panels
         return Group(*panels)
 
-    def _create_detailed_instance_panel(self, instance: InstanceDisplay, ui_started_at=None, frame_now=None) -> Panel:
+    def _create_detailed_instance_panel(
+        self, instance: InstanceDisplay, ui_started_at=None, frame_now=None
+    ) -> Panel:
         """Create a detailed panel for a single instance."""
         # Create content table
         table = Table(show_header=False, show_edge=False, padding=0, expand=True)
@@ -150,7 +158,9 @@ class AdaptiveDisplay:
         status_text = Text()
         status_text.append(instance.status.emoji + " ")
         status_text.append(instance.status.value.title(), style=instance.status.color)
-        status_text.append(f" [{label_map.get(instance.status, '').upper()}]", style="bold")
+        status_text.append(
+            f" [{label_map.get(instance.status, '').upper()}]", style="bold"
+        )
         table.add_row("Status:", status_text)
 
         # Current activity
@@ -159,7 +169,11 @@ class AdaptiveDisplay:
             stale_suffix = ""
             try:
                 if instance.status == InstanceStatus.RUNNING and instance.last_updated:
-                    now = datetime.now(instance.last_updated.tzinfo) if instance.last_updated.tzinfo else datetime.now()
+                    now = (
+                        datetime.now(instance.last_updated.tzinfo)
+                        if instance.last_updated.tzinfo
+                        else datetime.now()
+                    )
                     age = (now - instance.last_updated).total_seconds()
                     if age >= 30:
                         stale_suffix = f"  (stalled {int(age)}s)"
@@ -187,21 +201,36 @@ class AdaptiveDisplay:
             live_seconds = 0.0
             if instance.status == InstanceStatus.RUNNING and instance.started_at:
                 if frame_now is not None:
-                    now = frame_now if instance.started_at.tzinfo else frame_now.replace(tzinfo=None)
+                    now = (
+                        frame_now
+                        if instance.started_at.tzinfo
+                        else frame_now.replace(tzinfo=None)
+                    )
                 else:
-                    now = datetime.now(instance.started_at.tzinfo) if instance.started_at.tzinfo else datetime.now()
+                    now = (
+                        datetime.now(instance.started_at.tzinfo)
+                        if instance.started_at.tzinfo
+                        else datetime.now()
+                    )
                 start_eff = instance.started_at
                 # Clamp to UI start if provided so per-instance never precedes global
                 if ui_started_at:
                     try:
-                        if start_eff.tzinfo is None and ui_started_at.tzinfo is not None:
+                        if (
+                            start_eff.tzinfo is None
+                            and ui_started_at.tzinfo is not None
+                        ):
                             start_eff = start_eff.replace(tzinfo=ui_started_at.tzinfo)
                     except Exception:
                         pass
                     if start_eff < ui_started_at:
                         start_eff = ui_started_at
                 live_seconds = max(0.0, (now - start_eff).total_seconds())
-            show_seconds = instance.duration_seconds if instance.duration_seconds > 0 else live_seconds
+            show_seconds = (
+                instance.duration_seconds
+                if instance.duration_seconds > 0
+                else live_seconds
+            )
             if show_seconds > 0:
                 table.add_row("Duration:", self._format_duration(show_seconds))
         except Exception:
@@ -301,7 +330,11 @@ class AdaptiveDisplay:
         }
         instances = sorted(
             instances,
-            key=lambda i: (i.strategy_name, status_order.get(i.status, 3), i.started_at or datetime.now()),
+            key=lambda i: (
+                i.strategy_name,
+                status_order.get(i.status, 3),
+                i.started_at or datetime.now(),
+            ),
         )
 
         # Add rows
@@ -317,7 +350,9 @@ class AdaptiveDisplay:
             status = Text()
             status.append(instance.status.emoji + " ")
             status.append(instance.status.value, style=instance.status.color)
-            status.append(f" [{label_map.get(instance.status,'').upper()}]", style="bold")
+            status.append(
+                f" [{label_map.get(instance.status,'').upper()}]", style="bold"
+            )
 
             # Activity (+ staleness)
             activity = ""
@@ -325,8 +360,15 @@ class AdaptiveDisplay:
                 # Add staleness if > 30s
                 stale = ""
                 try:
-                    if instance.status == InstanceStatus.RUNNING and instance.last_updated:
-                        now = datetime.now(instance.last_updated.tzinfo) if instance.last_updated.tzinfo else datetime.now()
+                    if (
+                        instance.status == InstanceStatus.RUNNING
+                        and instance.last_updated
+                    ):
+                        now = (
+                            datetime.now(instance.last_updated.tzinfo)
+                            if instance.last_updated.tzinfo
+                            else datetime.now()
+                        )
                         age = (now - instance.last_updated).total_seconds()
                         if age >= 30:
                             stale = f" (stalled {int(age)}s)"
@@ -343,9 +385,17 @@ class AdaptiveDisplay:
                 live_seconds = 0.0
                 if instance.status == InstanceStatus.RUNNING and instance.started_at:
                     if frame_now is not None:
-                        now = frame_now if instance.started_at.tzinfo else frame_now.replace(tzinfo=None)
+                        now = (
+                            frame_now
+                            if instance.started_at.tzinfo
+                            else frame_now.replace(tzinfo=None)
+                        )
                     else:
-                        now = datetime.now(instance.started_at.tzinfo) if instance.started_at.tzinfo else datetime.now()
+                        now = (
+                            datetime.now(instance.started_at.tzinfo)
+                            if instance.started_at.tzinfo
+                            else datetime.now()
+                        )
                     start_eff = instance.started_at
                     ui_start = getattr(run, "ui_started_at", None)
                     if ui_start:
@@ -357,7 +407,11 @@ class AdaptiveDisplay:
                         if start_eff < ui_start:
                             start_eff = ui_start
                     live_seconds = max(0.0, (now - start_eff).total_seconds())
-                seconds_to_show = instance.duration_seconds if instance.duration_seconds > 0 else live_seconds
+                seconds_to_show = (
+                    instance.duration_seconds
+                    if instance.duration_seconds > 0
+                    else live_seconds
+                )
                 if seconds_to_show > 0:
                     duration = self._format_duration(seconds_to_show)
             except Exception:
@@ -366,7 +420,9 @@ class AdaptiveDisplay:
             # Strategy label with robust fallback
             strategy_label = instance.strategy_name or ""
             if not strategy_label or strategy_label.lower() == "unknown":
-                strategy_label = fallback_strategy_by_instance.get(instance.instance_id, "-")
+                strategy_label = fallback_strategy_by_instance.get(
+                    instance.instance_id, "-"
+                )
 
             table.add_row(
                 instance.display_name,
@@ -389,7 +445,11 @@ class AdaptiveDisplay:
             instances_map = {}
 
         for strategy in strategies:
-            items = [instances_map[iid] for iid in strategy.instance_ids if iid in instances_map]
+            items = [
+                instances_map[iid]
+                for iid in strategy.instance_ids
+                if iid in instances_map
+            ]
             if not items:
                 continue
             status_order = {
@@ -399,8 +459,14 @@ class AdaptiveDisplay:
                 InstanceStatus.FAILED: 2,
                 InstanceStatus.INTERRUPTED: 2,
             }
-            items = sorted(items, key=lambda i: (status_order.get(i.status, 3), i.started_at or datetime.now()))
-            table = Table(show_header=False, expand=True, padding=(0,1))
+            items = sorted(
+                items,
+                key=lambda i: (
+                    status_order.get(i.status, 3),
+                    i.started_at or datetime.now(),
+                ),
+            )
+            table = Table(show_header=False, expand=True, padding=(0, 1))
             table.add_column("Status", width=8)
             table.add_column("Instance", width=10)
             table.add_column("Phase", width=24)
@@ -414,25 +480,40 @@ class AdaptiveDisplay:
                     InstanceStatus.QUEUED: "QUE",
                     InstanceStatus.INTERRUPTED: "INT",
                 }
-                status = Text(inst.status.emoji + " " + inst.status.value, style=inst.status.color)
-                status.append(f" [{label_map.get(inst.status,'').upper()}]", style="bold")
+                status = Text(
+                    inst.status.emoji + " " + inst.status.value, style=inst.status.color
+                )
+                status.append(
+                    f" [{label_map.get(inst.status,'').upper()}]", style="bold"
+                )
                 inst_name = inst.instance_id[:8]
                 phase = inst.current_activity or "-"
                 dur = "-"
                 try:
                     secs = inst.duration_seconds or 0
                     if inst.status == InstanceStatus.RUNNING and inst.started_at:
-                        now = datetime.now(inst.started_at.tzinfo) if inst.started_at.tzinfo else datetime.now()
+                        now = (
+                            datetime.now(inst.started_at.tzinfo)
+                            if inst.started_at.tzinfo
+                            else datetime.now()
+                        )
                         secs = max(secs, (now - inst.started_at).total_seconds())
                     if secs > 0:
                         dur = self._format_duration(secs)
                 except Exception:
                     pass
-                branch = (inst.branch_name or "")
+                branch = inst.branch_name or ""
                 if branch and len(branch) > 48:
                     branch = branch[:45] + "..."
                 table.add_row(status, inst_name, phase, dur, branch)
-            panels.append(Panel(table, title=strategy.strategy_name, border_style="blue", padding=(0,1)))
+            panels.append(
+                Panel(
+                    table,
+                    title=strategy.strategy_name,
+                    border_style="blue",
+                    padding=(0, 1),
+                )
+            )
         if not panels:
             return Panel(Align.center(Text("No instances", style="dim")), style="dim")
         return Group(*panels)

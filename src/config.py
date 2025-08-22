@@ -55,6 +55,7 @@ def _apply_yaml_aliases(config: Dict[str, Any]) -> Dict[str, Any]:
     - container_memory -> runner.memory_limit
     Both at top-level or under a known section are handled.
     """
+
     def set_runner_key(key: str, value: Any):
         config.setdefault("runner", {})[key] = value
 

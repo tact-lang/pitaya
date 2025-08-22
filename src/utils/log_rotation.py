@@ -171,8 +171,8 @@ async def setup_log_rotation_task(
                     for run_dir in logs_dir.glob("run_*"):
                         if not run_dir.is_dir():
                             continue
-                        for lf in (
-                            run_dir.glob("*.jsonl")
+                        for lf in run_dir.glob(
+                            "*.jsonl"
                         ):  # orchestration.jsonl, runner.jsonl, tui.jsonl, other.jsonl
                             rotate_log_file(lf, max_size_mb=max_size_mb)
                 except Exception as e:
@@ -180,18 +180,23 @@ async def setup_log_rotation_task(
 
                 # Prune events logs for terminal runs using fixed defaults
                 from datetime import timedelta
+
                 try:
                     retention_days = 30
                     grace_days = 7
                     cutoff = datetime.now(timezone.utc) - timedelta(days=retention_days)
-                    grace_cutoff = datetime.now(timezone.utc) - timedelta(days=grace_days)
+                    grace_cutoff = datetime.now(timezone.utc) - timedelta(
+                        days=grace_days
+                    )
                     for run_dir in logs_dir.glob("run_*"):
                         if not run_dir.is_dir():
                             continue
                         try:
                             name = run_dir.name
                             ts = name[4:19]
-                            started = datetime.strptime(ts, "%Y%m%d_%H%M%S").replace(tzinfo=timezone.utc)
+                            started = datetime.strptime(ts, "%Y%m%d_%H%M%S").replace(
+                                tzinfo=timezone.utc
+                            )
                         except Exception:
                             continue
                         if started < cutoff and started < grace_cutoff:
