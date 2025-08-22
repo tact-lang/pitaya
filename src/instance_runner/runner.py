@@ -164,6 +164,7 @@ async def run_instance(
     resolved_model_id = model
     try:
         from ..utils.model_mapping import load_model_mapping
+
         mapping, _checksum = load_model_mapping()
         # Optional handshake: ensure checksum matches orchestrator's view
         if model_mapping_checksum and _checksum != model_mapping_checksum:
@@ -484,15 +485,21 @@ async def _run_instance_attempt(
             )
 
             # Prepare auth env before container creation via plugin
-            emit_event("instance.container_env_preparing", {"container_name": container_name})
+            emit_event(
+                "instance.container_env_preparing", {"container_name": container_name}
+            )
             from dataclasses import asdict
+
             env_vars = await plugin.prepare_environment(
                 None, asdict(auth_config) if auth_config else None
             )
             try:
                 emit_event(
                     "instance.container_env_prepared",
-                    {"env_vars_count": len(env_vars or {}), "container_name": container_name},
+                    {
+                        "env_vars_count": len(env_vars or {}),
+                        "container_name": container_name,
+                    },
                 )
             except Exception:
                 emit_event(
@@ -547,7 +554,11 @@ async def _run_instance_attempt(
                 logger.info(
                     "Container created: name=%s id=%s (%.2fs)",
                     container_name,
-                    getattr(container, "id", "unknown")[:12] if container else "unknown",
+                    (
+                        getattr(container, "id", "unknown")[:12]
+                        if container
+                        else "unknown"
+                    ),
                     time.time() - _cc_start,
                 )
             except asyncio.TimeoutError:
@@ -560,7 +571,7 @@ async def _run_instance_attempt(
                 )
             finally:
                 try:
-                    if '_cc_start' in locals():
+                    if "_cc_start" in locals():
                         logger.debug(
                             "create_container finished in %.2fs (including error path)",
                             time.time() - _cc_start,
@@ -579,7 +590,7 @@ async def _run_instance_attempt(
             # Verify only git (mandatory for import). The AI CLI is validated implicitly during execute.
             try:
                 await docker_manager.verify_container_tools(container, ["git"])
-            except DockerError as e:
+            except DockerError:
                 # Surface failure; git is required
                 raise
 
@@ -654,16 +665,25 @@ async def _run_instance_attempt(
             )
 
             has_changes = str(import_info.get("has_changes", "false")).lower() == "true"
-            final_branch = import_info.get("target_branch") or branch_name if has_changes else import_info.get("target_branch")
+            final_branch = (
+                import_info.get("target_branch") or branch_name
+                if has_changes
+                else import_info.get("target_branch")
+            )
 
             if has_changes:
                 emit_event("instance.branch_imported", {"branch_name": final_branch})
             else:
                 if import_info.get("target_branch"):
-                    logger.info("No new commits; created branch pointing to base branch")
+                    logger.info(
+                        "No new commits; created branch pointing to base branch"
+                    )
                 else:
                     logger.info("No changes; skipped branch import per policy")
-                emit_event("instance.no_changes", {"branch_name": import_info.get("target_branch")})
+                emit_event(
+                    "instance.no_changes",
+                    {"branch_name": import_info.get("target_branch")},
+                )
 
             emit_event("instance.phase_completed", {"phase": "result_collection"})
 

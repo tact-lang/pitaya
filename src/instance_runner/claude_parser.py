@@ -96,7 +96,11 @@ class ClaudeOutputParser:
         if event_type == "assistant" and self.last_message:
             # Keep a concise but informative snapshot; avoid huge payloads
             try:
-                snippet = self.last_message if len(self.last_message) <= 4000 else (self.last_message[:4000] + "…")
+                snippet = (
+                    self.last_message
+                    if len(self.last_message) <= 4000
+                    else (self.last_message[:4000] + "…")
+                )
             except Exception:
                 snippet = self.last_message
             event["content"] = snippet

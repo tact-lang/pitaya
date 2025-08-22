@@ -128,6 +128,7 @@ class BestOfNStrategy(Strategy):
             logger.error(f"All {config.n} strategy executions failed")
             try:
                 from ...exceptions import NoViableCandidates
+
                 raise NoViableCandidates()
             except Exception:
                 return []
@@ -158,6 +159,7 @@ class BestOfNStrategy(Strategy):
             # All failed
             try:
                 from ...exceptions import NoViableCandidates
+
                 raise NoViableCandidates()
             except Exception:
                 return [scored_results[0]] if scored_results else []

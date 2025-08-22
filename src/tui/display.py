@@ -11,7 +11,6 @@ import logging
 from datetime import datetime, timezone
 from typing import Optional, Any
 from pathlib import Path
-import os
 
 from rich.console import Console
 from rich.layout import Layout
@@ -20,7 +19,13 @@ from rich.panel import Panel
 from rich.text import Text
 from rich.align import Align
 
-from .models import TUIState, InstanceStatus, RunDisplay, StrategyDisplay, InstanceDisplay
+from .models import (
+    TUIState,
+    InstanceStatus,
+    RunDisplay,
+    StrategyDisplay,
+    InstanceDisplay,
+)
 from .event_handler import EventProcessor, AsyncEventStream
 from .adaptive import AdaptiveDisplay
 
@@ -82,6 +87,7 @@ class TUIDisplay:
         self._render_run: Optional[RunDisplay] = None
         # UI session start time (authoritative origin for global Runtime)
         from datetime import datetime as _dt
+
         self._ui_started_at = _dt.now(timezone.utc)
 
         # Layout components
@@ -198,6 +204,7 @@ class TUIDisplay:
                 t0 = time.perf_counter()
                 # Synchronize all duration calculations to a single timestamp
                 from datetime import datetime as _dt
+
                 self._frame_now = _dt.now(timezone.utc)
                 # Build immutable snapshot for this frame to avoid shared-state mutations
                 self._snapshot_state_for_render()
@@ -278,14 +285,23 @@ class TUIDisplay:
         while not self._shutdown:
             try:
                 # Poll orchestrator state (direct instance only)
-                if self._orchestrator and hasattr(self._orchestrator, "get_current_state"):
+                if self._orchestrator and hasattr(
+                    self._orchestrator, "get_current_state"
+                ):
                     state = self._orchestrator.get_current_state()
                     if state:
                         self._reconcile_state(state)
 
                 # Apply forced display mode (CLI only) if provided
-                if self.state.current_run and not self.state.current_run.force_detail_level:
-                    mode = (self._force_display_mode_cli or "").strip().lower() if self._force_display_mode_cli else None
+                if (
+                    self.state.current_run
+                    and not self.state.current_run.force_detail_level
+                ):
+                    mode = (
+                        (self._force_display_mode_cli or "").strip().lower()
+                        if self._force_display_mode_cli
+                        else None
+                    )
                     if mode in ("detailed", "compact", "dense"):
                         self.state.current_run.force_detail_level = mode
 
@@ -319,13 +335,22 @@ class TUIDisplay:
         try:
             if isinstance(orchestrator_state, dict):
                 run.total_cost = orchestrator_state.get("total_cost", run.total_cost)
-                run.total_tokens = orchestrator_state.get("total_tokens", run.total_tokens)
-                run.total_instances = orchestrator_state.get("total_instances", run.total_instances)
-                run.completed_instances = orchestrator_state.get("completed_instances", run.completed_instances)
-                run.failed_instances = orchestrator_state.get("failed_instances", run.failed_instances)
+                run.total_tokens = orchestrator_state.get(
+                    "total_tokens", run.total_tokens
+                )
+                run.total_instances = orchestrator_state.get(
+                    "total_instances", run.total_instances
+                )
+                run.completed_instances = orchestrator_state.get(
+                    "completed_instances", run.completed_instances
+                )
+                run.failed_instances = orchestrator_state.get(
+                    "failed_instances", run.failed_instances
+                )
                 # Times (parse ISO strings to datetime when needed)
                 try:
                     from datetime import datetime as _dt
+
                     sa = orchestrator_state.get("started_at")
                     ca = orchestrator_state.get("completed_at")
                     if isinstance(sa, str):
@@ -339,15 +364,29 @@ class TUIDisplay:
                 except Exception:
                     pass
             else:
-                run.total_cost = getattr(orchestrator_state, "total_cost", run.total_cost)
-                run.total_tokens = getattr(orchestrator_state, "total_tokens", run.total_tokens)
-                run.total_instances = getattr(orchestrator_state, "total_instances", run.total_instances)
-                run.completed_instances = getattr(orchestrator_state, "completed_instances", run.completed_instances)
-                run.failed_instances = getattr(orchestrator_state, "failed_instances", run.failed_instances)
+                run.total_cost = getattr(
+                    orchestrator_state, "total_cost", run.total_cost
+                )
+                run.total_tokens = getattr(
+                    orchestrator_state, "total_tokens", run.total_tokens
+                )
+                run.total_instances = getattr(
+                    orchestrator_state, "total_instances", run.total_instances
+                )
+                run.completed_instances = getattr(
+                    orchestrator_state, "completed_instances", run.completed_instances
+                )
+                run.failed_instances = getattr(
+                    orchestrator_state, "failed_instances", run.failed_instances
+                )
                 # Times
                 try:
-                    run.started_at = getattr(orchestrator_state, "started_at", run.started_at)
-                    run.completed_at = getattr(orchestrator_state, "completed_at", run.completed_at)
+                    run.started_at = getattr(
+                        orchestrator_state, "started_at", run.started_at
+                    )
+                    run.completed_at = getattr(
+                        orchestrator_state, "completed_at", run.completed_at
+                    )
                 except Exception:
                     pass
         except Exception:
@@ -357,7 +396,9 @@ class TUIDisplay:
         # Update per-instance basics so UI reflects progress
         try:
             instances_map = (
-                orchestrator_state.get("instances") if isinstance(orchestrator_state, dict) else getattr(orchestrator_state, "instances", {})
+                orchestrator_state.get("instances")
+                if isinstance(orchestrator_state, dict)
+                else getattr(orchestrator_state, "instances", {})
             )
             # Normalize mapping (id -> info)
             if isinstance(instances_map, dict):
@@ -365,22 +406,42 @@ class TUIDisplay:
                     inst = run.instances.get(iid)
                     if not inst:
                         # Create a placeholder if missing
-                        inst = InstanceDisplay(instance_id=iid, strategy_name=getattr(info, "strategy_name", ""))
+                        inst = InstanceDisplay(
+                            instance_id=iid,
+                            strategy_name=getattr(info, "strategy_name", ""),
+                        )
                         run.instances[iid] = inst
                     # Map state
                     try:
                         st = getattr(info, "state", None)
-                        st_val = st.value if hasattr(st, "value") else (st if isinstance(st, str) else None)
+                        st_val = (
+                            st.value
+                            if hasattr(st, "value")
+                            else (st if isinstance(st, str) else None)
+                        )
                         if st_val:
                             from .models import InstanceStatus as TStatus
-                            if st_val in ("queued", "running", "interrupted", "completed", "failed"):
+
+                            if st_val in (
+                                "queued",
+                                "running",
+                                "interrupted",
+                                "completed",
+                                "failed",
+                            ):
                                 inst.status = TStatus(st_val)
                     except Exception:
                         pass
                     # Times
                     try:
-                        inst.started_at = getattr(info, "started_at", inst.started_at) or inst.started_at
-                        inst.completed_at = getattr(info, "completed_at", inst.completed_at) or inst.completed_at
+                        inst.started_at = (
+                            getattr(info, "started_at", inst.started_at)
+                            or inst.started_at
+                        )
+                        inst.completed_at = (
+                            getattr(info, "completed_at", inst.completed_at)
+                            or inst.completed_at
+                        )
                     except Exception:
                         pass
         except Exception:
@@ -392,9 +453,7 @@ class TUIDisplay:
             run_src = self._render_run
             if not run_src:
                 # No active run
-                header_content = Text(
-                    "Pitaya TUI - No Active Run", style="bold yellow"
-                )
+                header_content = Text("Pitaya TUI - No Active Run", style="bold yellow")
             else:
                 run = run_src
                 # Simple header text for now
@@ -449,9 +508,22 @@ class TUIDisplay:
                 try:
                     inst_list = list(run.instances.values())
                     total = len(inst_list)
-                    running = sum(1 for i in inst_list if i.status == InstanceStatus.RUNNING)
-                    queued = sum(1 for i in inst_list if i.status == InstanceStatus.QUEUED)
-                    done = sum(1 for i in inst_list if i.status in (InstanceStatus.COMPLETED, InstanceStatus.FAILED, InstanceStatus.INTERRUPTED))
+                    running = sum(
+                        1 for i in inst_list if i.status == InstanceStatus.RUNNING
+                    )
+                    queued = sum(
+                        1 for i in inst_list if i.status == InstanceStatus.QUEUED
+                    )
+                    done = sum(
+                        1
+                        for i in inst_list
+                        if i.status
+                        in (
+                            InstanceStatus.COMPLETED,
+                            InstanceStatus.FAILED,
+                            InstanceStatus.INTERRUPTED,
+                        )
+                    )
                     header_content.append(" • ")
                     header_content.append(
                         f"tasks: R:{running} Q:{queued} D:{done} • total:{total}",
@@ -487,9 +559,7 @@ class TUIDisplay:
                     target = self._layout["body"]
                 target.update(
                     Panel(
-                        Align.center(
-                            Text("Waiting for Pitaya run...", style="dim")
-                        ),
+                        Align.center(Text("Waiting for Pitaya run...", style="dim")),
                         style="dim",
                     )
                 )
@@ -499,14 +569,19 @@ class TUIDisplay:
             display_mode = run_src.get_display_mode()
 
             # Get dashboard content from adaptive display (synchronized to frame time)
-            dashboard_content = self.adaptive_display.render_dashboard(run_src, display_mode, frame_now=getattr(self, "_frame_now", None))
+            dashboard_content = self.adaptive_display.render_dashboard(
+                run_src, display_mode, frame_now=getattr(self, "_frame_now", None)
+            )
 
             # Handle details pane split
             if self._details_mode == "right":
                 if not self._body_split:
                     # Split once: dashboard | details
                     body = self._layout["body"]
-                    body.split_row(Layout(name="dashboard", ratio=3), Layout(name="details", size=48))
+                    body.split_row(
+                        Layout(name="dashboard", ratio=3),
+                        Layout(name="details", size=48),
+                    )
                     self._body_split = True
                 self._layout["body"]["dashboard"].update(dashboard_content)
                 # Update details panel
@@ -530,6 +605,7 @@ class TUIDisplay:
                 return Panel("No task selected", style="dim")
             # Build details text
             from rich.table import Table
+
             tbl = Table(show_header=False, box=None, pad_edge=False, show_edge=False)
             tbl.add_row("Instance:", (inst.instance_id or "")[:16])
             if inst.branch_name:
@@ -542,27 +618,39 @@ class TUIDisplay:
             if inst.duration_seconds:
                 tbl.add_row("Time:", self._format_duration(inst.duration_seconds))
             if inst.total_tokens:
-                tbl.add_row("Tokens:", f"{inst.total_tokens:,} (↓{inst.input_tokens:,} ↑{inst.output_tokens:,})")
+                tbl.add_row(
+                    "Tokens:",
+                    f"{inst.total_tokens:,} (↓{inst.input_tokens:,} ↑{inst.output_tokens:,})",
+                )
             if inst.cost:
                 tbl.add_row("Cost:", f"${inst.cost:.2f}")
             # Final message
             try:
                 if getattr(inst, "final_message_path", None):
-                    note = " (truncated)" if getattr(inst, "final_message_truncated", False) else ""
+                    note = (
+                        " (truncated)"
+                        if getattr(inst, "final_message_truncated", False)
+                        else ""
+                    )
                     tbl.add_row("Final:", f"{inst.final_message_path}{note}")
                 elif getattr(inst, "final_message", None):
                     preview = inst.final_message.strip().replace("\n", " ")
                     if len(preview) > 200:
                         preview = preview[:197] + "..."
-                    note = " (truncated)" if getattr(inst, "final_message_truncated", False) else ""
+                    note = (
+                        " (truncated)"
+                        if getattr(inst, "final_message_truncated", False)
+                        else ""
+                    )
                     tbl.add_row("Final:", f"{preview}{note}")
             except Exception:
                 pass
             # Message buffer (last N public messages)
             try:
-                msgs = getattr(self.event_processor, "_messages", {}).get(inst.instance_id, [])
+                msgs = getattr(self.event_processor, "_messages", {}).get(
+                    inst.instance_id, []
+                )
                 if msgs:
-                    from rich.markdown import Markdown
                     # Render as a simple bulleted list
                     tbl.add_row("Messages:", "\n".join(f"• {m}" for m in msgs))
             except Exception:
@@ -585,11 +673,21 @@ class TUIDisplay:
 
                 # Count instances by status
                 inst_list = list(run.instances.values())
-                active_count = sum(1 for i in inst_list if i.status == InstanceStatus.RUNNING)
-                queued_count = sum(1 for i in inst_list if i.status == InstanceStatus.QUEUED)
-                completed_count = sum(1 for i in inst_list if i.status == InstanceStatus.COMPLETED)
-                failed_count = sum(1 for i in inst_list if i.status == InstanceStatus.FAILED)
-                interrupted_count = sum(1 for i in inst_list if i.status == InstanceStatus.INTERRUPTED)
+                active_count = sum(
+                    1 for i in inst_list if i.status == InstanceStatus.RUNNING
+                )
+                queued_count = sum(
+                    1 for i in inst_list if i.status == InstanceStatus.QUEUED
+                )
+                completed_count = sum(
+                    1 for i in inst_list if i.status == InstanceStatus.COMPLETED
+                )
+                failed_count = sum(
+                    1 for i in inst_list if i.status == InstanceStatus.FAILED
+                )
+                interrupted_count = sum(
+                    1 for i in inst_list if i.status == InstanceStatus.INTERRUPTED
+                )
 
                 # Global Duration: strictly from UI session start (immediate and independent)
                 duration = "--:--:--"
@@ -621,9 +719,7 @@ class TUIDisplay:
                 footer_lines.append(line1)
 
                 # Second line: events, tokens, and cost (run totals)
-                line2 = (
-                    f"Events: {self.state.events_processed} | Tokens: {total_tokens:,} (↓{total_tokens_in:,} ↑{total_tokens_out:,}) | Cost: ${total_cost:.4f}"
-                )
+                line2 = f"Events: {self.state.events_processed} | Tokens: {total_tokens:,} (↓{total_tokens_in:,} ↑{total_tokens_out:,}) | Cost: ${total_cost:.4f}"
                 footer_lines.append(line2)
 
                 # Third line: active subtotals (approximate)
@@ -632,9 +728,7 @@ class TUIDisplay:
                 a_tokens_out = sum(i.output_tokens for i in active)
                 a_tokens = sum(i.total_tokens for i in active)
                 a_cost = sum(i.cost for i in active)
-                line3 = (
-                    f"Active: tokens {a_tokens:,} (↓{a_tokens_in:,} ↑{a_tokens_out:,}) | Cost: ${a_cost:.4f}"
-                )
+                line3 = f"Active: tokens {a_tokens:,} (↓{a_tokens_in:,} ↑{a_tokens_out:,}) | Cost: ${a_cost:.4f}"
                 footer_lines.append(line3)
             else:
                 footer_lines.append(
@@ -678,7 +772,9 @@ class TUIDisplay:
             name = next(iter(strategy_names))
             # Count strategy executions when available
             exec_count = len(self._render_run.strategies) or sum(
-                1 for i in self._render_run.instances.values() if i.strategy_name == name
+                1
+                for i in self._render_run.instances.values()
+                if i.strategy_name == name
             )
             return f"{name} (x{exec_count})" if exec_count > 1 else name
         return f"Multiple ({len(strategy_names)})"
@@ -733,7 +829,11 @@ class TUIDisplay:
                 started_at=src.started_at,
                 completed_at=src.completed_at,
                 ui_started_at=self._ui_started_at,
-                force_detail_level=(src.force_detail_level or self._force_display_mode_cli or self._force_display_mode_env),
+                force_detail_level=(
+                    src.force_detail_level
+                    or self._force_display_mode_cli
+                    or self._force_display_mode_env
+                ),
             )
 
             # Copy strategies
@@ -780,10 +880,3 @@ class TUIDisplay:
             logger.debug(f"Snapshot build failed: {e}")
             # Fallback to direct reference (riskier but better than blank)
             self._render_run = self.state.current_run
-
-    def set_forced_display_mode(self, mode: Optional[str]) -> None:
-        """Set a CLI-forced display mode (detailed|compact|dense)."""
-        if mode and mode in {"detailed", "compact", "dense"}:
-            self._force_display_mode_cli = mode
-        else:
-            self._force_display_mode_cli = None

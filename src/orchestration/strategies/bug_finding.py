@@ -22,13 +22,13 @@ logger = logging.getLogger(__name__)
 @dataclass
 class BugFindingConfig(StrategyConfig):
     """Configuration for bug finding strategy."""
-    
+
     # Target area to search for bugs (e.g., "src/parser", "authentication module")
     target_area: str = ""
-    
+
     # Additional context about what kinds of bugs to look for
     bug_focus: str = ""
-    
+
     # Prompt template for discovery phase
     discovery_prompt_template: str = """You are a security researcher and bug hunter. Your task is to find bugs in the {target_area} of this codebase.
 
@@ -47,8 +47,8 @@ Instructions:
 
 Focus area: {target_area}
 Original request: {original_prompt}"""
-    
-    # Prompt template for validation phase  
+
+    # Prompt template for validation phase
     validation_prompt_template: str = """You are a senior engineer tasked with validating a bug report. Another researcher claims to have found the following bug:
 
 {bug_report}
@@ -77,18 +77,18 @@ Your task:
 class BugFindingStrategy(Strategy):
     """
     Two-phase bug finding strategy.
-    
+
     Phase 1: Discovery - Find and document a bug
     Phase 2: Validation - Reproduce and commit bug report
     """
-    
+
     @property
     def name(self) -> str:
         return "bug-finding"
-    
+
     def get_config_class(self) -> type[BugFindingConfig]:
         return BugFindingConfig
-    
+
     async def execute(
         self,
         prompt: str,
@@ -97,70 +97,90 @@ class BugFindingStrategy(Strategy):
     ) -> List[InstanceResult]:
         """Execute bug finding strategy."""
         config: BugFindingConfig = self.create_config()  # type: ignore
-        
+
         # Build discovery prompt
         bug_focus_section = ""
         if config.bug_focus:
             bug_focus_section = f"Specific focus: {config.bug_focus}\n"
-            
+
         discovery_prompt = config.discovery_prompt_template.format(
             target_area=config.target_area,
             bug_focus_section=bug_focus_section,
-            original_prompt=prompt
+            original_prompt=prompt,
         )
-        
+
         # Phase 1: Discovery
         logger.info(f"Starting bug discovery phase for {config.target_area}")
         # ctx.emit_event not available in current context
         logger.info(f"Bug finding phase: discovery for {config.target_area}")
-        
-        discovery_task = {"prompt": discovery_prompt, "base_branch": base_branch, "model": config.model}
-        discovery_handle = await ctx.run(discovery_task, key=ctx.key("discovery", config.target_area))
+
+        discovery_task = {
+            "prompt": discovery_prompt,
+            "base_branch": base_branch,
+            "model": config.model,
+        }
+        discovery_handle = await ctx.run(
+            discovery_task, key=ctx.key("discovery", config.target_area)
+        )
         discovery_result = await ctx.wait(discovery_handle)
-        
+
         # Check if discovery was successful
         if not discovery_result.success:
             logger.warning("Bug discovery phase failed")
             logger.warning(f"Discovery failed: {discovery_result.error}")
             return [discovery_result]
-        
+
         # Extract bug report from discovery result
         bug_report = discovery_result.final_message or "No bug report provided"
-        
+
         # Phase 2: Validation
         logger.info("Starting bug validation phase")
         logger.info(f"Bug finding phase: validation, bug_found={bool(bug_report)}")
-        
+
         validation_prompt = config.validation_prompt_template.format(
             bug_report=bug_report
         )
-        
+
         # Validation starts from the base branch, not discovery branch
         # This ensures independent reproduction
-        validation_task = {"prompt": validation_prompt, "base_branch": base_branch, "model": config.model}
-        validation_handle = await ctx.run(validation_task, key=ctx.key("validation", config.target_area))
+        validation_task = {
+            "prompt": validation_prompt,
+            "base_branch": base_branch,
+            "model": config.model,
+        }
+        validation_handle = await ctx.run(
+            validation_task, key=ctx.key("validation", config.target_area)
+        )
         validation_result = await ctx.wait(validation_handle)
-        
+
         # Determine final status based on validation
         if validation_result.success:
             # Check if validation instance made commits (indicating valid bug)
-            commit_count = validation_result.commit_statistics.get("commit_count", 0) if validation_result.commit_statistics else 0
+            commit_count = (
+                validation_result.commit_statistics.get("commit_count", 0)
+                if validation_result.commit_statistics
+                else 0
+            )
             if commit_count > 0:
                 logger.info(f"Bug validated and documented with {commit_count} commits")
-                logger.info(f"Bug confirmed in {config.target_area} with {commit_count} commits on branch {validation_result.branch_name}")
-                
+                logger.info(
+                    f"Bug confirmed in {config.target_area} with {commit_count} commits on branch {validation_result.branch_name}"
+                )
+
                 # Mark validation result with success metadata
                 validation_result.metadata["bug_confirmed"] = True
-                validation_result.metadata["bug_report_branch"] = validation_result.branch_name
+                validation_result.metadata["bug_report_branch"] = (
+                    validation_result.branch_name
+                )
             else:
                 logger.info("Bug could not be validated (no commits made)")
                 logger.info("Bug not confirmed: No commits made during validation")
-                
+
                 # Override status to indicate validation failure
                 validation_result.success = False
                 validation_result.status = "failed"
                 validation_result.error = "Bug could not be reproduced or was invalid"
                 validation_result.metadata["bug_confirmed"] = False
-        
+
         # Return both results for transparency
         return [discovery_result, validation_result]

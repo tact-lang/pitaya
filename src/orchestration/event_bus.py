@@ -12,6 +12,7 @@ import logging
 import os
 import socket
 import uuid
+import re as _re
 from collections import defaultdict, deque
 from datetime import datetime, timezone
 from pathlib import Path
@@ -22,8 +23,15 @@ logger = logging.getLogger(__name__)
 
 
 # Two-stage redaction patterns
-import re as _re
-_SENSITIVE_KEYS = ("token", "api_key", "apikey", "authorization", "password", "secret", "cookie")
+_SENSITIVE_KEYS = (
+    "token",
+    "api_key",
+    "apikey",
+    "authorization",
+    "password",
+    "secret",
+    "cookie",
+)
 _PATTERNS = [
     _re.compile(r"(?i)(authorization\s*:\s*Bearer)\s+[A-Za-z0-9._\-]+"),
     _re.compile(r"sk-[A-Za-z0-9]{16,}"),
@@ -95,7 +103,9 @@ class EventBus:
         self._flush_policy = "interval"
         self._flush_interval_ms = 50
         self._flush_max_batch = 256
-        self._pending_canonical: List[Tuple[Dict[str, Any], Dict[str, Any]]] = []  # (envelope record without start_offset/payload, payload)
+        self._pending_canonical: List[Tuple[Dict[str, Any], Dict[str, Any]]] = (
+            []
+        )  # (envelope record without start_offset/payload, payload)
         self._pending_lock = asyncio.Lock()
         self._flusher_task: Optional[asyncio.Task] = None
         # Custom redaction patterns (compiled regex)
@@ -110,14 +120,18 @@ class EventBus:
                 self._current_offset = self.persist_path.stat().st_size
             # Acquire single-writer lock for duration of run
             try:
-                lock_path = self.persist_path.with_suffix(self.persist_path.suffix + ".lock")
+                lock_path = self.persist_path.with_suffix(
+                    self.persist_path.suffix + ".lock"
+                )
                 self._lock_file = open(lock_path, "a+")
                 # Cross-platform strict lock
                 if os.name == "nt":
                     import msvcrt
+
                     msvcrt.locking(self._lock_file.fileno(), msvcrt.LK_NBLCK, 1)
                 else:
                     import fcntl
+
                     fcntl.flock(self._lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
                 # Write lock metadata for diagnostics (best-effort)
                 try:
@@ -186,7 +200,14 @@ class EventBus:
 
         # Only persist canonical events to events.jsonl; runner-level events go to runner.jsonl
         try:
-            if self._runner_file and isinstance(event_type, str) and (event_type.startswith("instance.") or event_type.startswith("runner.")):
+            if (
+                self._runner_file
+                and isinstance(event_type, str)
+                and (
+                    event_type.startswith("instance.")
+                    or event_type.startswith("runner.")
+                )
+            ):
                 line = (json.dumps(event, separators=(",", ":")) + "\n").encode("utf-8")
                 # For critical runner completion records, write synchronously to ensure durability before cleanup
                 if event_type == "runner.instance.completed":
@@ -201,7 +222,9 @@ class EventBus:
                     self._runner_queue.append(line)
                     if not self._runner_writer_task or self._runner_writer_task.done():
                         try:
-                            self._runner_writer_task = asyncio.create_task(self._runner_flush_loop())
+                            self._runner_writer_task = asyncio.create_task(
+                                self._runner_flush_loop()
+                            )
                         except RuntimeError:
                             # If no running loop yet, write synchronously as fallback
                             try:
@@ -211,6 +234,22 @@ class EventBus:
                                 pass
         except Exception:
             pass
+
+        # Notify subscribers
+        self._notify_subscribers(event)
+
+        # Minimal debug logging only when logger configured for DEBUG externally
+        if logger.isEnabledFor(logging.DEBUG):
+            try:
+                keys = (
+                    ",".join(sorted(list(data.keys())))
+                    if isinstance(data, dict)
+                    else "-"
+                )
+                iid = instance_id or event.get("instance_id") or "-"
+                logger.debug(f"Emitted event: {event_type} (iid={iid}, keys={keys})")
+            except Exception:
+                pass
 
     async def _runner_flush_loop(self) -> None:
         """Background flush loop for runner.jsonl writes.
@@ -228,7 +267,9 @@ class EventBus:
                         continue
                 # Drain a batch
                 batch: list[bytes] = []
-                for _ in range(min(self._runner_flush_max_batch, len(self._runner_queue))):
+                for _ in range(
+                    min(self._runner_flush_max_batch, len(self._runner_queue))
+                ):
                     try:
                         batch.append(self._runner_queue.popleft())
                     except IndexError:
@@ -244,18 +285,6 @@ class EventBus:
                     logger.debug(f"runner.flush error: {e}")
         except asyncio.CancelledError:
             return
-
-        # Notify subscribers
-        self._notify_subscribers(event)
-
-        # Minimal debug logging only when logger configured for DEBUG externally
-        if logger.isEnabledFor(logging.DEBUG):
-            try:
-                keys = ",".join(sorted(list(data.keys()))) if isinstance(data, dict) else "-"
-                iid = instance_id or event.get("instance_id") or "-"
-                logger.debug(f"Emitted event: {event_type} (iid={iid}, keys={keys})")
-            except Exception:
-                pass
 
     def _utc_ts_ms_z(self) -> str:
         """Return UTC ISO-8601 timestamp with milliseconds and trailing Z."""
@@ -303,6 +332,7 @@ class EventBus:
                     async def _enqueue():
                         async with self._pending_lock:
                             self._pending_canonical.append((record, payload))
+
                     try:
                         loop = asyncio.get_running_loop()
                         loop.create_task(_enqueue())
@@ -375,11 +405,19 @@ class EventBus:
                 continue
         self._custom_redaction_patterns = out
 
-    def _write_canonical_immediate(self, record: Dict[str, Any], payload: Dict[str, Any]) -> None:
+    def _write_canonical_immediate(
+        self, record: Dict[str, Any], payload: Dict[str, Any]
+    ) -> None:
         try:
             start_offset = self._current_offset
-            record_with_payload = {**record, "start_offset": start_offset, "payload": self._sanitize(payload)}
-            line = (json.dumps(record_with_payload, separators=(",", ":")) + "\n").encode("utf-8")
+            record_with_payload = {
+                **record,
+                "start_offset": start_offset,
+                "payload": self._sanitize(payload),
+            }
+            line = (
+                json.dumps(record_with_payload, separators=(",", ":")) + "\n"
+            ).encode("utf-8")
             self._persist_file.write(line)
             # Per-event durability
             self._persist_file.flush()
@@ -463,7 +501,9 @@ class EventBus:
                     "start_offset": offset,
                     "payload": self._sanitize(payload),
                 }
-                line = (json.dumps(record_with_payload, separators=(",", ":")) + "\n").encode("utf-8")
+                line = (
+                    json.dumps(record_with_payload, separators=(",", ":")) + "\n"
+                ).encode("utf-8")
                 lines.append(line)
                 offset += len(line)
             # Write all lines at once
@@ -475,7 +515,7 @@ class EventBus:
             self._current_offset = offset
             if logger.isEnabledFor(logging.DEBUG):
                 logger.debug(
-                    f"canonical.persist.batch: count={len(lines)} start={base} bytes={sum(len(l) for l in lines)}"
+                    f"canonical.persist.batch: count={len(lines)} start={base} bytes={sum(len(line) for line in lines)}"
                 )
         except Exception as e:
             logger.error(f"Failed to persist canonical batch: {e}")
@@ -577,7 +617,11 @@ class EventBus:
         events: List[Dict[str, Any]] = []
 
         # If offset specified, read from file (in binary mode to track byte offsets)
-        if (offset is not None or timestamp is not None) and self.persist_path and self.persist_path.exists():
+        if (
+            (offset is not None or timestamp is not None)
+            and self.persist_path
+            and self.persist_path.exists()
+        ):
             try:
                 # Open in binary mode to ensure tell/seek operate on byte offsets
                 with open(self.persist_path, "rb") as f:
@@ -587,10 +631,14 @@ class EventBus:
                         # Scan to find first record with ts >= timestamp
                         # Note: this is O(N); acceptable for v1
                         from datetime import datetime as _dt
-                        ts_bytes = None
+
                         try:
                             # Ensure tz-aware parse; if naive, treat as UTC
-                            ts_target = timestamp if timestamp.tzinfo else timestamp.replace(tzinfo=timezone.utc)
+                            ts_target = (
+                                timestamp
+                                if timestamp.tzinfo
+                                else timestamp.replace(tzinfo=timezone.utc)
+                            )
                         except Exception:
                             ts_target = timestamp
                         f.seek(0)
@@ -604,9 +652,13 @@ class EventBus:
                                 ts_str = rec.get("ts")
                                 if ts_str:
                                     try:
-                                        t = _dt.fromisoformat(ts_str.replace("Z", "+00:00"))
+                                        t = _dt.fromisoformat(
+                                            ts_str.replace("Z", "+00:00")
+                                        )
                                         if t >= ts_target:
-                                            current_offset = rec.get("start_offset", pos)
+                                            current_offset = rec.get(
+                                                "start_offset", pos
+                                            )
                                             break
                                     except Exception:
                                         pass
@@ -675,7 +727,11 @@ class EventBus:
             if timestamp:
                 try:
                     ts_s = event.get("ts") or event.get("timestamp")
-                    event_time = datetime.fromisoformat(str(ts_s).replace("Z", "+00:00")) if ts_s else None
+                    event_time = (
+                        datetime.fromisoformat(str(ts_s).replace("Z", "+00:00"))
+                        if ts_s
+                        else None
+                    )
                     if event_time and event_time <= timestamp:
                         continue
                 except Exception:

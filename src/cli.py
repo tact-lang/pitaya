@@ -69,20 +69,20 @@ class OrchestratorCLI:
             epilog=(
                 "Examples:\n"
                 "  # Simple strategy\n"
-                "  pitaya \"implement auth\" --strategy simple\n\n"
+                '  pitaya "implement auth" --strategy simple\n\n'
                 "  # Best-of-N with params\n"
-                "  pitaya \"fix bug in user.py\" --strategy best-of-n -S n=5\n\n"
+                '  pitaya "fix bug in user.py" --strategy best-of-n -S n=5\n\n'
                 "  # Doc review (pages file, 2 reviewers)\n"
-                "  pitaya \"Review docs\" --strategy doc-review -S pages_file=pages.yml -S reviewers_per_page=2\n\n"
+                '  pitaya "Review docs" --strategy doc-review -S pages_file=pages.yml -S reviewers_per_page=2\n\n'
                 "  # Custom model and multiple runs\n"
-                "  pitaya \"add tests\" --model opus --runs 3\n\n"
+                '  pitaya "add tests" --model opus --runs 3\n\n'
                 "  # Override Docker image\n"
-                "  pitaya \"task\" --plugin codex --docker-image ghcr.io/me/codex-cli:mytag\n\n"
+                '  pitaya "task" --plugin codex --docker-image ghcr.io/me/codex-cli:mytag\n\n'
                 "  # Resume a run\n"
                 "  pitaya --resume run_20250114_123456\n\n"
                 "  # Headless JSON output\n"
-                "  pitaya \"implement feature\" --no-tui --output json\n"
-        ),
+                '  pitaya "implement feature" --no-tui --output json\n'
+            ),
         )
 
         # Global flags
@@ -126,12 +126,16 @@ class OrchestratorCLI:
             help="Alias for -S",
         )
         g_strategy.add_argument(
-            "--runs", type=int, default=1, help="Parallel strategy executions (default: 1)"
+            "--runs",
+            type=int,
+            default=1,
+            help="Parallel strategy executions (default: 1)",
         )
 
         # Model & plugin group
         try:
             from .instance_runner.plugins import AVAILABLE_PLUGINS as _APLUG
+
             _plugin_choices = sorted(list(_APLUG.keys()))
         except Exception:
             _plugin_choices = ["claude-code"]
@@ -264,7 +268,10 @@ class OrchestratorCLI:
             help="Config file (default: pitaya.yaml if present)",
         )
         g_state.add_argument(
-            "--state-dir", type=Path, default=Path("./pitaya_state"), help="State directory"
+            "--state-dir",
+            type=Path,
+            default=Path("./pitaya_state"),
+            help="State directory",
         )
         g_state.add_argument(
             "--logs-dir", type=Path, default=Path("./logs"), help="Logs directory"
@@ -283,15 +290,21 @@ class OrchestratorCLI:
 
         # Maintenance group
         g_maint = parser.add_argument_group("Maintenance")
-        g_maint.add_argument("--resume", metavar="RUN_ID", help="Resume an interrupted run")
+        g_maint.add_argument(
+            "--resume", metavar="RUN_ID", help="Resume an interrupted run"
+        )
         g_maint.add_argument(
             "--resume-fresh",
             metavar="RUN_ID",
             help="Resume with fresh containers (re-run incomplete)",
         )
-        g_maint.add_argument("--list-runs", action="store_true", help="List previous runs")
+        g_maint.add_argument(
+            "--list-runs", action="store_true", help="List previous runs"
+        )
         g_maint.add_argument("--show-run", metavar="RUN_ID", help="Show run details")
-        g_maint.add_argument("--prune", action="store_true", help="Prune old logs/results")
+        g_maint.add_argument(
+            "--prune", action="store_true", help="Prune old logs/results"
+        )
         g_maint.add_argument(
             "--prune-dry-run", action="store_true", help="Show what would be pruned"
         )
@@ -329,7 +342,9 @@ class OrchestratorCLI:
         # Diagnostics group
         g_diag = parser.add_argument_group("Diagnostics")
         g_diag.add_argument("--debug", action="store_true", help="Enable debug logging")
-        g_diag.add_argument("--yes", action="store_true", help="Assume 'yes' for prompts")
+        g_diag.add_argument(
+            "--yes", action="store_true", help="Assume 'yes' for prompts"
+        )
 
         return parser
 
@@ -438,7 +453,7 @@ class OrchestratorCLI:
         config["model"] = args.model or full_config.get("model", "sonnet")
 
         # --force-import removed; rely on import_conflict_policy in config/strategy
-        
+
         # Parse -S key=value parameters
         if hasattr(args, "strategy_params") and args.strategy_params:
             for param in args.strategy_params:
@@ -500,14 +515,14 @@ class OrchestratorCLI:
         if not repo_path.exists():
             _try(
                 f"repository not found: {repo_path}",
-                ["create repo: git init", f"verify path: {repo_path}"]
+                ["create repo: git init", f"verify path: {repo_path}"],
             )
             return False
 
         if not repo_path.is_dir():
             _try(
                 f"path is not a directory: {repo_path}",
-                ["choose a git repo directory", f"ls -la {repo_path}"]
+                ["choose a git repo directory", f"ls -la {repo_path}"],
             )
             return False
 
@@ -537,7 +552,10 @@ class OrchestratorCLI:
             if result.returncode != 0:
                 _try(
                     f"base branch not found: '{args.base_branch}'",
-                    ["fetch origin: git fetch origin --prune", "list branches: git branch --all"]
+                    [
+                        "fetch origin: git fetch origin --prune",
+                        "list branches: git branch --all",
+                    ],
                 )
                 self.console.print("Available branches:")
                 branches_result = subprocess.run(
@@ -549,16 +567,22 @@ class OrchestratorCLI:
                     self.console.print(branches_result.stdout)
                 return False
         except (subprocess.SubprocessError, OSError) as e:
-            _try("git error: failed to check repository", [str(e), "ensure git is installed"]) 
+            _try(
+                "git error: failed to check repository",
+                [str(e), "ensure git is installed"],
+            )
             return False
 
         # 3b. Check working tree cleanliness (warn only)
         try:
             import subprocess
+
             dirty_cmd = ["git", "-C", str(repo_path), "status", "--porcelain"]
             result = subprocess.run(dirty_cmd, capture_output=True, text=True)
             if result.returncode == 0 and result.stdout.strip():
-                self.console.print("[yellow]Warning: Working tree has uncommitted changes. Proceeding is safe (imports touch refs only).[/yellow]")
+                self.console.print(
+                    "[yellow]Warning: Working tree has uncommitted changes. Proceeding is safe (imports touch refs only).[/yellow]"
+                )
         except (subprocess.SubprocessError, OSError) as e:
             self.console.print(f"[red]Error checking working tree: {e}[/red]")
             return False
@@ -570,7 +594,10 @@ class OrchestratorCLI:
             if free_gb < 20:
                 _try(
                     f"insufficient disk space: {free_gb:.1f}GB free (<20GB)",
-                    ["free space on this volume", "change repo to a disk with more space"]
+                    [
+                        "free space on this volume",
+                        "change repo to a disk with more space",
+                    ],
                 )
                 return False
         except OSError as e:
@@ -640,10 +667,15 @@ class OrchestratorCLI:
         # Interactive confirmation unless --yes
         if not args.yes:
             if not sys.stdout.isatty():
-                self.console.print("[red]Operation requires confirmation. Re-run with --yes.[/red]")
+                self.console.print(
+                    "[red]Operation requires confirmation. Re-run with --yes.[/red]"
+                )
                 # Spec: non-TTY prompts fail with error exit code (1)
                 return 1
-            self.console.print(f"[yellow]About to clean up run {run_id}. Proceed? (y/N)[/yellow] ", end="")
+            self.console.print(
+                f"[yellow]About to clean up run {run_id}. Proceed? (y/N)[/yellow] ",
+                end="",
+            )
             try:
                 choice = input().strip().lower()
             except Exception:
@@ -677,13 +709,17 @@ class OrchestratorCLI:
                     if c_run_id == run_id:
                         try:
                             if args.dry_run:
-                                self.console.print(f"  Would remove container: {container.name}")
+                                self.console.print(
+                                    f"  Would remove container: {container.name}"
+                                )
                             else:
                                 if container.status == "running":
                                     await asyncio.to_thread(container.stop)
                                 await asyncio.to_thread(container.remove)
                                 cleaned += 1
-                                self.console.print(f"  Removed container: {container.name}")
+                                self.console.print(
+                                    f"  Removed container: {container.name}"
+                                )
                         except Exception as e:
                             self.console.print(
                                 f"  [red]Failed to remove {container.name}: {e}[/red]"
@@ -714,9 +750,7 @@ class OrchestratorCLI:
                 self.console.print(f"  Removed results directory: {results_dir.name}")
 
             if args.dry_run:
-                self.console.print(
-                    f"[yellow]Dry run complete for {run_id}[/yellow]"
-                )
+                self.console.print(f"[yellow]Dry run complete for {run_id}[/yellow]")
             else:
                 self.console.print(
                     f"[green]Cleaned up run {run_id} ({cleaned} containers)[/green]"
@@ -729,14 +763,18 @@ class OrchestratorCLI:
         finally:
             await orchestrator.shutdown()
 
-    def _validate_full_config(self, full_config: Dict[str, Any], args: argparse.Namespace) -> bool:
+    def _validate_full_config(
+        self, full_config: Dict[str, Any], args: argparse.Namespace
+    ) -> bool:
         """Validate merged config. Print compact error table when invalid.
 
         Returns True when valid; False otherwise.
         """
         errors: list[tuple[str, str, str]] = []  # field, reason, example
+
         def _add(field: str, reason: str, example: str = ""):
             errors.append((field, reason, example))
+
         try:
             rt = full_config.get("runner", {}).get("timeout")
             if not isinstance(rt, (int, float)) or int(rt) <= 0:
@@ -760,7 +798,9 @@ class OrchestratorCLI:
         except Exception:
             _add("runner.memory_limit", "must be number or '<n>g'", "4g")
         try:
-            egress = str(full_config.get("runner", {}).get("network_egress", "online")).lower()
+            egress = str(
+                full_config.get("runner", {}).get("network_egress", "online")
+            ).lower()
             if egress not in {"online", "offline", "proxy"}:
                 _add("runner.network_egress", "must be online|offline|proxy", "online")
         except Exception:
@@ -778,20 +818,34 @@ class OrchestratorCLI:
         except Exception:
             pass
         try:
-            mpi = full_config.get("orchestration", {}).get("max_parallel_instances", "auto")
+            mpi = full_config.get("orchestration", {}).get(
+                "max_parallel_instances", "auto"
+            )
             if isinstance(mpi, str) and mpi.lower() == "auto":
                 pass
             else:
                 v = int(mpi)
                 if v <= 0:
-                    _add("orchestration.max_parallel_instances", "must be > 0 or 'auto'", "auto")
+                    _add(
+                        "orchestration.max_parallel_instances",
+                        "must be > 0 or 'auto'",
+                        "auto",
+                    )
         except Exception:
-            _add("orchestration.max_parallel_instances", "must be integer or 'auto'", "auto")
+            _add(
+                "orchestration.max_parallel_instances",
+                "must be integer or 'auto'",
+                "auto",
+            )
         # Strategy exists
         try:
             strategy = full_config.get("strategy", args.strategy)
             if strategy not in AVAILABLE_STRATEGIES:
-                _add("strategy", "unknown strategy", ",".join(AVAILABLE_STRATEGIES.keys()))
+                _add(
+                    "strategy",
+                    "unknown strategy",
+                    ",".join(AVAILABLE_STRATEGIES.keys()),
+                )
         except Exception:
             pass
         if errors:
@@ -803,45 +857,13 @@ class OrchestratorCLI:
         return True
 
     async def run_clean_volumes(self, args: argparse.Namespace) -> int:
-        """Clean unreferenced session volumes older than threshold."""
-        if not args.yes:
-            if not sys.stdout.isatty():
-                self.console.print("[red]Operation requires confirmation. Re-run with --yes.[/red]")
-                # Spec: non-TTY prompts fail with error exit code (1)
-                return 1
-            self.console.print(
-                f"[yellow]Remove unreferenced session volumes older than {args.older_than}h? (y/N)[/yellow] ",
-                end="",
-            )
-            try:
-                choice = input().strip().lower()
-            except Exception:
-                choice = "n"
-            if choice not in ("y", "yes"):
-                self.console.print("Aborted.")
-                return 1
+        """Clean up unreferenced session volumes (pitaya_home_*) per age threshold."""
+        self.console.print(
+            "[yellow]Scanning session volumes (pitaya_home_*)...[/yellow]"
+        )
         try:
             from .instance_runner.docker_manager import DockerManager
-            mgr = DockerManager()
-            await mgr.initialize()
-            removed = await mgr.prune_session_volumes(older_than_hours=float(args.older_than), dry_run=bool(args.dry_run))
-            mgr.close()
-            if args.dry_run:
-                self.console.print(f"[yellow]Dry run: would remove {removed} volume(s)[/yellow]")
-            else:
-                self.console.print(f"[green]Removed {removed} volume(s)[/green]")
-            return 0
-        except Exception as e:
-            self.console.print(f"[red]Failed cleaning volumes: {e}[/red]")
-            if args.debug:
-                self.console.print_exception()
-            return 1
 
-    async def run_clean_volumes(self, args: argparse.Namespace) -> int:
-        """Clean up unreferenced session volumes (pitaya_home_*) per age threshold."""
-        self.console.print("[yellow]Scanning session volumes (pitaya_home_*)...[/yellow]")
-        try:
-            from ..instance_runner.docker_manager import DockerManager
             dm = DockerManager()
             await dm.initialize()
             report = await dm.cleanup_unused_volumes(
@@ -856,7 +878,9 @@ class OrchestratorCLI:
             removed = report.get("removed", [])
             errors = report.get("errors", [])
             if args.dry_run:
-                self.console.print(f"[blue]Dry-run[/blue]: would remove {len(removed)} volume(s):")
+                self.console.print(
+                    f"[blue]Dry-run[/blue]: would remove {len(removed)} volume(s):"
+                )
                 for n in removed:
                     self.console.print(f"  - {n}")
             else:
@@ -1085,12 +1109,17 @@ class OrchestratorCLI:
             full_config = merge_config({}, env_config, dotenv_config, {}, defaults)
             logs_dir = full_config.get("logs_dir", Path("./logs"))
             results_dir = Path("./results")
-            events_ret_days = int(full_config.get("events", {}).get("retention_days", 30))
-            events_grace_days = int(full_config.get("events", {}).get("retention_grace_days", 7))
+            events_ret_days = int(
+                full_config.get("events", {}).get("retention_days", 30)
+            )
+            events_grace_days = int(
+                full_config.get("events", {}).get("retention_grace_days", 7)
+            )
             res_ret_days = full_config.get("results", {}).get("retention_days", None)
             dry = bool(getattr(args, "prune_dry_run", False))
             import shutil
             from datetime import datetime, timedelta
+
             now = datetime.utcnow()
             cutoff_events = now - timedelta(days=(events_ret_days + events_grace_days))
 
@@ -1109,18 +1138,24 @@ class OrchestratorCLI:
                             data = json.loads(state_file.read_text())
                             ca = data.get("completed_at")
                             if ca:
-                                completed = datetime.fromisoformat(ca.replace("Z", "+00:00"))
+                                completed = datetime.fromisoformat(
+                                    ca.replace("Z", "+00:00")
+                                )
                         except Exception:
                             pass
                     if not completed:
                         # Fallback to directory mtime
                         try:
-                            completed = datetime.utcfromtimestamp(run_dir.stat().st_mtime)
+                            completed = datetime.utcfromtimestamp(
+                                run_dir.stat().st_mtime
+                            )
                         except Exception:
                             continue
                     if completed < cutoff_events:
                         if dry:
-                            self.console.print(f"[dry-run] Would remove logs: {run_dir}")
+                            self.console.print(
+                                f"[dry-run] Would remove logs: {run_dir}"
+                            )
                         else:
                             shutil.rmtree(run_dir, ignore_errors=True)
                             removed_logs += 1
@@ -1142,7 +1177,9 @@ class OrchestratorCLI:
                             continue
                         if ts < cutoff_results:
                             if dry:
-                                self.console.print(f"[dry-run] Would remove results: {run_dir}")
+                                self.console.print(
+                                    f"[dry-run] Would remove results: {run_dir}"
+                                )
                             else:
                                 shutil.rmtree(run_dir, ignore_errors=True)
                                 removed_results += 1
@@ -1205,7 +1242,6 @@ class OrchestratorCLI:
                 self.console.print(
                     f"[bold]Strategy #{idx} ({strat_info.strategy_name}):[/bold]"
                 )
-
 
                 # Display each instance
                 for result in strat_results:
@@ -1307,7 +1343,9 @@ class OrchestratorCLI:
         # Strategy-level rollup when state is available
         if state and hasattr(state, "strategies") and state.strategies:
             try:
-                strat_states = [getattr(s, "state", "") for s in state.strategies.values()]
+                strat_states = [
+                    getattr(s, "state", "") for s in state.strategies.values()
+                ]
                 strat_success = sum(1 for s in strat_states if s == "completed")
                 strat_canceled = sum(1 for s in strat_states if s == "canceled")
                 strat_failed = sum(1 for s in strat_states if s == "failed")
@@ -1316,7 +1354,9 @@ class OrchestratorCLI:
                 )
                 # Show resume tip when any strategy canceled
                 if strat_canceled > 0:
-                    self.console.print("\n[blue]Run interrupted. To resume this run:[/blue]")
+                    self.console.print(
+                        "\n[blue]Run interrupted. To resume this run:[/blue]"
+                    )
                     self.console.print(f"  pitaya --resume {run_id}")
             except Exception:
                 pass
@@ -1326,7 +1366,11 @@ class OrchestratorCLI:
         total_cost = sum(r.metrics.get("total_cost", 0) for r in results if r.metrics)
         success_count = sum(1 for r in results if r.success)
         int_count = sum(1 for r in results if getattr(r, "status", "") == "canceled")
-        failed_count = sum(1 for r in results if (not r.success and getattr(r, "status", "") != "canceled"))
+        failed_count = sum(
+            1
+            for r in results
+            if (not r.success and getattr(r, "status", "") != "canceled")
+        )
         total_count = len(results)
 
         if total_duration >= 60:
@@ -1382,6 +1426,7 @@ class OrchestratorCLI:
         else:
             timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
             import uuid as _uuid
+
             short8 = _uuid.uuid4().hex[:8]
             run_id = f"run_{timestamp}_{short8}"
 
@@ -1407,11 +1452,20 @@ class OrchestratorCLI:
             # Setup periodic cleanup and size-based rotation for logs
             # Convert configured byte limit to MB for rotation helper
             try:
-                max_bytes = full_config.get("logging", {}).get("max_file_size", 10485760)
-                max_mb = int(max_bytes / (1024 * 1024)) if isinstance(max_bytes, (int, float)) else 100
+                cfg = locals().get("full_config") or {}
+                max_bytes = (cfg.get("logging", {}) or {}).get(
+                    "max_file_size", 10485760
+                )
+                max_mb = (
+                    int(max_bytes / (1024 * 1024))
+                    if isinstance(max_bytes, (int, float))
+                    else 100
+                )
             except Exception:
                 max_mb = 100
-            asyncio.create_task(setup_log_rotation_task(args.logs_dir, max_size_mb=max_mb))
+            asyncio.create_task(
+                setup_log_rotation_task(args.logs_dir, max_size_mb=max_mb)
+            )
         except (OSError, PermissionError) as e:
             logger.warning(f"Failed to setup log rotation: {e}")
 
@@ -1483,9 +1537,16 @@ class OrchestratorCLI:
                 # enforce clean working tree before preflight
                 try:
                     import subprocess as _sp
-                    status = _sp.run(["git", "-C", str(args.repo), "status", "--porcelain"], capture_output=True, text=True)
+
+                    status = _sp.run(
+                        ["git", "-C", str(args.repo), "status", "--porcelain"],
+                        capture_output=True,
+                        text=True,
+                    )
                     if status.returncode == 0 and status.stdout.strip():
-                        self.console.print("[red]Working tree has uncommitted changes. Use --require-clean-wt=false to bypass.[/red]")
+                        self.console.print(
+                            "[red]Working tree has uncommitted changes. Use --require-clean-wt=false to bypass.[/red]"
+                        )
                         return 1
                 except Exception as e:
                     self.console.print(f"[red]Failed checking working tree: {e}[/red]")
@@ -1501,9 +1562,13 @@ class OrchestratorCLI:
         dotenv_config = load_dotenv_config()  # Load .env file separately
         if dotenv_config:
             try:
-                self.console.print("[yellow]Loaded secrets from .env (development convenience). Consider using environment variables in CI.[/yellow]")
+                self.console.print(
+                    "[yellow]Loaded secrets from .env (development convenience). Consider using environment variables in CI.[/yellow]"
+                )
             except Exception:
-                print("Loaded secrets from .env (development convenience). Consider using environment variables in CI.")
+                print(
+                    "Loaded secrets from .env (development convenience). Consider using environment variables in CI."
+                )
         defaults = get_default_config()
 
         # Build CLI config dict from args
@@ -1543,7 +1608,11 @@ class OrchestratorCLI:
         # Merge configurations with proper precedence: CLI > env > .env > project file > global user config > defaults
         global_config = load_global_config()
         full_config = merge_config(
-            cli_config, env_config, dotenv_config, config or {}, merge_config({}, {}, {}, global_config or {}, defaults)
+            cli_config,
+            env_config,
+            dotenv_config,
+            config or {},
+            merge_config({}, {}, {}, global_config or {}, defaults),
         )
         # If both global locations exist, note which one is used
         try:
@@ -1551,7 +1620,9 @@ class OrchestratorCLI:
             preferred = home / ".pitaya" / "config.yaml"
             fallback = home / ".config" / "pitaya" / "config.yaml"
             if preferred.exists() and fallback.exists():
-                self.console.print("[dim]Using ~/.pitaya/config.yaml (XDG fallback ignored).[/dim]")
+                self.console.print(
+                    "[dim]Using ~/.pitaya/config.yaml (XDG fallback ignored).[/dim]"
+                )
         except Exception:
             pass
 
@@ -1559,6 +1630,7 @@ class OrchestratorCLI:
 
         # Print Effective Config header (redacted, truncated)
         try:
+
             def _flatten(d: dict, prefix=""):
                 out = {}
                 for k, v in (d or {}).items():
@@ -1568,6 +1640,7 @@ class OrchestratorCLI:
                     else:
                         out[key] = v
                 return out
+
             # sources
             srcs = {
                 "cli": _flatten(cli_config),
@@ -1578,18 +1651,44 @@ class OrchestratorCLI:
                 "defaults": _flatten(defaults),
             }
             eff = _flatten(full_config)
+
             # redaction
             def _red(k, v):
                 kl = k.lower()
-                if any(s in kl for s in ("token", "key", "secret", "password", "authorization", "cookie")):
+                if any(
+                    s in kl
+                    for s in (
+                        "token",
+                        "key",
+                        "secret",
+                        "password",
+                        "authorization",
+                        "cookie",
+                    )
+                ):
                     return "[REDACTED]"
                 return v
+
             lines = []
             count = 0
             for k in sorted(eff.keys()):
                 v = _red(k, eff[k])
                 # find winning source
-                src = next((name for name in ("cli","env","dotenv","project","global","defaults") if k in srcs[name]), "defaults")
+                src = next(
+                    (
+                        name
+                        for name in (
+                            "cli",
+                            "env",
+                            "dotenv",
+                            "project",
+                            "global",
+                            "defaults",
+                        )
+                        if k in srcs[name]
+                    ),
+                    "defaults",
+                )
                 # unify naming for display
                 disp = src
                 lines.append(f"  {k} = {v}  ({disp})")
@@ -1611,6 +1710,7 @@ class OrchestratorCLI:
         # Optional models.yaml drift note: only when alias missing/mismatch
         try:
             from .utils.model_mapping import load_model_mapping
+
             mapping, checksum = load_model_mapping()
             alias = full_config.get("model")
             if alias:
@@ -1673,7 +1773,9 @@ class OrchestratorCLI:
 
         if not oauth_token and not api_key:
             # Allow non-Anthropic plugins to continue (e.g., Codex with OPENAI_API_KEY)
-            plugin_name = full_config.get("plugin_name") or getattr(args, "plugin", "claude-code")
+            plugin_name = full_config.get("plugin_name") or getattr(
+                args, "plugin", "claude-code"
+            )
             if str(plugin_name) == "claude-code":
                 self.console.print(
                     "[red]Error: Missing credentials for the selected provider.[/red]\n"
@@ -1706,13 +1808,11 @@ class OrchestratorCLI:
             self.console.print("[dim]Configuration loaded from:[/dim]")
             if cli_config:
                 self.console.print("  - Command line arguments")
-        # No Pitaya-specific environment variables are used
+            # No Pitaya-specific environment variables are used
             if dotenv_config:
                 self.console.print("  - .env file")
             if config:
-                self.console.print(
-                    f"  - Config file: {args.config or 'pitaya.yaml'}"
-                )
+                self.console.print(f"  - Config file: {args.config or 'pitaya.yaml'}")
             self.console.print("  - Built-in defaults")
 
         # Respect global session volume consent by setting env for runner
@@ -1743,17 +1843,57 @@ class OrchestratorCLI:
             container_limits=container_limits,
             retry_config=retry_config,
             auth_config=auth_config,
-            snapshot_interval=int(full_config.get("orchestration", {}).get("snapshot_interval", 30)),
-            event_buffer_size=int(full_config.get("orchestration", {}).get("event_buffer_size", 10000)),
-            container_retention_failed_hours=int(full_config.get("orchestration", {}).get("container_retention_failed", 86400) // 3600 if isinstance(full_config.get("orchestration", {}).get("container_retention_failed", 86400), int) else 24),
-            container_retention_success_hours=int(full_config.get("orchestration", {}).get("container_retention_success", 7200) // 3600 if isinstance(full_config.get("orchestration", {}).get("container_retention_success", 7200), int) else 2),
-            runner_timeout_seconds=int(full_config.get("runner", {}).get("timeout", 3600)),
-            default_network_egress=str(full_config.get("runner", {}).get("network_egress", "online")),
-            branch_namespace=str(full_config.get("orchestration", {}).get("branch_namespace", "hierarchical")),
+            snapshot_interval=int(
+                full_config.get("orchestration", {}).get("snapshot_interval", 30)
+            ),
+            event_buffer_size=int(
+                full_config.get("orchestration", {}).get("event_buffer_size", 10000)
+            ),
+            container_retention_failed_hours=int(
+                full_config.get("orchestration", {}).get(
+                    "container_retention_failed", 86400
+                )
+                // 3600
+                if isinstance(
+                    full_config.get("orchestration", {}).get(
+                        "container_retention_failed", 86400
+                    ),
+                    int,
+                )
+                else 24
+            ),
+            container_retention_success_hours=int(
+                full_config.get("orchestration", {}).get(
+                    "container_retention_success", 7200
+                )
+                // 3600
+                if isinstance(
+                    full_config.get("orchestration", {}).get(
+                        "container_retention_success", 7200
+                    ),
+                    int,
+                )
+                else 2
+            ),
+            runner_timeout_seconds=int(
+                full_config.get("runner", {}).get("timeout", 3600)
+            ),
+            default_network_egress=str(
+                full_config.get("runner", {}).get("network_egress", "online")
+            ),
+            branch_namespace=str(
+                full_config.get("orchestration", {}).get(
+                    "branch_namespace", "hierarchical"
+                )
+            ),
             allow_overwrite_protected_refs=allow_overwrite,
             allow_global_session_volume=allow_global_session,
-            default_plugin_name=str(full_config.get("plugin_name", getattr(args, "plugin", "claude-code"))),
-            default_model_alias=str(full_config.get("model", getattr(args, "model", "sonnet"))),
+            default_plugin_name=str(
+                full_config.get("plugin_name", getattr(args, "plugin", "claude-code"))
+            ),
+            default_model_alias=str(
+                full_config.get("model", getattr(args, "model", "sonnet"))
+            ),
             default_docker_image=full_config.get("runner", {}).get("docker_image"),
         )
 
@@ -1761,9 +1901,15 @@ class OrchestratorCLI:
         await self.orchestrator.initialize()
         # Apply custom redaction patterns to event bus, if any
         try:
-            red = full_config.get("logging", {}).get("redaction", {}).get("custom_patterns", [])
+            red = (
+                full_config.get("logging", {})
+                .get("redaction", {})
+                .get("custom_patterns", [])
+            )
             if getattr(self.orchestrator, "event_bus", None):
-                self.orchestrator.event_bus.set_custom_redaction_patterns(red if isinstance(red, list) else [])
+                self.orchestrator.event_bus.set_custom_redaction_patterns(
+                    red if isinstance(red, list) else []
+                )
         except Exception:
             pass
 
@@ -1792,16 +1938,20 @@ class OrchestratorCLI:
             from typing import Set as _Set
 
             def _short8(s: str) -> str:
-                return _hashlib.sha256(s.encode("utf-8", errors="ignore")).hexdigest()[:8]
+                return _hashlib.sha256(s.encode("utf-8", errors="ignore")).hexdigest()[
+                    :8
+                ]
 
             no_emoji = bool(getattr(args, "no_emoji", False))
-            show_full = (getattr(args, "show_ids", "short") == "full")
+            show_full = getattr(args, "show_ids", "short") == "full"
             verbose = bool(getattr(args, "verbose", False))
             # once-per-task offline hint
             _hint_emitted: _Set[str] = set()
 
             def _prefix(ev: dict) -> str:
-                sid = ev.get("strategy_execution_id") or ev.get("data", {}).get("strategy_execution_id")
+                sid = ev.get("strategy_execution_id") or ev.get("data", {}).get(
+                    "strategy_execution_id"
+                )
                 key = ev.get("key") or ev.get("data", {}).get("key")
                 iid = ev.get("instance_id") or ev.get("data", {}).get("instance_id", "")
                 k8 = "????????"
@@ -1850,7 +2000,9 @@ class OrchestratorCLI:
                     print(line)
                 elif et == "task.completed":
                     art = data.get("artifact", {}) or {}
-                    dur = data.get("metrics", {}).get("duration_seconds") or data.get("duration_seconds")
+                    dur = data.get("metrics", {}).get("duration_seconds") or data.get(
+                        "duration_seconds"
+                    )
                     cost = data.get("metrics", {}).get("total_cost")
                     toks = data.get("metrics", {}).get("total_tokens")
                     branch = art.get("branch_final") or art.get("branch_planned")
@@ -1867,7 +2019,9 @@ class OrchestratorCLI:
                     if branch:
                         parts.append(f"branch={branch}")
                     # Truncation path hint
-                    if data.get("final_message_truncated") and data.get("final_message_path"):
+                    if data.get("final_message_truncated") and data.get(
+                        "final_message_path"
+                    ):
                         parts.append(f"final_message={data.get('final_message_path')}")
                     print(" ".join(parts))
                 elif et == "task.failed":
@@ -1875,7 +2029,7 @@ class OrchestratorCLI:
                     msg = (data.get("message") or "").strip().replace("\n", " ")
                     line = f"{pre}{_glyph('failed')} failed type={etype}"
                     if msg:
-                        line += f" message=\"{msg[:200]}\""
+                        line += f' message="{msg[:200]}"'
                     # offline egress hint (once per task)
                     if str(data.get("network_egress")) == "offline":
                         iid = data.get("instance_id") or ""
@@ -1890,12 +2044,19 @@ class OrchestratorCLI:
                     if phase in ("container_created", "branch_imported", "no_changes"):
                         print(f"{pre} phase={phase}")
 
-            for t in ("task.started", "task.completed", "task.failed", "task.interrupted", "task.progress"):
+            for t in (
+                "task.started",
+                "task.completed",
+                "task.failed",
+                "task.interrupted",
+                "task.progress",
+            ):
                 self.orchestrator.subscribe(t, print_event)
         elif output_mode == "json":
             # Stream canonical public events as NDJSON (subscribe BEFORE run/resume)
             def emit_json(ev: dict):
                 print(json.dumps(ev, separators=(",", ":")))
+
             for t in (
                 "task.scheduled",
                 "task.started",
@@ -1970,17 +2131,22 @@ class OrchestratorCLI:
                 if getattr(args, "ci_artifacts", None):
                     await self._create_ci_artifacts(args, run_id)
             except Exception as e:
-                self.console.print(f"[yellow]CI artifacts creation failed: {e}[/yellow]")
+                self.console.print(
+                    f"[yellow]CI artifacts creation failed: {e}[/yellow]"
+                )
 
             # Decide exit code based on failures (spec: 3 = completed with failures)
             exit_code = 0
             try:
                 st = None
-                if self.orchestrator and getattr(self.orchestrator, "state_manager", None):
+                if self.orchestrator and getattr(
+                    self.orchestrator, "state_manager", None
+                ):
                     st = self.orchestrator.state_manager.get_current_state()
                 if st:
                     try:
                         from .shared import InstanceStatus as _IS
+
                         insts = list(st.instances.values())
                         failed_count = sum(1 for i in insts if i.state == _IS.FAILED)
                         if failed_count > 0:
@@ -2030,14 +2196,17 @@ class OrchestratorCLI:
         from pathlib import Path as _P
         import zipfile as _zip
         import hashlib as _hashlib
+
         out_zip = _P(args.ci_artifacts)
         out_zip.parent.mkdir(parents=True, exist_ok=True)
         base_results = _P("./results") / run_id
         tasks_dir = base_results / "tasks"
         tasks_dir.mkdir(parents=True, exist_ok=True)
         events_file = args.logs_dir / run_id / "events.jsonl"
+
         def _short8(s: str) -> str:
             return _hashlib.sha256(s.encode("utf-8", errors="ignore")).hexdigest()[:8]
+
         # Build per-task files from canonical events
         if events_file.exists():
             with open(events_file, "r", encoding="utf-8") as f:
@@ -2055,13 +2224,24 @@ class OrchestratorCLI:
                         continue
                     k8 = _short8(f"{sid}|{key}")
                     payload = ev.get("payload") or {}
+
                     # Redact any secrets by name heuristics
                     def _redact(obj):
                         if isinstance(obj, dict):
                             out = {}
                             for k, v in obj.items():
                                 kl = str(k).lower()
-                                if any(s in kl for s in ("token", "key", "secret", "password", "authorization", "cookie")):
+                                if any(
+                                    s in kl
+                                    for s in (
+                                        "token",
+                                        "key",
+                                        "secret",
+                                        "password",
+                                        "authorization",
+                                        "cookie",
+                                    )
+                                ):
                                     out[k] = "[REDACTED]"
                                 else:
                                     out[k] = _redact(v)
@@ -2069,6 +2249,7 @@ class OrchestratorCLI:
                         if isinstance(obj, list):
                             return [_redact(v) for v in obj]
                         return obj
+
                     data = {
                         "type": t,
                         "run_id": ev.get("run_id"),
@@ -2128,7 +2309,9 @@ class OrchestratorCLI:
         # Apply color scheme
         try:
             scheme = str(full_config.get("tui", {}).get("color_scheme", "default"))
-            if hasattr(self.tui_display, "adaptive_display") and hasattr(self.tui_display.adaptive_display, "set_color_scheme"):
+            if hasattr(self.tui_display, "adaptive_display") and hasattr(
+                self.tui_display.adaptive_display, "set_color_scheme"
+            ):
                 self.tui_display.adaptive_display.set_color_scheme(scheme)
         except Exception:
             pass
@@ -2208,7 +2391,9 @@ class OrchestratorCLI:
             if shutdown_task:
                 tasks.append(shutdown_task)
 
-            done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+            done, pending = await asyncio.wait(
+                tasks, return_when=asyncio.FIRST_COMPLETED
+            )
 
             # Check if shutdown was requested
             shutdown_requested = False
@@ -2267,8 +2452,12 @@ class OrchestratorCLI:
                     instance_list = list(state.instances.values())
                     total_instances = len(instance_list)
                     if _IS:
-                        completed_instances = sum(1 for i in instance_list if i.state == _IS.COMPLETED)
-                        failed_instances = sum(1 for i in instance_list if i.state == _IS.FAILED)
+                        completed_instances = sum(
+                            1 for i in instance_list if i.state == _IS.COMPLETED
+                        )
+                        failed_instances = sum(
+                            1 for i in instance_list if i.state == _IS.FAILED
+                        )
                     else:
                         # Fallback to aggregate counters if type import fails
                         completed_instances = state.completed_instances
@@ -2314,16 +2503,16 @@ class OrchestratorCLI:
                                     formatted_value = "N/A"
                                 else:
                                     formatted_value = str(value)
-                                self.console.print(
-                                    f"      {key}: {formatted_value}"
-                                )
+                                self.console.print(f"      {key}: {formatted_value}")
                         # Display final message if present
                         if r.final_message:
                             # Truncate very long messages
                             message = r.final_message
                             if len(message) > 500:
                                 message = message[:497] + "..."
-                            self.console.print(f"      [dim]final_message:[/dim] {message}")
+                            self.console.print(
+                                f"      [dim]final_message:[/dim] {message}"
+                            )
 
                         # Display metadata if present
                         if r.metadata:
@@ -2332,22 +2521,40 @@ class OrchestratorCLI:
                             if "score" in r.metadata:
                                 metadata_items.append(f"score={r.metadata['score']}")
                             if "complexity" in r.metadata:
-                                metadata_items.append(f"complexity={r.metadata['complexity']}")
+                                metadata_items.append(
+                                    f"complexity={r.metadata['complexity']}"
+                                )
                             if "test_coverage" in r.metadata:
-                                metadata_items.append(f"test_coverage={r.metadata['test_coverage']}%")
+                                metadata_items.append(
+                                    f"test_coverage={r.metadata['test_coverage']}%"
+                                )
                             if "bug_confirmed" in r.metadata:
-                                metadata_items.append(f"bug_confirmed={r.metadata['bug_confirmed']}")
+                                metadata_items.append(
+                                    f"bug_confirmed={r.metadata['bug_confirmed']}"
+                                )
                             if "bug_report_branch" in r.metadata:
-                                metadata_items.append(f"bug_report_branch={r.metadata['bug_report_branch']}")
+                                metadata_items.append(
+                                    f"bug_report_branch={r.metadata['bug_report_branch']}"
+                                )
 
                             # Show any other metadata keys not already displayed
-                            displayed_keys = {"score", "complexity", "test_coverage", "bug_confirmed", "bug_report_branch", "strategy_execution_id", "model"}
+                            displayed_keys = {
+                                "score",
+                                "complexity",
+                                "test_coverage",
+                                "bug_confirmed",
+                                "bug_report_branch",
+                                "strategy_execution_id",
+                                "model",
+                            }
                             for key, value in r.metadata.items():
                                 if key not in displayed_keys:
                                     metadata_items.append(f"{key}={value}")
 
                             if metadata_items:
-                                self.console.print(f"      [dim]metadata:[/dim] {', '.join(metadata_items)}")
+                                self.console.print(
+                                    f"      [dim]metadata:[/dim] {', '.join(metadata_items)}"
+                                )
             else:
                 # Fallback to result-based counting
                 if isinstance(result, list) and result:
@@ -2367,13 +2574,18 @@ class OrchestratorCLI:
                 exit_code = 0
                 if state:
                     from .shared import InstanceStatus as _IS
+
                     instance_list = list(state.instances.values())
-                    failed_instances = sum(1 for i in instance_list if i.state == _IS.FAILED)
+                    failed_instances = sum(
+                        1 for i in instance_list if i.state == _IS.FAILED
+                    )
                     if failed_instances > 0:
                         exit_code = 3
                 else:
                     # Fallback: infer from results list
-                    if isinstance(result, list) and any((not getattr(r, 'success', False)) for r in result):
+                    if isinstance(result, list) and any(
+                        (not getattr(r, "success", False)) for r in result
+                    ):
                         exit_code = 3
             except Exception:
                 exit_code = 0
@@ -2418,7 +2630,9 @@ class OrchestratorCLI:
         # Subcommands: doctor, config print
         if (args.prompt or "").strip().lower() == "doctor":
             return await self.run_doctor(args)
-        if (args.prompt or "").strip().lower() == "config" and (args.subcommand or "").strip().lower() == "print":
+        if (args.prompt or "").strip().lower() == "config" and (
+            args.subcommand or ""
+        ).strip().lower() == "print":
             return await self.run_config_print(args)
         return await self.run_orchestrator(args)
 
@@ -2426,53 +2640,82 @@ class OrchestratorCLI:
         """System checks for environment and config."""
         ok = True
         rows = []  # (status, title, message, tries)
+
         def pass_line(title: str, msg: str = ""):
             rows.append(("✓", title, msg, []))
+
         def fail_line(title: str, msg: str, tries: list[str]):
             nonlocal ok
             ok = False
             rows.append(("✗", title, msg, tries))
+
         def info_line(title: str, msg: str):
             rows.append(("i", title, msg, []))
+
         # Docker
         try:
             from .utils.platform_utils import validate_docker_setup
+
             valid, err = validate_docker_setup()
             if valid:
                 pass_line("docker", "ok")
             else:
-                fail_line("docker", "cannot connect to docker daemon", ["start Docker", "check $DOCKER_HOST", "run: docker info"])
+                fail_line(
+                    "docker",
+                    "cannot connect to docker daemon",
+                    ["start Docker", "check $DOCKER_HOST", "run: docker info"],
+                )
         except Exception as e:
-            fail_line("docker", str(e), ["ensure Docker installed", "run: docker info"]) 
+            fail_line("docker", str(e), ["ensure Docker installed", "run: docker info"])
         # Disk
         try:
             import shutil as _sh
+
             stat = _sh.disk_usage(str(Path.cwd()))
             free_gb = stat.free / (1024**3)
             if free_gb >= 20:
                 pass_line("disk", f"{free_gb:.1f}GB free")
             else:
-                fail_line("disk", f"insufficient disk space: {free_gb:.1f}GB free (<20GB)", ["free space on this volume", "move repo to larger disk"]) 
+                fail_line(
+                    "disk",
+                    f"insufficient disk space: {free_gb:.1f}GB free (<20GB)",
+                    ["free space on this volume", "move repo to larger disk"],
+                )
         except Exception as e:
             info_line("disk", f"could not check: {e}")
         # Repo and base branch
         try:
             repo = args.repo or Path.cwd()
             if not (Path(repo) / ".git").exists():
-                fail_line("repo", f"not a git repo: {repo}", ["git init", "verify path"])
+                fail_line(
+                    "repo", f"not a git repo: {repo}", ["git init", "verify path"]
+                )
             else:
                 import subprocess as _sp
+
                 base = args.base_branch or "main"
-                rc = _sp.run(["git", "-C", str(repo), "rev-parse", "--verify", base], capture_output=True)
+                rc = _sp.run(
+                    ["git", "-C", str(repo), "rev-parse", "--verify", base],
+                    capture_output=True,
+                )
                 if rc.returncode == 0:
                     pass_line("base_branch", base)
                 else:
-                    fail_line("base_branch", f"not found: '{base}'", ["git fetch origin --prune", "verify branch name", "git branch --all"]) 
+                    fail_line(
+                        "base_branch",
+                        f"not found: '{base}'",
+                        [
+                            "git fetch origin --prune",
+                            "verify branch name",
+                            "git branch --all",
+                        ],
+                    )
         except Exception as e:
             info_line("repo", f"check failed: {e}")
         # Temp dir writable
         try:
             from .utils.platform_utils import get_temp_dir
+
             td = get_temp_dir()
             td.mkdir(parents=True, exist_ok=True)
             test = td / "_pitaya_doctor.tmp"
@@ -2480,20 +2723,32 @@ class OrchestratorCLI:
             test.unlink(missing_ok=True)
             pass_line("temp", str(td))
         except Exception as e:
-            fail_line("temp", f"not writable: {e}", ["adjust permissions", "set TMPDIR"]) 
+            fail_line(
+                "temp", f"not writable: {e}", ["adjust permissions", "set TMPDIR"]
+            )
         # Auth
         try:
             env = load_env_config()
             dotenv = load_dotenv_config()
-            if env.get("runner", {}).get("oauth_token") or dotenv.get("runner", {}).get("oauth_token") or env.get("runner", {}).get("api_key") or dotenv.get("runner", {}).get("api_key"):
+            if (
+                env.get("runner", {}).get("oauth_token")
+                or dotenv.get("runner", {}).get("oauth_token")
+                or env.get("runner", {}).get("api_key")
+                or dotenv.get("runner", {}).get("api_key")
+            ):
                 pass_line("auth", "credentials found")
             else:
-                fail_line("auth", "no credentials", ["set CLAUDE_CODE_OAUTH_TOKEN", "or set ANTHROPIC_API_KEY"]) 
+                fail_line(
+                    "auth",
+                    "no credentials",
+                    ["set CLAUDE_CODE_OAUTH_TOKEN", "or set ANTHROPIC_API_KEY"],
+                )
         except Exception:
             pass
         # models.yaml
         try:
             from .utils.model_mapping import load_model_mapping
+
             mapping, cs = load_model_mapping()
             pass_line("models.yaml", f"checksum {cs[:8]}")
         except Exception as e:
@@ -2501,6 +2756,7 @@ class OrchestratorCLI:
         # SELinux / WSL2 hints
         try:
             import platform
+
             if platform.system() == "Linux":
                 info_line("selinux", "if enabled, :z labels will be applied")
         except Exception:
@@ -2508,6 +2764,7 @@ class OrchestratorCLI:
         try:
             from .utils.platform_utils import is_wsl
             import platform
+
             if platform.system() == "Windows" or is_wsl():
                 info_line("wsl2", "place repo in WSL filesystem for performance")
         except Exception:
@@ -2531,15 +2788,36 @@ class OrchestratorCLI:
         defaults = get_default_config()
         global_cfg = load_global_config()
         project_cfg = self._load_config_file(args) or {}
-        merged = merge_config({}, env, dotenv, project_cfg, merge_config({}, {}, {}, global_cfg or {}, defaults))
-        allow_unred = os.environ.get("PITAYA_ALLOW_UNREDACTED") == "1" and str(getattr(args, "redact", "true")).lower() == "false"
+        merged = merge_config(
+            {},
+            env,
+            dotenv,
+            project_cfg,
+            merge_config({}, {}, {}, global_cfg or {}, defaults),
+        )
+        allow_unred = (
+            os.environ.get("PITAYA_ALLOW_UNREDACTED") == "1"
+            and str(getattr(args, "redact", "true")).lower() == "false"
+        )
+
         def _red(k, v):
             if allow_unred:
                 return v
             kl = k.lower()
-            if any(s in kl for s in ("token", "key", "secret", "password", "authorization", "cookie")):
+            if any(
+                s in kl
+                for s in (
+                    "token",
+                    "key",
+                    "secret",
+                    "password",
+                    "authorization",
+                    "cookie",
+                )
+            ):
                 return "[REDACTED]"
             return v
+
         def _flat(d, p=""):
             out = {}
             for k, v in (d or {}).items():
@@ -2549,6 +2827,7 @@ class OrchestratorCLI:
                 else:
                     out[kk] = v
             return out
+
         # Determine source per key
         sources = {
             "env": _flat(env),
@@ -2558,13 +2837,17 @@ class OrchestratorCLI:
             "defaults": _flat(defaults),
         }
         flat = _flat(merged)
+
         def _src_for(k: str) -> str:
             for name in ("env", "dotenv", "project", "global", "defaults"):
                 if k in sources[name]:
                     return name
             return "defaults"
+
         if getattr(args, "json", False):
-            out = {k: {"value": _red(k, v), "source": _src_for(k)} for k, v in flat.items()}
+            out = {
+                k: {"value": _red(k, v), "source": _src_for(k)} for k, v in flat.items()
+            }
             print(json.dumps(out, indent=2, default=str))
             return 0
         for k in sorted(flat.keys()):

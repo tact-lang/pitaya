@@ -75,7 +75,9 @@ class DocReviewStrategy(Strategy):
         repo_path: Path = getattr(ctx._orchestrator, "repo_path", Path.cwd())  # noqa
         pages = _load_pages_file(Path(cfg.pages_file), repo_path)
         if not pages:
-            raise ValueError("pages_file parsed but no pages found; expected list of {title, path}")
+            raise ValueError(
+                "pages_file parsed but no pages found; expected list of {title, path}"
+            )
 
         # Generate unique slugs
         slug_counts: Dict[str, int] = {}
@@ -101,7 +103,9 @@ class DocReviewStrategy(Strategy):
             pass
 
         # Stage 1: reviewers
-        reviewer_handles: List[Tuple[Dict[str, Any], int, Handle]] = []  # (page, r_idx, handle)
+        reviewer_handles: List[Tuple[Dict[str, Any], int, Handle]] = (
+            []
+        )  # (page, r_idx, handle)
         for page in normalized_pages:
             for r_idx in range(1, int(cfg.reviewers_per_page) + 1):
                 report_rel = f"{cfg.report_dir}/raw/REPORT_{page['slug']}__r{r_idx}.md"
@@ -128,12 +132,14 @@ class DocReviewStrategy(Strategy):
             h.instance_id: (pg, idx) for (pg, idx, h) in reviewer_handles
         }
 
-        async def _wait_and_validate(handle: Handle) -> Optional[Tuple[Dict[str, Any], int, Handle, InstanceResult]]:
+        async def _wait_and_validate(
+            handle: Handle,
+        ) -> Optional[Tuple[Dict[str, Any], int, Handle, InstanceResult]]:
             page, r_idx = reviewer_map[handle.instance_id]
             result: InstanceResult
             try:
                 result = await ctx.wait(handle)
-            except Exception as e:
+            except Exception:
                 # Reviewer failed
                 return None
 
@@ -154,7 +160,9 @@ class DocReviewStrategy(Strategy):
                     "base_branch": base_branch,
                     "model": cfg.model,
                 }
-                retry_key = ctx.key("page", page["slug"], f"r{r_idx}", "review", "attempt-2")
+                retry_key = ctx.key(
+                    "page", page["slug"], f"r{r_idx}", "review", "attempt-2"
+                )
                 retry_handle = await ctx.run(retry_task, key=retry_key)
                 try:
                     result = await ctx.wait(retry_handle)
@@ -180,7 +188,9 @@ class DocReviewStrategy(Strategy):
             return (page, r_idx, v_handle, result)
 
         # Kick off waits concurrently
-        wait_tasks = [asyncio.create_task(_wait_and_validate(h)) for (_, _, h) in reviewer_handles]
+        wait_tasks = [
+            asyncio.create_task(_wait_and_validate(h)) for (_, _, h) in reviewer_handles
+        ]
         for coro in asyncio.as_completed(wait_tasks):
             res = await coro
             if res is None:
@@ -191,7 +201,9 @@ class DocReviewStrategy(Strategy):
         # Stage 2: wait for all validators and verify outputs
         validated_reports: List[Tuple[Dict[str, Any], int, InstanceResult]] = []
 
-        async def _await_validator(entry: Tuple[Dict[str, Any], int, Handle]) -> Optional[Tuple[Dict[str, Any], int, InstanceResult]]:
+        async def _await_validator(
+            entry: Tuple[Dict[str, Any], int, Handle],
+        ) -> Optional[Tuple[Dict[str, Any], int, InstanceResult]]:
             page, r_idx, handle = entry
             report_rel = f"{cfg.report_dir}/raw/REPORT_{page['slug']}__r{r_idx}.md"
             try:
@@ -199,10 +211,19 @@ class DocReviewStrategy(Strategy):
             except Exception:
                 # One corrective retry prompting to ensure file commit
                 corrective_prompt = _build_validator_prompt(
-                    page_title=page["title"], page_path=page["path"], report_path=report_rel, corrective=True
+                    page_title=page["title"],
+                    page_path=page["path"],
+                    report_path=report_rel,
+                    corrective=True,
                 )
-                vt = {"prompt": corrective_prompt, "base_branch": base_branch, "model": cfg.model}
-                vkey = ctx.key("page", page["slug"], f"r{r_idx}", "validate", "attempt-2")
+                vt = {
+                    "prompt": corrective_prompt,
+                    "base_branch": base_branch,
+                    "model": cfg.model,
+                }
+                vkey = ctx.key(
+                    "page", page["slug"], f"r{r_idx}", "validate", "attempt-2"
+                )
                 h2 = await ctx.run(vt, key=vkey)
                 try:
                     vres = await ctx.wait(h2)
@@ -299,7 +320,13 @@ def _load_pages_file(p: Path, repo_path: Path) -> List[Dict[str, Any]]:
                     path = str(path_obj.relative_to(repo_path))
                 except Exception:
                     path = str(path_obj)
-            pages.append({"title": title, "path": path, **({"slug": item.get("slug")} if item.get("slug") else {})})
+            pages.append(
+                {
+                    "title": title,
+                    "path": path,
+                    **({"slug": item.get("slug")} if item.get("slug") else {}),
+                }
+            )
     except Exception as e:
         raise ValueError(f"Failed parsing pages_file: {e}")
     return pages
@@ -323,7 +350,9 @@ def _verify_file_in_branch(repo: Path, branch: Optional[str], rel_path: str) -> 
         return False
 
 
-def _read_file_from_branch(repo: Path, branch: Optional[str], rel_path: str) -> Optional[str]:
+def _read_file_from_branch(
+    repo: Path, branch: Optional[str], rel_path: str
+) -> Optional[str]:
     if not branch:
         return None
     try:
@@ -337,7 +366,12 @@ def _read_file_from_branch(repo: Path, branch: Optional[str], rel_path: str) -> 
 
 
 def _build_reviewer_prompt(
-    *, original_prompt: str, page_title: str, page_path: str, report_path: str, corrective: bool = False
+    *,
+    original_prompt: str,
+    page_title: str,
+    page_path: str,
+    report_path: str,
+    corrective: bool = False,
 ) -> str:
     guidance = (
         "You are a meticulous technical documentation reviewer. Analyze ONLY the specified page.\n"
@@ -353,9 +387,13 @@ def _build_reviewer_prompt(
         "Repeat the list item structure for each finding. Do not include any other sections. Do not include frontmatter.\n"
     )
     corrective_text = (
-        "\nIMPORTANT: Your previous attempt did not produce the required report file.\n"
-        "You MUST create the file at the given path and commit it in a single commit.\n"
-    ) if corrective else ""
+        (
+            "\nIMPORTANT: Your previous attempt did not produce the required report file.\n"
+            "You MUST create the file at the given path and commit it in a single commit.\n"
+        )
+        if corrective
+        else ""
+    )
     return (
         f"ORIGINAL REQUEST (context for scope only):\n{original_prompt}\n\n"
         f"PAGE TO REVIEW:\n- Title: {page_title}\n- Path: {page_path}\n\n"
@@ -373,10 +411,16 @@ def _build_reviewer_prompt(
     )
 
 
-def _build_validator_prompt(*, page_title: str, page_path: str, report_path: str, corrective: bool = False) -> str:
+def _build_validator_prompt(
+    *, page_title: str, page_path: str, report_path: str, corrective: bool = False
+) -> str:
     corrective_text = (
-        "\nIMPORTANT: Ensure the report file exists, is well-formed, and commit the refined file.\n"
-    ) if corrective else ""
+        (
+            "\nIMPORTANT: Ensure the report file exists, is well-formed, and commit the refined file.\n"
+        )
+        if corrective
+        else ""
+    )
     return (
         f"VALIDATION TASK:\n"
         f"- Open the report at: {report_path}\n"
@@ -387,7 +431,8 @@ def _build_validator_prompt(*, page_title: str, page_path: str, report_path: str
         "- Refine descriptions to be clear, specific, and actionable.\n"
         "- Keep the exact simple format (checkbox line, link/path line, description paragraph, '---' separators).\n"
         "- Correct any numbering if out of order.\n\n"
-        "Finally: commit the updated report file in a single commit. Do NOT change other files." + corrective_text
+        "Finally: commit the updated report file in a single commit. Do NOT change other files."
+        + corrective_text
     )
 
 

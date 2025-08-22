@@ -211,7 +211,9 @@ class RunState:
                     else None
                 ),
                 interrupted_at=(
-                    datetime.fromisoformat(info_data["interrupted_at"]) if info_data.get("interrupted_at") else None
+                    datetime.fromisoformat(info_data["interrupted_at"])
+                    if info_data.get("interrupted_at")
+                    else None
                 ),
             )
             # Rehydrate minimal result if present
@@ -224,7 +226,10 @@ class RunState:
                         has_changes=bool(r.get("has_changes", False)),
                         metrics=r.get("metrics") or {},
                         session_id=r.get("session_id"),
-                        status=str(r.get("status") or ("success" if r.get("success") else "failed")),
+                        status=str(
+                            r.get("status")
+                            or ("success" if r.get("success") else "failed")
+                        ),
                     )
             except Exception:
                 pass
@@ -255,7 +260,6 @@ class RunState:
             pass
 
         return state
-
 
 
 class StateManager:
@@ -336,7 +340,9 @@ class StateManager:
             logs_snapshot_path = self.event_bus.persist_path.parent / "state.json"
 
         # Step 1: Load snapshot if it exists (prefer logs location per spec)
-        candidate_paths = [p for p in [logs_snapshot_path, snapshot_path] if p is not None]
+        candidate_paths = [
+            p for p in [logs_snapshot_path, snapshot_path] if p is not None
+        ]
         loaded = False
         for path in candidate_paths:
             if path.exists():
@@ -397,7 +403,7 @@ class StateManager:
             try:
                 # Determine which instances have terminal events since last_offset
                 terminal_iids: set[str] = set()
-                for ev in (all_events or []):
+                for ev in all_events or []:
                     et = str(ev.get("type", ""))
                     iid = None
                     if isinstance(ev.get("payload"), dict):
@@ -410,7 +416,10 @@ class StateManager:
                         terminal_iids.add(iid)
 
                 for iid, info in list(self.current_state.instances.items()):
-                    if info.state == InstanceStatus.RUNNING and iid not in terminal_iids:
+                    if (
+                        info.state == InstanceStatus.RUNNING
+                        and iid not in terminal_iids
+                    ):
                         info.state = InstanceStatus.INTERRUPTED
                         info.interrupted_at = datetime.now(timezone.utc)
                         if self.event_bus:
@@ -475,7 +484,9 @@ class StateManager:
 
         asyncio.create_task(self._maybe_snapshot())
 
-    def register_task(self, key: str, fingerprint: str, canonical_input: Optional[str] = None) -> None:
+    def register_task(
+        self, key: str, fingerprint: str, canonical_input: Optional[str] = None
+    ) -> None:
         """Register a durable task fingerprint, enforcing no conflicts.
 
         Stores fingerprint and the normalized input representation when provided.
@@ -484,12 +495,20 @@ class StateManager:
             raise RuntimeError("No active run state")
         existing = self.current_state.tasks.get(key)
         if existing and existing.get("fingerprint") != fingerprint:
-            from ..exceptions import OrchestratorError  # avoid circular import at top-level
+            from ..exceptions import (
+                OrchestratorError,
+            )  # avoid circular import at top-level
+
             try:
                 from ..exceptions import KeyConflictDifferentFingerprint
-                raise KeyConflictDifferentFingerprint(f"KeyConflictDifferentFingerprint for key {key}")
+
+                raise KeyConflictDifferentFingerprint(
+                    f"KeyConflictDifferentFingerprint for key {key}"
+                )
             except Exception:
-                raise OrchestratorError(f"KeyConflictDifferentFingerprint for key {key}")
+                raise OrchestratorError(
+                    f"KeyConflictDifferentFingerprint for key {key}"
+                )
         entry = {"fingerprint": fingerprint}
         if canonical_input is not None:
             entry["input"] = canonical_input
@@ -508,12 +527,19 @@ class StateManager:
         """Record latest strategy.rand sequence and value for a strategy execution."""
         if not self.current_state:
             return
-        self.current_state.strategy_rand[strategy_id] = {"seq": int(seq), "value": float(value)}
+        self.current_state.strategy_rand[strategy_id] = {
+            "seq": int(seq),
+            "value": float(value),
+        }
         if self.event_bus:
             try:
                 self.event_bus.emit(
                     "state.strategy_rand_updated",
-                    {"strategy_id": strategy_id, "seq": int(seq), "value": float(value)},
+                    {
+                        "strategy_id": strategy_id,
+                        "seq": int(seq),
+                        "value": float(value),
+                    },
                 )
             except Exception:
                 pass
@@ -584,7 +610,10 @@ class StateManager:
                 info.session_id = result.session_id
 
             # Idempotent counters: only increment when transitioning from non-terminal
-            if state == InstanceStatus.COMPLETED and old_state != InstanceStatus.COMPLETED:
+            if (
+                state == InstanceStatus.COMPLETED
+                and old_state != InstanceStatus.COMPLETED
+            ):
                 self.current_state.completed_instances += 1
             elif state == InstanceStatus.FAILED and old_state != InstanceStatus.FAILED:
                 self.current_state.failed_instances += 1
@@ -609,7 +638,10 @@ class StateManager:
                 event_data["started_at"] = info.started_at.isoformat()
             elif state == InstanceStatus.INTERRUPTED and info.interrupted_at:
                 event_data["interrupted_at"] = info.interrupted_at.isoformat()
-            elif state in (InstanceStatus.COMPLETED, InstanceStatus.FAILED) and info.completed_at:
+            elif (
+                state in (InstanceStatus.COMPLETED, InstanceStatus.FAILED)
+                and info.completed_at
+            ):
                 event_data["completed_at"] = info.completed_at.isoformat()
                 if result:
                     event_data["branch_name"] = result.branch_name
@@ -628,7 +660,9 @@ class StateManager:
 
         asyncio.create_task(self._maybe_snapshot())
 
-    def update_instance_session_id(self, instance_id: str, session_id: Optional[str]) -> None:
+    def update_instance_session_id(
+        self, instance_id: str, session_id: Optional[str]
+    ) -> None:
         """Update the stored session_id for a running instance."""
         if not self.current_state:
             return
@@ -639,7 +673,12 @@ class StateManager:
         if self.event_bus:
             self.event_bus.emit(
                 "state.instance_updated",
-                {"instance_id": instance_id, "session_id": session_id, "new_state": info.state.value, "old_state": info.state.value},
+                {
+                    "instance_id": instance_id,
+                    "session_id": session_id,
+                    "new_state": info.state.value,
+                    "old_state": info.state.value,
+                },
                 instance_id=instance_id,
             )
 
@@ -661,11 +700,18 @@ class StateManager:
         if self.event_bus:
             self.event_bus.emit(
                 "state.instance_updated",
-                {"instance_id": instance_id, "metadata": info.metadata, "new_state": info.state.value, "old_state": info.state.value},
+                {
+                    "instance_id": instance_id,
+                    "metadata": info.metadata,
+                    "new_state": info.state.value,
+                    "old_state": info.state.value,
+                },
                 instance_id=instance_id,
             )
 
-    def update_instance_container_name(self, instance_id: str, container_name: str) -> None:
+    def update_instance_container_name(
+        self, instance_id: str, container_name: str
+    ) -> None:
         """Update container name for an instance (e.g., fresh resume renaming)."""
         if not self.current_state:
             return
@@ -776,18 +822,27 @@ class StateManager:
             # Normalize aggregate counters from instance map to avoid drift across resumes
             try:
                 from ..shared import InstanceStatus as _IS
+
                 insts = list(self.current_state.instances.values())
                 self.current_state.total_instances = len(insts)
-                self.current_state.completed_instances = sum(1 for i in insts if i.state == _IS.COMPLETED)
-                self.current_state.failed_instances = sum(1 for i in insts if i.state == _IS.FAILED)
+                self.current_state.completed_instances = sum(
+                    1 for i in insts if i.state == _IS.COMPLETED
+                )
+                self.current_state.failed_instances = sum(
+                    1 for i in insts if i.state == _IS.FAILED
+                )
                 # Recompute aggregate cost/tokens from per-instance results for idempotency
                 total_cost = 0.0
                 total_tokens = 0
                 for i in insts:
                     try:
                         if i.result and i.result.metrics:
-                            total_cost += float(i.result.metrics.get("total_cost", 0.0) or 0.0)
-                            total_tokens += int(i.result.metrics.get("total_tokens", 0) or 0)
+                            total_cost += float(
+                                i.result.metrics.get("total_cost", 0.0) or 0.0
+                            )
+                            total_tokens += int(
+                                i.result.metrics.get("total_tokens", 0) or 0
+                            )
                     except Exception:
                         pass
                 self.current_state.total_cost = total_cost
@@ -899,11 +954,17 @@ class StateManager:
 
         event_type = event.get("type")
         # Canonical events carry payload and ts
-        payload = event.get("payload") if isinstance(event.get("payload"), dict) else None
+        payload = (
+            event.get("payload") if isinstance(event.get("payload"), dict) else None
+        )
         data = payload if payload is not None else event.get("data", {})
         ts_str = event.get("ts") or event.get("timestamp")
         try:
-            ts = datetime.fromisoformat(ts_str.replace("Z", "+00:00")) if ts_str else None
+            ts = (
+                datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
+                if ts_str
+                else None
+            )
         except Exception:
             ts = None
 
@@ -994,12 +1055,19 @@ class StateManager:
                 except Exception:
                     pass
                 # Update aggregate metrics
-                if self.current_state.completed_instances is not None and old_state != InstanceStatus.COMPLETED:
+                if (
+                    self.current_state.completed_instances is not None
+                    and old_state != InstanceStatus.COMPLETED
+                ):
                     self.current_state.completed_instances += 1
                 metrics = data.get("metrics", {})
                 try:
-                    self.current_state.total_cost += float(metrics.get("total_cost", 0.0))
-                    self.current_state.total_tokens += int(metrics.get("total_tokens", 0))
+                    self.current_state.total_cost += float(
+                        metrics.get("total_cost", 0.0)
+                    )
+                    self.current_state.total_tokens += int(
+                        metrics.get("total_tokens", 0)
+                    )
                 except Exception:
                     pass
 
@@ -1010,7 +1078,10 @@ class StateManager:
                 old_state = info.state
                 info.state = InstanceStatus.FAILED
                 info.completed_at = ts or datetime.now(timezone.utc)
-                if self.current_state.failed_instances is not None and old_state != InstanceStatus.FAILED:
+                if (
+                    self.current_state.failed_instances is not None
+                    and old_state != InstanceStatus.FAILED
+                ):
                     self.current_state.failed_instances += 1
 
         elif event_type == "task.interrupted":

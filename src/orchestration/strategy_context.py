@@ -5,7 +5,7 @@ This module provides the StrategyContext that strategies use to spawn instances
 and coordinate execution, isolating them from orchestrator implementation details.
 """
 
-from typing import Any, Dict, List, Optional, TYPE_CHECKING, Tuple
+from typing import Any, Dict, List, Optional, TYPE_CHECKING
 import hashlib
 import json
 import time
@@ -80,13 +80,17 @@ class StrategyContext:
         Emits strategy.rand canonical event with {seq, value}.
         """
         self._rng_index += 1
-        h = hashlib.sha256(f"{self._strategy_execution_id}:{self._rng_index}".encode("utf-8")).hexdigest()
+        h = hashlib.sha256(
+            f"{self._strategy_execution_id}:{self._rng_index}".encode("utf-8")
+        ).hexdigest()
         # Take 8 hex bytes -> int -> normalize to [0,1)
         v_int = int(h[:8], 16)
         v = (v_int % 10_000_000) / 10_000_000.0
         self._rng_seq.append(v)
         try:
-            if getattr(self._orchestrator, "event_bus", None) and getattr(self._orchestrator, "state_manager", None):
+            if getattr(self._orchestrator, "event_bus", None) and getattr(
+                self._orchestrator, "state_manager", None
+            ):
                 run_id = self._orchestrator.state_manager.current_state.run_id
                 # Emit canonical event
                 self._orchestrator.event_bus.emit_canonical(
@@ -97,7 +101,9 @@ class StrategyContext:
                 )
                 # Mirror latest seq/value into state snapshot for fast resume
                 try:
-                    self._orchestrator.state_manager.update_strategy_rand(self._strategy_execution_id, self._rng_index, v)
+                    self._orchestrator.state_manager.update_strategy_rand(
+                        self._strategy_execution_id, self._rng_index, v
+                    )
                 except Exception:
                     pass
         except Exception:
@@ -169,7 +175,12 @@ class StrategyContext:
         try:
             if getattr(self._orchestrator, "event_bus", None):
                 self._orchestrator.event_bus.emit(
-                    "strategy.debug", {"op": "run_start", "key": key, "task_keys": sorted(list(task.keys()))}
+                    "strategy.debug",
+                    {
+                        "op": "run_start",
+                        "key": key,
+                        "task_keys": sorted(list(task.keys())),
+                    },
                 )
         except Exception:
             pass
@@ -199,16 +210,36 @@ class StrategyContext:
                 "network_egress": task.get("network_egress", "online"),
                 "max_turns": task.get("max_turns"),
                 # Include container defaults for fingerprint stability
-                "container_cpu": (_task_cpu if _task_cpu is not None else getattr(getattr(self._orchestrator, "container_limits", None), "cpu_count", None)),
+                "container_cpu": (
+                    _task_cpu
+                    if _task_cpu is not None
+                    else getattr(
+                        getattr(self._orchestrator, "container_limits", None),
+                        "cpu_count",
+                        None,
+                    )
+                ),
                 "container_memory": (
-                    f"{int(_task_mem)}g" if isinstance(_task_mem, (int, float)) else (
-                        _task_mem if isinstance(_task_mem, str) else (
-                            f"{getattr(getattr(self._orchestrator, 'container_limits', None), 'memory_gb', 0)}g" if getattr(getattr(self._orchestrator, 'container_limits', None), 'memory_gb', None) is not None else None
+                    f"{int(_task_mem)}g"
+                    if isinstance(_task_mem, (int, float))
+                    else (
+                        _task_mem
+                        if isinstance(_task_mem, str)
+                        else (
+                            f"{getattr(getattr(self._orchestrator, 'container_limits', None), 'memory_gb', 0)}g"
+                            if getattr(
+                                getattr(self._orchestrator, "container_limits", None),
+                                "memory_gb",
+                                None,
+                            )
+                            is not None
+                            else None
                         )
                     )
                 ),
             },
         }
+
         # Drop nulls recursively
         def _drop_nulls(obj):
             if isinstance(obj, dict):
@@ -217,12 +248,19 @@ class StrategyContext:
                 return [_drop_nulls(v) for v in obj if v is not None]
             else:
                 return obj
+
         canonical = _drop_nulls(canonical)
-        encoded = json.dumps(canonical, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+        encoded = json.dumps(
+            canonical, ensure_ascii=False, separators=(",", ":"), sort_keys=True
+        )
         # On resume, prefer previously stored normalized input to avoid drift
         stored_encoded = None
         try:
-            if self._orchestrator and self._orchestrator.state_manager and self._orchestrator.state_manager.current_state:
+            if (
+                self._orchestrator
+                and self._orchestrator.state_manager
+                and self._orchestrator.state_manager.current_state
+            ):
                 stored = self._orchestrator.state_manager.current_state.tasks.get(key)
                 if stored and isinstance(stored.get("input"), str):
                     stored_encoded = stored.get("input")
@@ -233,13 +271,20 @@ class StrategyContext:
 
         # Register task fingerprint
         try:
-            self._orchestrator.state_manager.register_task(key, fingerprint, encoded_to_use)
+            self._orchestrator.state_manager.register_task(
+                key, fingerprint, encoded_to_use
+            )
         except Exception as e:
             # KeyConflictDifferentFingerprint
             if getattr(self._orchestrator, "event_bus", None):
                 self._orchestrator.event_bus.emit(
                     "strategy.debug",
-                    {"op": "key_conflict", "key": key, "fingerprint": fingerprint, "error": str(e)},
+                    {
+                        "op": "key_conflict",
+                        "key": key,
+                        "fingerprint": fingerprint,
+                        "error": str(e),
+                    },
                 )
             raise
 
@@ -274,7 +319,9 @@ class StrategyContext:
         except Exception:
             pass
         # Provide default network_egress from orchestrator when task doesn't set it
-        _default_egress = getattr(self._orchestrator, "default_network_egress", "online")
+        _default_egress = getattr(
+            self._orchestrator, "default_network_egress", "online"
+        )
 
         # Build metadata once (stable across retries)
         _metadata = {
@@ -292,8 +339,16 @@ class StrategyContext:
                 "plugin_name",
                 getattr(self._orchestrator, "default_plugin_name", "claude-code"),
             ),
-            **({"container_cpu": int(_task_cpu)} if isinstance(_task_cpu, (int, float)) else {}),
-            **({"container_memory_gb": int(_task_mem)} if isinstance(_task_mem, (int, float)) else {}),
+            **(
+                {"container_cpu": int(_task_cpu)}
+                if isinstance(_task_cpu, (int, float))
+                else {}
+            ),
+            **(
+                {"container_memory_gb": int(_task_mem)}
+                if isinstance(_task_mem, (int, float))
+                else {}
+            ),
         }
 
         # Orchestration-level scheduling retry policy
@@ -350,7 +405,14 @@ class StrategyContext:
                 # Classify error type against retry_on
                 etype = "unknown"
                 try:
-                    from ..exceptions import DockerError, GitError, TimeoutError, ValidationError, OrchestratorError
+                    from ..exceptions import (
+                        DockerError,
+                        GitError,
+                        TimeoutError,
+                        ValidationError,
+                        OrchestratorError,
+                    )
+
                     if isinstance(e, DockerError):
                         etype = "docker"
                     elif isinstance(e, GitError):
@@ -364,13 +426,17 @@ class StrategyContext:
                         etype = "unknown"
                     # Heuristic: network-related text
                     emsg = str(e).lower()
-                    if any(tok in emsg for tok in ("network", "econnrefused", "timeout")):
+                    if any(
+                        tok in emsg for tok in ("network", "econnrefused", "timeout")
+                    ):
                         etype = "network" if etype not in {"docker", "git"} else etype
                 except Exception:
                     pass
 
                 # Decide to retry or raise
-                should_retry = (attempt < max_attempts) and (not retry_on or etype in retry_on)
+                should_retry = (attempt < max_attempts) and (
+                    not retry_on or etype in retry_on
+                )
                 # Emit debug event
                 try:
                     if getattr(self._orchestrator, "event_bus", None):
@@ -382,7 +448,9 @@ class StrategyContext:
                                 "attempt": attempt + 1,
                                 "max_attempts": max_attempts,
                                 "error_type": etype,
-                                "delay_s": max(0.0, min(delay, max_s) if max_s > 0 else delay),
+                                "delay_s": max(
+                                    0.0, min(delay, max_s) if max_s > 0 else delay
+                                ),
                                 "message": str(e)[:500],
                             },
                         )
@@ -393,6 +461,7 @@ class StrategyContext:
                 # Backoff
                 try:
                     import asyncio as _aio
+
                     sleep_for = delay
                     if max_s > 0 and sleep_for > max_s:
                         sleep_for = max_s
@@ -424,7 +493,9 @@ class StrategyContext:
                 payload={
                     "key": key,
                     "instance_id": instance_id,
-                    "container_name": self._orchestrator.state_manager.current_state.instances[instance_id].container_name,
+                    "container_name": self._orchestrator.state_manager.current_state.instances[
+                        instance_id
+                    ].container_name,
                     "model": model,
                     # Include base_branch so recovery after crashes can reconstruct
                     # a valid workspace target when snapshots lag.
@@ -454,13 +525,20 @@ class StrategyContext:
         if not getattr(r, "success", False):
             try:
                 from ..exceptions import TaskFailed
-                raise TaskFailed(handle.key, getattr(r, "error_type", "unknown") or "unknown", getattr(r, "error", "") or "")
+
+                raise TaskFailed(
+                    handle.key,
+                    getattr(r, "error_type", "unknown") or "unknown",
+                    getattr(r, "error", "") or "",
+                )
             except ImportError:
                 # Fallback to returning the result if exceptions module is unavailable
                 return r
         return r
 
-    async def wait_all(self, handles: List[Handle], tolerate_failures: bool = False) -> Any:
+    async def wait_all(
+        self, handles: List[Handle], tolerate_failures: bool = False
+    ) -> Any:
         ids = [h.instance_id for h in handles]
         gathered = await self._orchestrator.wait_for_instances(ids)
         out = [gathered[i] for i in ids]
@@ -471,7 +549,12 @@ class StrategyContext:
         if any(not getattr(r, "success", False) for r in out):
             try:
                 from ..exceptions import AggregateTaskFailed
-                failed_keys = [h.key for h, r in zip(handles, out) if not getattr(r, "success", False)]
+
+                failed_keys = [
+                    h.key
+                    for h, r in zip(handles, out)
+                    if not getattr(r, "success", False)
+                ]
                 raise AggregateTaskFailed(failed_keys)
             except ImportError:
                 raise RuntimeError("AggregateTaskFailed")

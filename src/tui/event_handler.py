@@ -10,6 +10,13 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, Any, Optional, Callable, TYPE_CHECKING
 import asyncio
+from .models import (
+    TUIState,
+    RunDisplay,
+    StrategyDisplay,
+    InstanceDisplay,
+    InstanceStatus,
+)
 
 # Watchdog is optional; fall back to pure polling when unavailable
 WATCHDOG_AVAILABLE = True
@@ -24,6 +31,7 @@ except Exception:  # ImportError or other
     class FileModifiedEvent:  # type: ignore
         pass
 
+
 if TYPE_CHECKING:
     from watchdog.observers import Observer  # type: ignore
 else:
@@ -32,13 +40,6 @@ else:
     except Exception:
         Observer = None  # type: ignore
 
-from .models import (
-    TUIState,
-    RunDisplay,
-    StrategyDisplay,
-    InstanceDisplay,
-    InstanceStatus,
-)
 
 logger = logging.getLogger(__name__)
 
@@ -57,6 +58,7 @@ class EventProcessor:
         self._event_handlers = self._setup_handlers()
         # Last-N public messages per instance for details pane
         from collections import defaultdict, deque
+
         self._messages = defaultdict(lambda: deque(maxlen=10))
         self._max_messages = 10
 
@@ -67,6 +69,7 @@ class EventProcessor:
             n = 10
         # Rebuild deques with new maxlen
         from collections import deque
+
         new = {}
         for iid, dq in self._messages.items():
             nd = deque(dq, maxlen=n)
@@ -81,6 +84,7 @@ class EventProcessor:
             dq = self._messages.get(iid)
             if dq is None:
                 from collections import deque
+
                 dq = deque(maxlen=self._max_messages)
                 self._messages[iid] = dq
             self._messages[iid].append(text)
@@ -187,10 +191,13 @@ class EventProcessor:
         if handler:
             try:
                 import time
+
                 t0 = time.perf_counter()
                 handler(event)
                 t1 = time.perf_counter()
-                iid = event.get("instance_id") or event.get("data", {}).get("instance_id")
+                iid = event.get("instance_id") or event.get("data", {}).get(
+                    "instance_id"
+                )
                 logger.debug(
                     f"event_processed type={event_type} iid={iid or '-'} dur_ms={(t1 - t0)*1000:.2f}"
                 )
@@ -273,14 +280,22 @@ class EventProcessor:
             # Ensure global run started_at is set ASAP
             try:
                 if self.state.current_run and not self.state.current_run.started_at:
-                    self.state.current_run.started_at = inst.started_at or self._parse_timestamp(event.get("timestamp"))
+                    self.state.current_run.started_at = (
+                        inst.started_at or self._parse_timestamp(event.get("timestamp"))
+                    )
             except Exception:
                 pass
             # Backfill strategy name when available
             sid = event.get("strategy_execution_id")
-            if sid and self.state.current_run and sid in self.state.current_run.strategies:
+            if (
+                sid
+                and self.state.current_run
+                and sid in self.state.current_run.strategies
+            ):
                 sname = self.state.current_run.strategies[sid].strategy_name
-                if sname and (not inst.strategy_name or inst.strategy_name == "unknown"):
+                if sname and (
+                    not inst.strategy_name or inst.strategy_name == "unknown"
+                ):
                     inst.strategy_name = sname
                 strat = self.state.current_run.strategies[sid]
                 if iid not in strat.instance_ids:
@@ -458,7 +473,7 @@ class EventProcessor:
         if etype:
             parts.append(f"type={etype}")
         if msg:
-            parts.append(f"message=\"{msg[:80]}\"")
+            parts.append(f'message="{msg[:80]}"')
         # offline hint
         if str(data.get("network_egress")) == "offline":
             parts.append("hint=egress=offline:set runner.network_egress=online/proxy")
@@ -823,7 +838,10 @@ class EventProcessor:
         strategy_name = data.get("strategy_name")
         if strategy_name:
             for strategy in self.state.current_run.strategies.values():
-                if strategy.strategy_name == strategy_name and instance_id not in strategy.instance_ids:
+                if (
+                    strategy.strategy_name == strategy_name
+                    and instance_id not in strategy.instance_ids
+                ):
                     strategy.instance_ids.append(instance_id)
                     strategy.total_instances += 1
                     break
@@ -1229,7 +1247,9 @@ class AsyncEventStream:
         """Start watching events file for changes."""
 
         if not WATCHDOG_AVAILABLE or Observer is None:
-            logger.info("Watchdog not available; skipping file watcher and using polling only")
+            logger.info(
+                "Watchdog not available; skipping file watcher and using polling only"
+            )
             return
 
         def new_line_callback(line: str):
@@ -1258,7 +1278,9 @@ class AsyncEventStream:
                 f"Started file watcher for {events_file} at position {self._last_position}"
             )
         except Exception as e:
-            logger.warning(f"Failed to start watchdog observer, falling back to polling: {e}")
+            logger.warning(
+                f"Failed to start watchdog observer, falling back to polling: {e}"
+            )
             self._observer = None
 
     async def _polling_loop(self) -> None:
@@ -1305,7 +1327,6 @@ class AsyncEventStream:
 
                     # Use regular file operations instead of aiofiles for more reliable reading
                     try:
-                        import os
                         with open(self._events_file, "rb") as f:
                             # Seek to last position
                             f.seek(self._last_position)
@@ -1333,7 +1354,9 @@ class AsyncEventStream:
                                 )
                             self._last_position = new_position
                             try:
-                                self._bytes_read_total += max(0, new_position - self._last_position)
+                                self._bytes_read_total += max(
+                                    0, new_position - self._last_position
+                                )
                             except Exception:
                                 pass
 
@@ -1364,6 +1387,7 @@ class AsyncEventStream:
             try:
                 # Get event with timeout to check shutdown
                 import time
+
                 t_wait0 = time.perf_counter()
                 line = await asyncio.wait_for(self._event_queue.get(), timeout=1.0)
                 q_after_get = self._event_queue.qsize()
@@ -1373,7 +1397,7 @@ class AsyncEventStream:
                     t_p0 = time.perf_counter()
                     event = json.loads(line)
                     t_p1 = time.perf_counter()
-                    e_type = event.get('type', 'unknown')
+                    e_type = event.get("type", "unknown")
                     self.event_processor.process_event(event)
                     t_h1 = time.perf_counter()
                     self._lines_processed_total += 1

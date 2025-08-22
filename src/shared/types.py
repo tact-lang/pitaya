@@ -49,7 +49,7 @@ class RetryConfig:
         "Cannot connect to the Docker daemon",
         "already in use",  # name conflict
         "409 Client Error",  # explicit status hint
-        "Conflict (\"Conflict.",  # docker's overlap wording
+        'Conflict ("Conflict.',  # docker's overlap wording
     )
     agent_error_patterns: tuple = (
         "rate limit",

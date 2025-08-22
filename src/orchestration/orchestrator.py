@@ -101,6 +101,7 @@ class Orchestrator:
         # Load model mapping checksum for handshake (single-process still validates equality)
         try:
             from ..utils.model_mapping import load_model_mapping
+
             _map, _cs = load_model_mapping()
             self._models_checksum = _cs
         except Exception:
@@ -141,19 +142,25 @@ class Orchestrator:
         self._mem_in_use_gb = 0
         try:
             import os as _os
+
             self._host_cpu = max(1, _os.cpu_count() or 1)
         except Exception:
             self._host_cpu = 1
         try:
             # Total physical memory in GB (best-effort)
             import os as _os
-            if hasattr(_os, 'sysconf'):
-                pages = _os.sysconf('SC_PHYS_PAGES') if hasattr(_os, 'sysconf') else 0
-                page_size = _os.sysconf('SC_PAGE_SIZE') if hasattr(_os, 'sysconf') else 4096
+
+            if hasattr(_os, "sysconf"):
+                pages = _os.sysconf("SC_PHYS_PAGES") if hasattr(_os, "sysconf") else 0
+                page_size = (
+                    _os.sysconf("SC_PAGE_SIZE") if hasattr(_os, "sysconf") else 4096
+                )
                 total_bytes = int(pages) * int(page_size)
             else:
                 total_bytes = 0
-            self._host_mem_gb = max(1, int(total_bytes / (1024**3)) if total_bytes else 8)
+            self._host_mem_gb = max(
+                1, int(total_bytes / (1024**3)) if total_bytes else 8
+            )
         except Exception:
             self._host_mem_gb = 8
         # Fixed sensible defaults (no env overrides)
@@ -162,6 +169,7 @@ class Orchestrator:
         self._pack_max_slope_mib_per_min = 256
         self._retention_max_failed_gb = 0
         from collections import deque as _deque
+
         self._pack_series = _deque(maxlen=64)  # (ts, size_bytes)
 
         # Background tasks
@@ -196,12 +204,15 @@ class Orchestrator:
 
         # Resolve max_parallel_instances (simple adaptive default)
         try:
-            import os, math
+            import os
+            import math
+
             host_cpu = max(1, os.cpu_count() or 1)
             # cgroup-aware effective CPUs (best-effort)
             try:
                 import platform
                 from pathlib import Path as _P
+
                 if platform.system() == "Linux":
                     cpu_max = _P("/sys/fs/cgroup/cpu.max")
                     if cpu_max.exists():
@@ -234,7 +245,9 @@ class Orchestrator:
             # Oversubscription warning
             try:
                 if (int(self.max_parallel_instances) * per_container) > host_cpu:
-                    logger.warning(f"Configured parallelism may oversubscribe CPU: max_parallel_instances={self.max_parallel_instances}, per_container_cpu={per_container}, host_cpu={host_cpu}")
+                    logger.warning(
+                        f"Configured parallelism may oversubscribe CPU: max_parallel_instances={self.max_parallel_instances}, per_container_cpu={per_container}, host_cpu={host_cpu}"
+                    )
             except Exception:
                 pass
         except Exception as e:
@@ -268,8 +281,13 @@ class Orchestrator:
         interrupted_ids: list[str] = []
         if self.state_manager and self.state_manager.current_state:
             try:
-                for instance in list(self.state_manager.current_state.instances.values()):
-                    if instance.state in (InstanceStatus.RUNNING, InstanceStatus.QUEUED):
+                for instance in list(
+                    self.state_manager.current_state.instances.values()
+                ):
+                    if instance.state in (
+                        InstanceStatus.RUNNING,
+                        InstanceStatus.QUEUED,
+                    ):
                         self.state_manager.update_instance_state(
                             instance_id=instance.instance_id,
                             state=InstanceStatus.INTERRUPTED,
@@ -304,7 +322,8 @@ class Orchestrator:
             running_instances = [
                 instance
                 for instance in self.state_manager.current_state.instances.values()
-                if instance.state in (InstanceStatus.RUNNING, InstanceStatus.INTERRUPTED)
+                if instance.state
+                in (InstanceStatus.RUNNING, InstanceStatus.INTERRUPTED)
             ]
 
             if running_instances:
@@ -326,7 +345,9 @@ class Orchestrator:
                             # Use a short timeout to avoid the 10s default wait on PID1 SIGTERM
                             # Fixed fast stop timeout
                             tmo = 1
-                            await docker_mgr.stop_container(container, timeout=max(0, tmo))
+                            await docker_mgr.stop_container(
+                                container, timeout=max(0, tmo)
+                            )
                             logger.info(
                                 f"Stopped container {instance_info.container_name}"
                             )
@@ -351,19 +372,27 @@ class Orchestrator:
         # for each strategy execution that has not yet produced any successful
         # child task, and flush pending events before exit.
         try:
-            if self.state_manager and self.state_manager.current_state and self.event_bus:
-                for sid, strat in list(self.state_manager.current_state.strategies.items()):
+            if (
+                self.state_manager
+                and self.state_manager.current_state
+                and self.event_bus
+            ):
+                for sid, strat in list(
+                    self.state_manager.current_state.strategies.items()
+                ):
                     # Skip strategies already terminal in state
                     if getattr(strat, "state", None) in ("completed", "failed"):
                         continue
                     # Determine if any child instance succeeded
                     any_success = False
                     try:
-                        for iid in (strat.instance_ids or []):
+                        for iid in strat.instance_ids or []:
                             info = self.state_manager.current_state.instances.get(iid)
                             if not info:
                                 continue
-                            if getattr(info, "result", None) and getattr(info.result, "success", False):
+                            if getattr(info, "result", None) and getattr(
+                                info.result, "success", False
+                            ):
                                 any_success = True
                                 break
                     except Exception:
@@ -371,7 +400,9 @@ class Orchestrator:
                     if not any_success:
                         # Update strategy state to a terminal state for snapshot purposes
                         try:
-                            self.state_manager.update_strategy_state(strategy_id=sid, state="failed")
+                            self.state_manager.update_strategy_state(
+                                strategy_id=sid, state="failed"
+                            )
                         except Exception:
                             pass
                         # Emit canonical completion with canceled status and operator reason
@@ -380,7 +411,10 @@ class Orchestrator:
                                 type="strategy.completed",
                                 run_id=self.state_manager.current_state.run_id,
                                 strategy_execution_id=sid,
-                                payload={"status": "canceled", "reason": "operator_interrupt"},
+                                payload={
+                                    "status": "canceled",
+                                    "reason": "operator_interrupt",
+                                },
                             )
                         except Exception:
                             pass
@@ -440,13 +474,18 @@ class Orchestrator:
         if not run_id:
             timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
             import uuid as _uuid
+
             short8 = _uuid.uuid4().hex[:8]
             run_id = f"run_{timestamp}_{short8}"
 
         # Initialize event bus for this run (if not already initialized)
         if not self.event_bus:
             event_log_path = self.logs_dir / run_id / "events.jsonl"
-            self.event_bus = EventBus(max_events=self.event_buffer_size, persist_path=event_log_path, run_id=run_id)
+            self.event_bus = EventBus(
+                max_events=self.event_buffer_size,
+                persist_path=event_log_path,
+                run_id=run_id,
+            )
         else:
             # If event bus exists, update persistence path
             event_log_path = self.logs_dir / run_id / "events.jsonl"
@@ -474,7 +513,16 @@ class Orchestrator:
         await self.state_manager.start_periodic_snapshots()
 
         # Emit run started event
-        self.event_bus.emit("run.started", {"run_id": run_id, "strategy": strategy_name, "prompt": prompt, "repo_path": str(repo_path), "base_branch": base_branch})
+        self.event_bus.emit(
+            "run.started",
+            {
+                "run_id": run_id,
+                "strategy": strategy_name,
+                "prompt": prompt,
+                "repo_path": str(repo_path),
+                "base_branch": base_branch,
+            },
+        )
 
         try:
             # Get strategy class
@@ -506,13 +554,25 @@ class Orchestrator:
                     )
 
                     # Execute strategy
-                    self.event_bus.emit("strategy.started", {"strategy_id": strategy_id, "strategy_name": strategy_name, "config": strategy_config, "run_index": run_idx + 1, "total_runs": runs})
+                    self.event_bus.emit(
+                        "strategy.started",
+                        {
+                            "strategy_id": strategy_id,
+                            "strategy_name": strategy_name,
+                            "config": strategy_config,
+                            "run_index": run_idx + 1,
+                            "total_runs": runs,
+                        },
+                    )
                     # Canonical
                     self.event_bus.emit_canonical(
                         type="strategy.started",
                         run_id=run_id,
                         strategy_execution_id=strategy_id,
-                        payload={"name": strategy_name, "params": strategy_config or {}},
+                        payload={
+                            "name": strategy_name,
+                            "params": strategy_config or {},
+                        },
                     )
 
                     # Create async task for this strategy execution
@@ -543,13 +603,27 @@ class Orchestrator:
                                 results=res,
                             )
 
-                            self.event_bus.emit("strategy.completed", {"strategy_id": strat_id, "result_count": len(res), "branch_names": [r.branch_name for r in res if r.branch_name]})
+                            self.event_bus.emit(
+                                "strategy.completed",
+                                {
+                                    "strategy_id": strat_id,
+                                    "result_count": len(res),
+                                    "branch_names": [
+                                        r.branch_name for r in res if r.branch_name
+                                    ],
+                                },
+                            )
                             # Canonical completion with normative status semantics
-                            any_success = any(getattr(r, "success", False) for r in (res or []))
+                            any_success = any(
+                                getattr(r, "success", False) for r in (res or [])
+                            )
                             # On operator shutdown with no success, classify as canceled
                             if not any_success and self._shutdown:
                                 status = "canceled"
-                                payload = {"status": status, "reason": "operator_interrupt"}
+                                payload = {
+                                    "status": status,
+                                    "reason": "operator_interrupt",
+                                }
                             else:
                                 status = "success" if any_success else "failed"
                                 payload = {"status": status}
@@ -617,7 +691,14 @@ class Orchestrator:
 
                 # Execute strategy
                 logger.info(f"Emitting strategy.started event for {strategy_id}")
-                self.event_bus.emit("strategy.started", {"strategy_id": strategy_id, "strategy_name": strategy_name, "config": strategy_config})
+                self.event_bus.emit(
+                    "strategy.started",
+                    {
+                        "strategy_id": strategy_id,
+                        "strategy_name": strategy_name,
+                        "config": strategy_config,
+                    },
+                )
                 self.event_bus.emit_canonical(
                     type="strategy.started",
                     run_id=run_id,
@@ -651,7 +732,16 @@ class Orchestrator:
                     results=results,
                 )
 
-                self.event_bus.emit("strategy.completed", {"strategy_id": strategy_id, "result_count": len(results), "branch_names": [r.branch_name for r in results if r.branch_name]})
+                self.event_bus.emit(
+                    "strategy.completed",
+                    {
+                        "strategy_id": strategy_id,
+                        "result_count": len(results),
+                        "branch_names": [
+                            r.branch_name for r in results if r.branch_name
+                        ],
+                    },
+                )
                 any_success = any(getattr(r, "success", False) for r in (results or []))
                 if not any_success and self._shutdown:
                     status = "canceled"
@@ -749,29 +839,42 @@ class Orchestrator:
             raise
 
         # Generate instance ID (normative stable 16-hex over JCS-like canonical JSON)
-        import hashlib, json as _json
+        import hashlib
+        import json as _json
+
         def _drop_nulls(o):
             if isinstance(o, dict):
                 return {k: _drop_nulls(v) for k, v in o.items() if v is not None}
             elif isinstance(o, list):
                 return [_drop_nulls(v) for v in o if v is not None]
             return o
+
         def _short16_from(obj: dict) -> str:
-            enc = _json.dumps(_drop_nulls(obj), ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+            enc = _json.dumps(
+                _drop_nulls(obj),
+                ensure_ascii=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            )
             return hashlib.sha256(enc.encode("utf-8")).hexdigest()[:16]
+
         if key:
-            instance_id = _short16_from({
-                "run_id": self.state_manager.current_state.run_id,
-                "strategy_execution_id": strategy_execution_id,
-                "key": key,
-            })
+            instance_id = _short16_from(
+                {
+                    "run_id": self.state_manager.current_state.run_id,
+                    "strategy_execution_id": strategy_execution_id,
+                    "key": key,
+                }
+            )
         else:
             synthetic = f"i:{instance_index}"
-            instance_id = _short16_from({
-                "run_id": self.state_manager.current_state.run_id,
-                "strategy_execution_id": strategy_execution_id,
-                "key": synthetic,
-            })
+            instance_id = _short16_from(
+                {
+                    "run_id": self.state_manager.current_state.run_id,
+                    "strategy_execution_id": strategy_execution_id,
+                    "key": synthetic,
+                }
+            )
 
         # Get strategy execution index from state
         strategy_exec = self.state_manager.current_state.strategies.get(
@@ -797,16 +900,18 @@ class Orchestrator:
         # Strategy segment sanitization: allow only [A-Za-z0-9._-], strip others; fallback to 'unknown'
         try:
             import re as _re
+
             _san = _re.compile(r"[^A-Za-z0-9._-]+")
             _strategy_segment = _san.sub("-", str(strategy_name or "").strip())
             _strategy_segment = _strategy_segment.strip("-/._") or "unknown"
         except Exception:
             _strategy_segment = str(strategy_name or "unknown")
-        import hashlib
         # Use durable key when provided, else derive from instance_id for stability
         durable_key = key or str(instance_id)
         # Namespace durable key by strategy execution to avoid collisions across parallel runs
-        khash = hashlib.sha256(f"{strategy_execution_id}|{durable_key}".encode("utf-8")).hexdigest()[:8]
+        khash = hashlib.sha256(
+            f"{strategy_execution_id}|{durable_key}".encode("utf-8")
+        ).hexdigest()[:8]
         container_name = f"pitaya_{run_id_val}_s{sidx}_k{khash}"
         # Enforce hierarchical namespace per spec with pitaya namespace
         branch_name = f"pitaya/{_strategy_segment}/{run_id_val}/k{khash}"
@@ -848,7 +953,9 @@ class Orchestrator:
             strategy_execution_id
             and strategy_execution_id in self.state_manager.current_state.strategies
         ):
-            inst_list = self.state_manager.current_state.strategies[strategy_execution_id].instance_ids
+            inst_list = self.state_manager.current_state.strategies[
+                strategy_execution_id
+            ].instance_ids
             if instance_id not in inst_list:
                 inst_list.append(instance_id)
 
@@ -875,17 +982,24 @@ class Orchestrator:
                 # Synthesize minimal result if missing (e.g., on resume after reload)
                 if not info.result:
                     from ..shared import InstanceResult as _IR
+
                     info.result = _IR(
                         success=(info.state == InstanceStatus.COMPLETED),
                         branch_name=info.branch_name,
                         has_changes=False,
                         metrics={},
                         session_id=info.session_id,
-                        status=("success" if info.state == InstanceStatus.COMPLETED else "failed"),
+                        status=(
+                            "success"
+                            if info.state == InstanceStatus.COMPLETED
+                            else "failed"
+                        ),
                     )
                 fut.set_result(info.result)
                 self._instance_futures[instance_id] = fut
-                logger.debug(f"spawn_instance: iid={instance_id} already terminal ({info.state.value}); returning completed future")
+                logger.debug(
+                    f"spawn_instance: iid={instance_id} already terminal ({info.state.value}); returning completed future"
+                )
                 # Emit canonical terminal event only if missing, to avoid duplicates on resume
                 try:
                     task_key = (info.metadata or {}).get("key")
@@ -893,11 +1007,19 @@ class Orchestrator:
                         # Detect if a terminal canonical event for this instance is already present
                         seen_terminal = False
                         try:
-                            term_types = {"task.completed", "task.failed", "task.interrupted"}
-                            events, _ = self.event_bus.get_events_since(offset=0, event_types=term_types)
+                            term_types = {
+                                "task.completed",
+                                "task.failed",
+                                "task.interrupted",
+                            }
+                            events, _ = self.event_bus.get_events_since(
+                                offset=0, event_types=term_types
+                            )
                             for ev in events or []:
                                 payload = ev.get("payload") or {}
-                                iid = payload.get("instance_id") or ev.get("instance_id")
+                                iid = payload.get("instance_id") or ev.get(
+                                    "instance_id"
+                                )
                                 if str(iid) == str(instance_id):
                                     seen_terminal = True
                                     break
@@ -905,7 +1027,10 @@ class Orchestrator:
                             seen_terminal = False
                         if not seen_terminal:
                             sid_env = None
-                            for sid, strat in self.state_manager.current_state.strategies.items():
+                            for (
+                                sid,
+                                strat,
+                            ) in self.state_manager.current_state.strategies.items():
                                 if instance_id in strat.instance_ids:
                                     sid_env = sid
                                     break
@@ -915,32 +1040,47 @@ class Orchestrator:
                                     "branch_planned": info.branch_name,
                                     "branch_final": info.result.branch_name,
                                     "base": info.base_branch,
-                                    "commit": getattr(info.result, "commit", None) or "",
-                                    "has_changes": bool(getattr(info.result, "has_changes", False)),
-                                    "duplicate_of_branch": getattr(info.result, "duplicate_of_branch", None),
-                                    "dedupe_reason": getattr(info.result, "dedupe_reason", None),
+                                    "commit": getattr(info.result, "commit", None)
+                                    or "",
+                                    "has_changes": bool(
+                                        getattr(info.result, "has_changes", False)
+                                    ),
+                                    "duplicate_of_branch": getattr(
+                                        info.result, "duplicate_of_branch", None
+                                    ),
+                                    "dedupe_reason": getattr(
+                                        info.result, "dedupe_reason", None
+                                    ),
                                 }
                                 # Final message truncation per spec (backfill path)
-                                import os as _os
                                 try:
                                     max_bytes = 65536
                                 except Exception:
                                     max_bytes = 65536
-                                full_msg = (getattr(info.result, "final_message", None) or "")
+                                full_msg = (
+                                    getattr(info.result, "final_message", None) or ""
+                                )
                                 msg_bytes = full_msg.encode("utf-8", errors="ignore")
                                 truncated_flag = False
                                 rel_path = ""
                                 out_msg = full_msg
                                 if max_bytes > 0 and len(msg_bytes) > max_bytes:
                                     truncated_flag = True
-                                    out_msg = msg_bytes[:max_bytes].decode("utf-8", errors="ignore")
+                                    out_msg = msg_bytes[:max_bytes].decode(
+                                        "utf-8", errors="ignore"
+                                    )
                                     try:
                                         run_id = self.state_manager.current_state.run_id
                                         run_logs = self.logs_dir / run_id
                                         dest_dir = run_logs / "final_messages"
                                         dest_dir.mkdir(parents=True, exist_ok=True)
                                         fname = f"{instance_id}.txt"
-                                        with open(dest_dir / fname, "w", encoding="utf-8", errors="ignore") as fh:
+                                        with open(
+                                            dest_dir / fname,
+                                            "w",
+                                            encoding="utf-8",
+                                            errors="ignore",
+                                        ) as fh:
                                             fh.write(full_msg)
                                         rel_path = f"final_messages/{fname}"
                                     except Exception:
@@ -970,16 +1110,21 @@ class Orchestrator:
                                     payload={
                                         "key": task_key,
                                         "instance_id": instance_id,
-                                        "error_type": info.result.error_type or "unknown",
+                                        "error_type": info.result.error_type
+                                        or "unknown",
                                         "message": info.result.error or "",
                                     },
                                 )
                 except Exception as _e:
-                    logger.debug(f"spawn_instance: terminal backfill emit check failed: {_e}")
+                    logger.debug(
+                        f"spawn_instance: terminal backfill emit check failed: {_e}"
+                    )
             elif info.state == InstanceStatus.INTERRUPTED:
                 # Create a pending future; resume_run will enqueue it if resumable
                 self._instance_futures[instance_id] = asyncio.Future()
-                logger.debug(f"spawn_instance: iid={instance_id} interrupted; pending future created (enqueue deferred to resume)")
+                logger.debug(
+                    f"spawn_instance: iid={instance_id} interrupted; pending future created (enqueue deferred to resume)"
+                )
             else:
                 # QUEUED or RUNNING: create future and ensure it's enqueued
                 future = asyncio.Future()
@@ -989,7 +1134,11 @@ class Orchestrator:
                 await self._instance_queue.put(instance_id)
                 self.event_bus.emit(
                     "instance.queued",
-                    {"instance_id": instance_id, "strategy": strategy_name, "branch_name": branch_name},
+                    {
+                        "instance_id": instance_id,
+                        "strategy": strategy_name,
+                        "branch_name": branch_name,
+                    },
                     instance_id=instance_id,
                 )
                 # Canonical task.scheduled already emitted in StrategyContext.run; no-op here
@@ -1032,7 +1181,10 @@ class Orchestrator:
             try:
                 # Get next instance from queue (with timeout to check shutdown)
                 try:
-                    logger.debug("executor: waiting for instance from queue (qsize=%s)", self._instance_queue.qsize())
+                    logger.debug(
+                        "executor: waiting for instance from queue (qsize=%s)",
+                        self._instance_queue.qsize(),
+                    )
                     instance_id = await asyncio.wait_for(
                         self._instance_queue.get(), timeout=1.0
                     )
@@ -1059,21 +1211,58 @@ class Orchestrator:
                     # Execute instance
                     try:
                         # Admission wait: CPU+memory tokens and disk guard (use per-task overrides when present)
-                        info = self.state_manager.current_state.instances.get(instance_id)
-                        cpu_need = max(1, int((info.metadata or {}).get("container_cpu", self.container_limits.cpu_count))) if info else max(1, int(self.container_limits.cpu_count))
-                        mem_need = max(1, int((info.metadata or {}).get("container_memory_gb", self.container_limits.memory_gb))) if info else max(1, int(self.container_limits.memory_gb))
+                        info = self.state_manager.current_state.instances.get(
+                            instance_id
+                        )
+                        cpu_need = (
+                            max(
+                                1,
+                                int(
+                                    (info.metadata or {}).get(
+                                        "container_cpu", self.container_limits.cpu_count
+                                    )
+                                ),
+                            )
+                            if info
+                            else max(1, int(self.container_limits.cpu_count))
+                        )
+                        mem_need = (
+                            max(
+                                1,
+                                int(
+                                    (info.metadata or {}).get(
+                                        "container_memory_gb",
+                                        self.container_limits.memory_gb,
+                                    )
+                                ),
+                            )
+                            if info
+                            else max(1, int(self.container_limits.memory_gb))
+                        )
                         await self._admission_wait(cpu_need, mem_need)
                         # Emit canonical debug with key
                         try:
-                            info = self.state_manager.current_state.instances.get(instance_id)
+                            info = self.state_manager.current_state.instances.get(
+                                instance_id
+                            )
                             key = (info.metadata or {}).get("key") if info else None
                             if key and self.event_bus:
                                 self.event_bus.emit_canonical(
                                     type="strategy.debug",
                                     run_id=self.state_manager.current_state.run_id,
-                                    strategy_execution_id=next((sid for sid, strat in self.state_manager.current_state.strategies.items() if instance_id in strat.instance_ids), None),
+                                    strategy_execution_id=next(
+                                        (
+                                            sid
+                                            for sid, strat in self.state_manager.current_state.strategies.items()
+                                            if instance_id in strat.instance_ids
+                                        ),
+                                        None,
+                                    ),
                                     key=key,
-                                    payload={"op": "executor_start", "instance_id": instance_id},
+                                    payload={
+                                        "op": "executor_start",
+                                        "instance_id": instance_id,
+                                    },
                                 )
                         except Exception:
                             pass
@@ -1081,9 +1270,35 @@ class Orchestrator:
                     finally:
                         # Release admission tokens
                         try:
-                            info = self.state_manager.current_state.instances.get(instance_id)
-                            cpu_rel = max(1, int((info.metadata or {}).get("container_cpu", self.container_limits.cpu_count))) if info else max(1, int(self.container_limits.cpu_count))
-                            mem_rel = max(1, int((info.metadata or {}).get("container_memory_gb", self.container_limits.memory_gb))) if info else max(1, int(self.container_limits.memory_gb))
+                            info = self.state_manager.current_state.instances.get(
+                                instance_id
+                            )
+                            cpu_rel = (
+                                max(
+                                    1,
+                                    int(
+                                        (info.metadata or {}).get(
+                                            "container_cpu",
+                                            self.container_limits.cpu_count,
+                                        )
+                                    ),
+                                )
+                                if info
+                                else max(1, int(self.container_limits.cpu_count))
+                            )
+                            mem_rel = (
+                                max(
+                                    1,
+                                    int(
+                                        (info.metadata or {}).get(
+                                            "container_memory_gb",
+                                            self.container_limits.memory_gb,
+                                        )
+                                    ),
+                                )
+                                if info
+                                else max(1, int(self.container_limits.memory_gb))
+                            )
                             await self._admission_release(cpu_rel, mem_rel)
                         except Exception:
                             pass
@@ -1097,7 +1312,9 @@ class Orchestrator:
 
     async def _admission_wait(self, cpu_need: int, mem_need_gb: int) -> None:
         """Wait until CPU+memory tokens available and disk guard healthy."""
-        import shutil, time as _time, os as _os
+        import shutil
+        import time as _time
+
         repo_path = getattr(self, "repo_path", Path.cwd())
         pack_dir = repo_path / ".git" / "objects" / "pack"
         start = _time.monotonic()
@@ -1126,14 +1343,20 @@ class Orchestrator:
                         break
                 if oldest:
                     dt_min = max(0.001, (now - oldest[0]) / 60.0)
-                    slope = max(0.0, (size_bytes - oldest[1]) / (1024.0 * 1024.0) / dt_min)
+                    slope = max(
+                        0.0, (size_bytes - oldest[1]) / (1024.0 * 1024.0) / dt_min
+                    )
             except Exception:
                 slope = 0.0
 
             async with self._admission_lock:
                 cpu_ok = (self._cpu_in_use + cpu_need) <= self._host_cpu
-                mem_ok = (self._mem_in_use_gb + mem_need_gb) <= int(self._host_mem_gb * self._mem_guard_pct)
-                disk_ok = (free_gb >= self._disk_min_free_gb) and (slope <= self._pack_max_slope_mib_per_min)
+                mem_ok = (self._mem_in_use_gb + mem_need_gb) <= int(
+                    self._host_mem_gb * self._mem_guard_pct
+                )
+                disk_ok = (free_gb >= self._disk_min_free_gb) and (
+                    slope <= self._pack_max_slope_mib_per_min
+                )
 
                 if cpu_ok and mem_ok and disk_ok:
                     self._cpu_in_use += cpu_need
@@ -1160,25 +1383,39 @@ class Orchestrator:
         async with self._admission_lock:
             self._cpu_in_use = max(0, self._cpu_in_use - cpu)
             self._mem_in_use_gb = max(0, self._mem_in_use_gb - mem_gb)
-            
+
     async def _attempt_on_run_gc(self) -> None:
         """Best-effort GC to free disk by removing oldest failed workspaces for this run.
 
         Removes workspace directories recorded in InstanceResult.workspace_path for FAILED or TIMEOUT results.
         """
         try:
-            import shutil, os
+            import shutil
+            import os
+
             if not self.state_manager or not self.state_manager.current_state:
                 return
             items = []
             for iid, info in self.state_manager.current_state.instances.items():
                 try:
                     if info.state.value in ("failed", "interrupted"):
-                        wp = getattr(getattr(info, "result", None), "workspace_path", None)
+                        wp = getattr(
+                            getattr(info, "result", None), "workspace_path", None
+                        )
                         if wp and os.path.isdir(wp):
-                            ts = info.completed_at or info.interrupted_at or info.created_at
+                            ts = (
+                                info.completed_at
+                                or info.interrupted_at
+                                or info.created_at
+                            )
                             try:
-                                size = sum((os.path.getsize(os.path.join(root, f)) for root, _, files in os.walk(wp) for f in files))
+                                size = sum(
+                                    (
+                                        os.path.getsize(os.path.join(root, f))
+                                        for root, _, files in os.walk(wp)
+                                        for f in files
+                                    )
+                                )
                             except Exception:
                                 size = 0
                             items.append((ts, wp, iid, size))
@@ -1201,9 +1438,18 @@ class Orchestrator:
                         try:
                             shutil.rmtree(wp, ignore_errors=True)
                             total -= sz
-                            if iid in self.state_manager.current_state.instances and self.state_manager.current_state.instances[iid].result:
-                                self.state_manager.current_state.instances[iid].result.workspace_path = None
-                            logger.info(f"on-run GC (cap): removed failed workspace {wp}")
+                            if (
+                                iid in self.state_manager.current_state.instances
+                                and self.state_manager.current_state.instances[
+                                    iid
+                                ].result
+                            ):
+                                self.state_manager.current_state.instances[
+                                    iid
+                                ].result.workspace_path = None
+                            logger.info(
+                                f"on-run GC (cap): removed failed workspace {wp}"
+                            )
                         except Exception as e:
                             logger.debug(f"on-run GC (cap): failed to remove {wp}: {e}")
                         if total <= cap_bytes:
@@ -1215,8 +1461,13 @@ class Orchestrator:
                 try:
                     shutil.rmtree(wp, ignore_errors=True)
                     # Clear reference to avoid re-deleting
-                    if iid in self.state_manager.current_state.instances and self.state_manager.current_state.instances[iid].result:
-                        self.state_manager.current_state.instances[iid].result.workspace_path = None
+                    if (
+                        iid in self.state_manager.current_state.instances
+                        and self.state_manager.current_state.instances[iid].result
+                    ):
+                        self.state_manager.current_state.instances[
+                            iid
+                        ].result.workspace_path = None
                     removed += 1
                     logger.info(f"on-run GC: removed failed workspace {wp}")
                 except Exception as e:
@@ -1226,6 +1477,7 @@ class Orchestrator:
                     break
         except Exception:
             pass
+
     async def _execute_instance(self, instance_id: str) -> None:
         """Execute a single instance."""
         info = self.state_manager.current_state.instances.get(instance_id)
@@ -1239,16 +1491,34 @@ class Orchestrator:
             state=InstanceStatus.RUNNING,
         )
         # Note: canonical task.started is emitted below with full payload (container_name/model)
-        logger.debug(f"_execute_instance: iid={instance_id} -> RUNNING model={(info.metadata or {}).get('model','-')} key={(info.metadata or {}).get('key','-')}")
+        logger.debug(
+            f"_execute_instance: iid={instance_id} -> RUNNING model={(info.metadata or {}).get('model','-')} key={(info.metadata or {}).get('key','-')}"
+        )
 
         # Emit instance.started event for TUI and canonical mapping when key available
-        self.event_bus.emit("instance.started", {"strategy": info.strategy_name, "prompt": info.prompt, "model": info.metadata.get("model", "sonnet"), "branch_name": info.branch_name}, instance_id=instance_id)
+        self.event_bus.emit(
+            "instance.started",
+            {
+                "strategy": info.strategy_name,
+                "prompt": info.prompt,
+                "model": info.metadata.get("model", "sonnet"),
+                "branch_name": info.branch_name,
+            },
+            instance_id=instance_id,
+        )
         task_key = (info.metadata or {}).get("key")
         if task_key:
             self.event_bus.emit_canonical(
                 type="task.started",
                 run_id=self.state_manager.current_state.run_id,
-                strategy_execution_id=next((sid for sid, strat in self.state_manager.current_state.strategies.items() if instance_id in strat.instance_ids), None),
+                strategy_execution_id=next(
+                    (
+                        sid
+                        for sid, strat in self.state_manager.current_state.strategies.items()
+                        if instance_id in strat.instance_ids
+                    ),
+                    None,
+                ),
                 key=task_key,
                 payload={
                     "key": task_key,
@@ -1260,6 +1530,7 @@ class Orchestrator:
 
         # Create event callback (forward and capture session_id for resume)
         last_active_write = {"t": 0.0}
+
         def event_callback(event: Dict[str, Any]) -> None:
             data = event.get("data", {})
             sid = data.get("session_id")
@@ -1281,11 +1552,14 @@ class Orchestrator:
                 cid = self._inst_container_id.get(instance_id)
                 if cid:
                     import time as _time
+
                     now = _time.time()
                     if (now - last_active_write["t"]) >= 0.5:
                         last_active_write["t"] = now
+
                         def _write_last_active():
                             from pathlib import Path as _P
+
                             p = _P(f"/tmp/pitaya_status/{cid}.active")
                             try:
                                 p.parent.mkdir(parents=True, exist_ok=True)
@@ -1295,6 +1569,7 @@ class Orchestrator:
                                 p.write_text(datetime.now(timezone.utc).isoformat())
                             except Exception:
                                 pass
+
                         try:
                             loop = asyncio.get_running_loop()
                             loop.run_in_executor(None, _write_last_active)
@@ -1321,10 +1596,18 @@ class Orchestrator:
                 # Workspace and container phases
                 if et == "instance.workspace_preparing":
                     phase, activity = "workspace_preparing", "Preparing workspace..."
-                elif et in ("instance.container_creating", "instance.container_create_call", "instance.container_create_attempt", "instance.container_image_check"):
+                elif et in (
+                    "instance.container_creating",
+                    "instance.container_create_call",
+                    "instance.container_create_attempt",
+                    "instance.container_image_check",
+                ):
                     phase, activity = "container_creating", "Creating container..."
                 elif et == "instance.container_env_preparing":
-                    phase, activity = "container_env_preparing", "Preparing container env..."
+                    phase, activity = (
+                        "container_env_preparing",
+                        "Preparing container env...",
+                    )
                 elif et == "instance.container_env_prepared":
                     phase, activity = "container_env_prepared", "Container env ready"
                 elif et == "instance.container_created":
@@ -1337,14 +1620,19 @@ class Orchestrator:
                 elif et == "instance.result_collection_started":
                     phase, activity = "result_collection", "Collecting results..."
                 elif et == "instance.branch_imported":
-                    phase, activity = "branch_imported", f"Imported branch {data.get('branch_name','')}"
+                    phase, activity = (
+                        "branch_imported",
+                        f"Imported branch {data.get('branch_name','')}",
+                    )
                 elif et == "instance.no_changes":
                     phase, activity = "no_changes", "No changes"
                 elif et == "instance.workspace_cleaned":
                     phase, activity = "cleanup", "Workspace cleaned"
                 # Agent tool and message events
                 elif et == "instance.agent_tool_use":
-                    phase, tool = "tool_use", (data.get("tool") or data.get("data", {}).get("tool"))
+                    phase, tool = "tool_use", (
+                        data.get("tool") or data.get("data", {}).get("tool")
+                    )
                     activity = f"Using {tool}" if tool else "Tool use"
                 elif et == "instance.agent_assistant":
                     phase, activity = "assistant", "Agent is thinking..."
@@ -1355,7 +1643,14 @@ class Orchestrator:
                     self.event_bus.emit_canonical(
                         type="task.progress",
                         run_id=self.state_manager.current_state.run_id,
-                        strategy_execution_id=next((sid for sid, strat in self.state_manager.current_state.strategies.items() if instance_id in strat.instance_ids), None),
+                        strategy_execution_id=next(
+                            (
+                                sid
+                                for sid, strat in self.state_manager.current_state.strategies.items()
+                                if instance_id in strat.instance_ids
+                            ),
+                            None,
+                        ),
                         key=task_key,
                         payload={
                             "key": task_key,
@@ -1372,7 +1667,9 @@ class Orchestrator:
         heartbeat_task: Optional[asyncio.Task] = None
         try:
             if self.event_bus:
-                heartbeat_task = asyncio.create_task(self._heartbeat_monitor(instance_id))
+                heartbeat_task = asyncio.create_task(
+                    self._heartbeat_monitor(instance_id)
+                )
             # Extract strategy execution ID from instance metadata
             strategy_execution_id = None
             for sid, strat in self.state_manager.current_state.strategies.items():
@@ -1381,10 +1678,26 @@ class Orchestrator:
                     break
 
             # Run the instance
-            logger.info(f"_execute_instance: starting run_instance iid={instance_id} container={info.container_name}")
+            logger.info(
+                f"_execute_instance: starting run_instance iid={instance_id} container={info.container_name}"
+            )
             # Effective per-task container limits
-            eff_cpu = max(1, int((info.metadata or {}).get("container_cpu", self.container_limits.cpu_count)))
-            eff_mem = max(1, int((info.metadata or {}).get("container_memory_gb", self.container_limits.memory_gb)))
+            eff_cpu = max(
+                1,
+                int(
+                    (info.metadata or {}).get(
+                        "container_cpu", self.container_limits.cpu_count
+                    )
+                ),
+            )
+            eff_mem = max(
+                1,
+                int(
+                    (info.metadata or {}).get(
+                        "container_memory_gb", self.container_limits.memory_gb
+                    )
+                ),
+            )
             # When resuming, pass a simple continuation prompt to the agent
             op_resume = bool((info.metadata or {}).get("operator_resume", False))
             effective_prompt = "Continue" if op_resume else info.prompt
@@ -1399,26 +1712,39 @@ class Orchestrator:
                 task_key=task_key,
                 container_name=info.container_name,
                 model=info.metadata.get("model", "sonnet"),
-                session_id=(info.session_id or (info.metadata or {}).get("resume_session_id")),
+                session_id=(
+                    info.session_id or (info.metadata or {}).get("resume_session_id")
+                ),
                 operator_resume=op_resume,
                 event_callback=event_callback,
                 timeout_seconds=self.runner_timeout_seconds,
-                container_limits=ContainerLimits(cpu_count=eff_cpu, memory_gb=eff_mem, memory_swap_gb=eff_mem),
+                container_limits=ContainerLimits(
+                    cpu_count=eff_cpu, memory_gb=eff_mem, memory_swap_gb=eff_mem
+                ),
                 auth_config=self.auth_config,
                 retry_config=self.retry_config,
                 plugin_name=(info.metadata or {}).get("plugin_name", "claude-code"),
-                docker_image=(info.metadata or {}).get("docker_image") or self.default_docker_image,
+                docker_image=(info.metadata or {}).get("docker_image")
+                or self.default_docker_image,
                 import_policy=(info.metadata or {}).get("import_policy", "auto"),
-                import_conflict_policy=(info.metadata or {}).get("import_conflict_policy", "fail"),
-                skip_empty_import=bool((info.metadata or {}).get("skip_empty_import", True)),
+                import_conflict_policy=(info.metadata or {}).get(
+                    "import_conflict_policy", "fail"
+                ),
+                skip_empty_import=bool(
+                    (info.metadata or {}).get("skip_empty_import", True)
+                ),
                 network_egress=(info.metadata or {}).get("network_egress"),
                 max_turns=(info.metadata or {}).get("max_turns"),
-                reuse_container=bool((info.metadata or {}).get("reuse_container", True)),
+                reuse_container=bool(
+                    (info.metadata or {}).get("reuse_container", True)
+                ),
                 model_mapping_checksum=self._models_checksum,
                 allow_overwrite_protected_refs=self.allow_overwrite_protected_refs,
                 allow_global_session_volume=self.allow_global_session_volume,
             )
-            logger.info(f"_execute_instance: run_instance finished iid={instance_id} success={result.success} status={getattr(result,'status',None)}")
+            logger.info(
+                f"_execute_instance: run_instance finished iid={instance_id} success={result.success} status={getattr(result,'status',None)}"
+            )
 
             # Populate strategy-specific metadata on the result per spec
             try:
@@ -1434,7 +1760,10 @@ class Orchestrator:
             if result.success:
                 new_state = InstanceStatus.COMPLETED
             else:
-                if getattr(result, "status", None) == "canceled" or getattr(result, "error_type", None) == "canceled":
+                if (
+                    getattr(result, "status", None) == "canceled"
+                    or getattr(result, "error_type", None) == "canceled"
+                ):
                     new_state = InstanceStatus.INTERRUPTED
                 else:
                     new_state = InstanceStatus.FAILED
@@ -1444,7 +1773,9 @@ class Orchestrator:
                 state=new_state,
                 result=result,
             )
-            logger.debug(f"_execute_instance: iid={instance_id} terminal={new_state.value}")
+            logger.debug(
+                f"_execute_instance: iid={instance_id} terminal={new_state.value}"
+            )
 
             # Emit canonical terminal events when key is present
             if task_key:
@@ -1456,11 +1787,12 @@ class Orchestrator:
                         "base": info.base_branch,
                         "commit": getattr(result, "commit", None) or "",
                         "has_changes": result.has_changes,
-                        "duplicate_of_branch": getattr(result, "duplicate_of_branch", None),
+                        "duplicate_of_branch": getattr(
+                            result, "duplicate_of_branch", None
+                        ),
                         "dedupe_reason": getattr(result, "dedupe_reason", None),
                     }
                     # Final message truncation per spec
-                    import os as _os
                     try:
                         max_bytes = 65536
                     except Exception:
@@ -1480,13 +1812,17 @@ class Orchestrator:
                             dest_dir = run_logs / "final_messages"
                             dest_dir.mkdir(parents=True, exist_ok=True)
                             fname = f"{instance_id}.txt"
-                            with open(dest_dir / fname, "w", encoding="utf-8", errors="ignore") as fh:
+                            with open(
+                                dest_dir / fname, "w", encoding="utf-8", errors="ignore"
+                            ) as fh:
                                 fh.write(full_msg)
                             rel_path = f"final_messages/{fname}"
                         except Exception:
                             truncated_flag = False
                             rel_path = ""
-                    logger.debug(f"emit task.completed key={task_key} iid={instance_id} branch={result.branch_name} has_changes={result.has_changes}")
+                    logger.debug(
+                        f"emit task.completed key={task_key} iid={instance_id} branch={result.branch_name} has_changes={result.has_changes}"
+                    )
                     self.event_bus.emit_canonical(
                         type="task.completed",
                         run_id=self.state_manager.current_state.run_id,
@@ -1503,7 +1839,9 @@ class Orchestrator:
                         },
                     )
                 elif new_state != InstanceStatus.INTERRUPTED:
-                    logger.debug(f"emit task.failed key={task_key} iid={instance_id} err={result.error_type}:{result.error}")
+                    logger.debug(
+                        f"emit task.failed key={task_key} iid={instance_id} err={result.error_type}:{result.error}"
+                    )
                     # Map internal error types to the spec's closed set
                     _map = {
                         "docker": "docker",
@@ -1518,10 +1856,29 @@ class Orchestrator:
                         "unexpected": "unknown",
                     }
                     etype = (result.error_type or "unknown").lower()
-                    mapped_type = _map.get(etype, etype if etype in {"docker","api","network","git","timeout","session_corrupted","auth","unknown"} else "unknown")
+                    mapped_type = _map.get(
+                        etype,
+                        (
+                            etype
+                            if etype
+                            in {
+                                "docker",
+                                "api",
+                                "network",
+                                "git",
+                                "timeout",
+                                "session_corrupted",
+                                "auth",
+                                "unknown",
+                            }
+                            else "unknown"
+                        ),
+                    )
                     # Offline egress failures → classify as network per spec
                     try:
-                        if (info.metadata or {}).get("network_egress") == "offline" and mapped_type != "canceled":
+                        if (info.metadata or {}).get(
+                            "network_egress"
+                        ) == "offline" and mapped_type != "canceled":
                             mapped_type = "network"
                     except Exception:
                         pass
@@ -1535,7 +1892,9 @@ class Orchestrator:
                             "instance_id": instance_id,
                             "error_type": mapped_type,
                             "message": result.error or "",
-                            "network_egress": (info.metadata or {}).get("network_egress"),
+                            "network_egress": (info.metadata or {}).get(
+                                "network_egress"
+                            ),
                         },
                     )
                 else:
@@ -1548,7 +1907,9 @@ class Orchestrator:
 
         except asyncio.CancelledError:
             # Treat orchestrator-initiated cancellation as interruption, not failure
-            logger.info(f"Instance {instance_id} canceled by shutdown; marking interrupted")
+            logger.info(
+                f"Instance {instance_id} canceled by shutdown; marking interrupted"
+            )
             interrupt_result = InstanceResult(
                 success=False,
                 error="canceled",
@@ -1564,7 +1925,9 @@ class Orchestrator:
         except (DockerError, GitError, OrchestratorError) as e:
             # If shutdown in progress, classify as interrupted rather than failed
             if getattr(self, "_shutdown", False):
-                logger.info(f"Instance {instance_id} canceled during shutdown (init/runner error): {e}")
+                logger.info(
+                    f"Instance {instance_id} canceled during shutdown (init/runner error): {e}"
+                )
                 interrupt_result = InstanceResult(
                     success=False,
                     error="canceled",
@@ -1593,7 +1956,9 @@ class Orchestrator:
         except Exception as e:
             # Catch-all; treat as interrupted when shutting down to avoid misclassifying user cancels as failures
             if getattr(self, "_shutdown", False):
-                logger.info(f"Instance {instance_id} canceled during shutdown (unexpected error): {e}")
+                logger.info(
+                    f"Instance {instance_id} canceled during shutdown (unexpected error): {e}"
+                )
                 interrupt_result = InstanceResult(
                     success=False,
                     error="canceled",
@@ -1607,7 +1972,9 @@ class Orchestrator:
                 )
                 self._instance_futures[instance_id].set_result(interrupt_result)
             else:
-                logger.exception(f"Instance {instance_id} crashed with unexpected error: {e}")
+                logger.exception(
+                    f"Instance {instance_id} crashed with unexpected error: {e}"
+                )
                 error_result = InstanceResult(
                     success=False,
                     error=str(e),
@@ -1649,7 +2016,9 @@ class Orchestrator:
                         f"Heartbeat: instance {instance_id} last_event={last_type} at {last_ts}"
                     )
                 else:
-                    logger.debug(f"Heartbeat: instance {instance_id} awaiting first event")
+                    logger.debug(
+                        f"Heartbeat: instance {instance_id} awaiting first event"
+                    )
 
                 await asyncio.sleep(interval)
         except asyncio.CancelledError:
@@ -1771,7 +2140,9 @@ class Orchestrator:
         # Ensure event bus is configured to this run's events file
         event_log_path = self.logs_dir / run_id / "events.jsonl"
         if not self.event_bus:
-            self.event_bus = EventBus(max_events=self.event_buffer_size, persist_path=event_log_path)
+            self.event_bus = EventBus(
+                max_events=self.event_buffer_size, persist_path=event_log_path
+            )
         else:
             # Repoint persist path to this run
             self.event_bus.persist_path = event_log_path
@@ -1789,11 +2160,19 @@ class Orchestrator:
             pass
         try:
             # Log instance state counts for diagnostics
-            counts = {"queued":0, "running":0, "interrupted":0, "completed":0, "failed":0}
+            counts = {
+                "queued": 0,
+                "running": 0,
+                "interrupted": 0,
+                "completed": 0,
+                "failed": 0,
+            }
             for iid, info in self.state_manager.current_state.instances.items():
                 k = info.state.value
-                counts[k] = counts.get(k,0)+1
-            logger.info(f"resume_run: instances total={len(self.state_manager.current_state.instances)} counts={counts}")
+                counts[k] = counts.get(k, 0) + 1
+            logger.info(
+                f"resume_run: instances total={len(self.state_manager.current_state.instances)} counts={counts}"
+            )
         except Exception:
             pass
 
@@ -1803,7 +2182,9 @@ class Orchestrator:
             term_types = {"task.completed", "task.failed", "task.interrupted"}
             seen_terminals: set[str] = set()
             try:
-                events, _ = self.event_bus.get_events_since(offset=0, event_types=term_types)
+                events, _ = self.event_bus.get_events_since(
+                    offset=0, event_types=term_types
+                )
             except Exception:
                 events = []
             for ev in events or []:
@@ -1824,7 +2205,10 @@ class Orchestrator:
                         continue
                     # Find strategy execution id for envelope
                     strategy_execution_id = None
-                    for sid, strat in self.state_manager.current_state.strategies.items():
+                    for (
+                        sid,
+                        strat,
+                    ) in self.state_manager.current_state.strategies.items():
                         if iid in strat.instance_ids:
                             strategy_execution_id = sid
                             break
@@ -1839,30 +2223,40 @@ class Orchestrator:
                             "base": info.base_branch,
                             "commit": getattr(res, "commit", None) or "",
                             "has_changes": bool(res.has_changes),
-                            "duplicate_of_branch": getattr(res, "duplicate_of_branch", None),
+                            "duplicate_of_branch": getattr(
+                                res, "duplicate_of_branch", None
+                            ),
                             "dedupe_reason": getattr(res, "dedupe_reason", None),
                         }
-                        logger.debug(f"backfill: task.completed iid={iid} key={task_key}")
+                        logger.debug(
+                            f"backfill: task.completed iid={iid} key={task_key}"
+                        )
                         # Final message truncation per spec (resume-run backfill)
-                        import os as _os
                         try:
                             max_bytes = 65536
                         except Exception:
                             max_bytes = 65536
-                        full_msg = (getattr(res, "final_message", None) or "")
+                        full_msg = getattr(res, "final_message", None) or ""
                         msg_bytes = full_msg.encode("utf-8", errors="ignore")
                         truncated_flag = False
                         rel_path = ""
                         out_msg = full_msg
                         if max_bytes > 0 and len(msg_bytes) > max_bytes:
                             truncated_flag = True
-                            out_msg = msg_bytes[:max_bytes].decode("utf-8", errors="ignore")
+                            out_msg = msg_bytes[:max_bytes].decode(
+                                "utf-8", errors="ignore"
+                            )
                             try:
                                 run_logs = self.logs_dir / run_id
                                 dest_dir = run_logs / "final_messages"
                                 dest_dir.mkdir(parents=True, exist_ok=True)
                                 fname = f"{iid}.txt"
-                                with open(dest_dir / fname, "w", encoding="utf-8", errors="ignore") as fh:
+                                with open(
+                                    dest_dir / fname,
+                                    "w",
+                                    encoding="utf-8",
+                                    errors="ignore",
+                                ) as fh:
                                     fh.write(full_msg)
                                 rel_path = f"final_messages/{fname}"
                             except Exception:
@@ -1896,11 +2290,15 @@ class Orchestrator:
                                 "instance_id": iid,
                                 "error_type": (res.error_type if res else "unknown"),
                                 "message": (res.error if res else ""),
-                                "network_egress": (info.metadata or {}).get("network_egress"),
+                                "network_egress": (info.metadata or {}).get(
+                                    "network_egress"
+                                ),
                             },
                         )
                     else:  # interrupted
-                        logger.debug(f"backfill: task.interrupted iid={iid} key={task_key}")
+                        logger.debug(
+                            f"backfill: task.interrupted iid={iid} key={task_key}"
+                        )
                         self.event_bus.emit_canonical(
                             type="task.interrupted",
                             run_id=run_id,
@@ -1924,11 +2322,17 @@ class Orchestrator:
                     old = strat.state
                     strat.state = "running"
                     # Emit state update event
-                    logger.info(f"Re-opening strategy {sid} for resume re-entry (was {old})")
+                    logger.info(
+                        f"Re-opening strategy {sid} for resume re-entry (was {old})"
+                    )
                     if self.event_bus:
                         self.event_bus.emit(
                             "state.strategy_updated",
-                            {"strategy_id": sid, "old_state": old, "new_state": "running"},
+                            {
+                                "strategy_id": sid,
+                                "old_state": old,
+                                "new_state": "running",
+                            },
                         )
                         # Also emit a canonical strategy.started with a 'resumed' hint for downstream consumers
                         try:
@@ -1954,6 +2358,7 @@ class Orchestrator:
         from ..shared import InstanceStatus as _IS
         from ..instance_runner.plugins import AVAILABLE_PLUGINS
         from ..instance_runner.docker_manager import DockerManager
+
         docker_manager = DockerManager()
 
         scheduled_ids: list[str] = []
@@ -1973,12 +2378,17 @@ class Orchestrator:
                         # Use fresh container: clear session, forbid reuse, new container name
                         self.state_manager.update_instance_session_id(iid, None)
                         # mark reuse flag off and drop provided resume_session_id
-                        meta_patch = {"reuse_container": False, "resume_session_id": None}
+                        meta_patch = {
+                            "reuse_container": False,
+                            "resume_session_id": None,
+                        }
                         # generate a new container name suffix
                         try:
                             new_name = f"{info.container_name}_r{uuid.uuid4().hex[:4]}"
                             # Update container name in state and emit an update
-                            self.state_manager.update_instance_container_name(iid, new_name)
+                            self.state_manager.update_instance_container_name(
+                                iid, new_name
+                            )
                             meta_patch["container_name_override"] = new_name
                         except Exception:
                             pass
@@ -1987,27 +2397,38 @@ class Orchestrator:
                         self.state_manager.update_instance_state(iid, _IS.QUEUED)
                         await _enqueue(iid)
                         scheduled_ids.append(iid)
-                        logger.info(f"resume_run: scheduled fresh iid={iid} (new container) for execution")
+                        logger.info(
+                            f"resume_run: scheduled fresh iid={iid} (new container) for execution"
+                        )
                     else:
                         # Resume only if container exists and plugin supports resume
                         can_resume = False
                         try:
-                            _pname = (info.metadata or {}).get("plugin_name", "claude-code")
-                            _pclass = AVAILABLE_PLUGINS.get(_pname) or AVAILABLE_PLUGINS.get("claude-code")
+                            _pname = (info.metadata or {}).get(
+                                "plugin_name", "claude-code"
+                            )
+                            _pclass = AVAILABLE_PLUGINS.get(
+                                _pname
+                            ) or AVAILABLE_PLUGINS.get("claude-code")
                             _plugin = _pclass()  # type: ignore[call-arg]
                         except Exception:
                             _plugin = AVAILABLE_PLUGINS["claude-code"]()
                         if info.session_id and _plugin.capabilities.supports_resume:
                             try:
                                 await asyncio.get_event_loop().run_in_executor(
-                                    None, lambda: docker_manager.client.containers.get(info.container_name)
+                                    None,
+                                    lambda: docker_manager.client.containers.get(
+                                        info.container_name
+                                    ),
                                 )
                                 can_resume = True
                             except Exception:
                                 can_resume = False
                         if can_resume:
                             # Ensure reuse flag remains True
-                            self.state_manager.update_instance_metadata(iid, {"reuse_container": True, "operator_resume": True})
+                            self.state_manager.update_instance_metadata(
+                                iid, {"reuse_container": True, "operator_resume": True}
+                            )
                             self.state_manager.update_instance_state(iid, _IS.QUEUED)
                             await _enqueue(iid)
                             scheduled_ids.append(iid)
@@ -2016,24 +2437,39 @@ class Orchestrator:
                                     f"resume_run: scheduled resume iid={iid} container={info.container_name} session_id={info.session_id} plugin={(info.metadata or {}).get('plugin_name','claude-code')}"
                                 )
                             except Exception:
-                                logger.info(f"resume_run: scheduled resume iid={iid} container={info.container_name}")
+                                logger.info(
+                                    f"resume_run: scheduled resume iid={iid} container={info.container_name}"
+                                )
                         else:
                             # Fresh re-run: no session to resume or container missing; schedule a new container
                             try:
                                 self.state_manager.update_instance_session_id(iid, None)
-                                meta_patch = {"reuse_container": False, "operator_resume": True, "resume_session_id": None}
+                                meta_patch = {
+                                    "reuse_container": False,
+                                    "operator_resume": True,
+                                    "resume_session_id": None,
+                                }
                                 # generate a new container name suffix to avoid collisions
                                 import uuid as _uuid
-                                new_name = f"{info.container_name}_r{_uuid.uuid4().hex[:4]}"
-                                self.state_manager.update_instance_container_name(iid, new_name)
+
+                                new_name = (
+                                    f"{info.container_name}_r{_uuid.uuid4().hex[:4]}"
+                                )
+                                self.state_manager.update_instance_container_name(
+                                    iid, new_name
+                                )
                                 meta_patch["container_name_override"] = new_name
-                                self.state_manager.update_instance_metadata(iid, meta_patch)
+                                self.state_manager.update_instance_metadata(
+                                    iid, meta_patch
+                                )
                             except Exception:
                                 pass
                             self.state_manager.update_instance_state(iid, _IS.QUEUED)
                             await _enqueue(iid)
                             scheduled_ids.append(iid)
-                            logger.info(f"resume_run: scheduled fresh iid={iid} (no resumable session)")
+                            logger.info(
+                                f"resume_run: scheduled fresh iid={iid} (no resumable session)"
+                            )
                 elif info.state == _IS.QUEUED:
                     await _enqueue(iid)
                     scheduled_ids.append(iid)
@@ -2044,13 +2480,16 @@ class Orchestrator:
         # Do NOT block on all scheduled instances here; allow strategy re-entry to await
         # them and schedule downstream work (e.g., scoring) as each completes.
         if scheduled_ids:
-            logger.info(f"resume_run: enqueued {len(scheduled_ids)} instance(s) for resume")
+            logger.info(
+                f"resume_run: enqueued {len(scheduled_ids)} instance(s) for resume"
+            )
 
         # Re-enter strategies immediately to allow downstream stages (e.g., scoring) to run
         # IMPORTANT: Run strategy re-entry concurrently to avoid serializing downstream work
         reentry_results: list[InstanceResult] = []
         try:
             from .strategies import AVAILABLE_STRATEGIES as _STRATS
+
             prompt = self.state_manager.current_state.prompt
             base_branch = self.state_manager.current_state.base_branch
 
@@ -2072,21 +2511,39 @@ class Orchestrator:
                 # Build context with the same execution id
                 ctx = StrategyContext(self, sname, sid)
                 try:
-                    res = await strat.execute(prompt=prompt, base_branch=base_branch, ctx=ctx)
+                    res = await strat.execute(
+                        prompt=prompt, base_branch=base_branch, ctx=ctx
+                    )
                 except Exception as e:
                     logger.error(f"Strategy re-entry failed for {sname}: {e}")
                     res = []
                 # Update strategy state and emit canonical completion
-                state_value = "completed" if any(getattr(r, "success", False) for r in (res or [])) else "failed"
-                self.state_manager.update_strategy_state(strategy_id=sid, state=state_value, results=res)
+                state_value = (
+                    "completed"
+                    if any(getattr(r, "success", False) for r in (res or []))
+                    else "failed"
+                )
+                self.state_manager.update_strategy_state(
+                    strategy_id=sid, state=state_value, results=res
+                )
                 status = "success" if state_value == "completed" else "failed"
                 payload = {"status": status}
                 if status == "failed":
                     # If no successes and any instances are interrupted (not failed), classify as canceled
                     try:
                         any_interrupted = any(
-                            (self.state_manager.current_state.instances.get(iid).state.value == "interrupted")
-                            for iid in (self.state_manager.current_state.strategies.get(sid).instance_ids or [])
+                            (
+                                self.state_manager.current_state.instances.get(
+                                    iid
+                                ).state.value
+                                == "interrupted"
+                            )
+                            for iid in (
+                                self.state_manager.current_state.strategies.get(
+                                    sid
+                                ).instance_ids
+                                or []
+                            )
                             if iid in self.state_manager.current_state.instances
                         )
                     except Exception:
@@ -2108,7 +2565,9 @@ class Orchestrator:
                 return res or []
 
             tasks: list[asyncio.Task] = []
-            for sid, strat_exec in list(self.state_manager.current_state.strategies.items()):
+            for sid, strat_exec in list(
+                self.state_manager.current_state.strategies.items()
+            ):
                 tasks.append(asyncio.create_task(_reenter_one(sid, strat_exec)))
             if tasks:
                 results_lists = await asyncio.gather(*tasks, return_exceptions=True)
@@ -2121,7 +2580,9 @@ class Orchestrator:
         # Mark run completion time for accurate summaries and save snapshot/results
         try:
             if self.state_manager and self.state_manager.current_state:
-                self.state_manager.current_state.completed_at = datetime.now(timezone.utc)
+                self.state_manager.current_state.completed_at = datetime.now(
+                    timezone.utc
+                )
         except Exception:
             pass
         await self.state_manager.save_snapshot()
@@ -2140,7 +2601,12 @@ class Orchestrator:
 
         self.event_bus.emit(
             "run.completed",
-            {"run_id": run_id, "resumed": True, "cannot_resume": cannot_resume_count, "total_results": len(final_results)},
+            {
+                "run_id": run_id,
+                "resumed": True,
+                "cannot_resume": cannot_resume_count,
+                "total_results": len(final_results),
+            },
         )
 
         return final_results
@@ -2164,8 +2630,22 @@ class Orchestrator:
         try:
             # Effective per-task limits if present in saved metadata
             try:
-                eff_cpu = max(1, int((instance_info.metadata or {}).get("container_cpu", self.container_limits.cpu_count)))
-                eff_mem = max(1, int((instance_info.metadata or {}).get("container_memory_gb", self.container_limits.memory_gb)))
+                eff_cpu = max(
+                    1,
+                    int(
+                        (instance_info.metadata or {}).get(
+                            "container_cpu", self.container_limits.cpu_count
+                        )
+                    ),
+                )
+                eff_mem = max(
+                    1,
+                    int(
+                        (instance_info.metadata or {}).get(
+                            "container_memory_gb", self.container_limits.memory_gb
+                        )
+                    ),
+                )
             except Exception:
                 eff_cpu = self.container_limits.cpu_count
                 eff_mem = self.container_limits.memory_gb
@@ -2178,23 +2658,36 @@ class Orchestrator:
                 run_id=self.state_manager.current_state.run_id,
                 strategy_execution_id=None,
                 event_callback=lambda e: self.event_bus.emit(
-                    e.get("type", "instance.event"), e.get("data", {}), instance_id=instance_info.instance_id
+                    e.get("type", "instance.event"),
+                    e.get("data", {}),
+                    instance_id=instance_info.instance_id,
                 ),
                 container_name=instance_info.container_name,
-                container_limits=ContainerLimits(cpu_count=eff_cpu, memory_gb=eff_mem, memory_swap_gb=eff_mem),
+                container_limits=ContainerLimits(
+                    cpu_count=eff_cpu, memory_gb=eff_mem, memory_swap_gb=eff_mem
+                ),
                 retry_config=self.retry_config,
                 auth_config=self.auth_config,
-                docker_image=(instance_info.metadata or {}).get("docker_image") or self.default_docker_image,
-                import_policy=(instance_info.metadata or {}).get("import_policy", "auto"),
-                import_conflict_policy=(instance_info.metadata or {}).get("import_conflict_policy", "fail"),
-                skip_empty_import=bool((instance_info.metadata or {}).get("skip_empty_import", True)),
+                docker_image=(instance_info.metadata or {}).get("docker_image")
+                or self.default_docker_image,
+                import_policy=(instance_info.metadata or {}).get(
+                    "import_policy", "auto"
+                ),
+                import_conflict_policy=(instance_info.metadata or {}).get(
+                    "import_conflict_policy", "fail"
+                ),
+                skip_empty_import=bool(
+                    (instance_info.metadata or {}).get("skip_empty_import", True)
+                ),
                 allow_overwrite_protected_refs=self.allow_overwrite_protected_refs,
                 allow_global_session_volume=self.allow_global_session_volume,
             )
 
             # Update state
             self.state_manager.update_instance_state(
-                instance_id=instance_info.instance_id, state=_IS.COMPLETED, result=result
+                instance_id=instance_info.instance_id,
+                state=InstanceStatus.COMPLETED,
+                result=result,
             )
 
             return result
@@ -2204,7 +2697,15 @@ class Orchestrator:
 
             # Mark as failed
             self.state_manager.update_instance_state(
-                instance_id=instance_info.instance_id, state=_IS.FAILED, result=InstanceResult(success=False, error=str(e), error_type="rerun_failed", branch_name=instance_info.branch_name, status="failed")
+                instance_id=instance_info.instance_id,
+                state=InstanceStatus.FAILED,
+                result=InstanceResult(
+                    success=False,
+                    error=str(e),
+                    error_type="rerun_failed",
+                    branch_name=instance_info.branch_name,
+                    status="failed",
+                ),
             )
 
             # Return a failed result
@@ -2284,8 +2785,13 @@ class Orchestrator:
                 instance_list = list(state.instances.values())
                 total_instances = len(instance_list)
                 from ..shared import InstanceStatus as _IS
-                completed_instances = sum(1 for i in instance_list if i.state == _IS.COMPLETED)
-                failed_instances = sum(1 for i in instance_list if i.state == _IS.FAILED)
+
+                completed_instances = sum(
+                    1 for i in instance_list if i.state == _IS.COMPLETED
+                )
+                failed_instances = sum(
+                    1 for i in instance_list if i.state == _IS.FAILED
+                )
             except Exception:
                 total_instances = state.total_instances
                 completed_instances = state.completed_instances
@@ -2406,7 +2912,9 @@ class Orchestrator:
             metrics_path = results_dir / "instance_metrics.csv"
             with open(metrics_path, "w") as f:
                 # Write header
-                f.write("instance_id,branch_name,status,duration_seconds,cost,tokens,input_tokens,output_tokens,commit_count,lines_added,lines_deleted,has_changes\n")
+                f.write(
+                    "instance_id,branch_name,status,duration_seconds,cost,tokens,input_tokens,output_tokens,commit_count,lines_added,lines_deleted,has_changes\n"
+                )
 
                 # Write data rows
                 for result in results:
@@ -2465,7 +2973,9 @@ class Orchestrator:
                 inst_cost: Dict[str, float] = {}
                 if events_file.exists():
                     with open(events_file, "r") as ef, open(ts_path, "w") as tf:
-                        tf.write("timestamp,active_instances,completed_instances,failed_instances,total_cost,total_tokens,event_type\n")
+                        tf.write(
+                            "timestamp,active_instances,completed_instances,failed_instances,total_cost,total_tokens,event_type\n"
+                        )
                         for line in ef:
                             try:
                                 ev = json.loads(line)
@@ -2485,16 +2995,26 @@ class Orchestrator:
                                 failed_set.add(iid)
                             elif et == "instance.agent_turn_complete" and iid:
                                 tm = data.get("turn_metrics", {})
-                                inst_tokens[iid] = inst_tokens.get(iid, 0) + int(tm.get("tokens", 0) or 0)
-                                inst_cost[iid] = inst_cost.get(iid, 0.0) + float(tm.get("cost", 0.0) or 0.0)
+                                inst_tokens[iid] = inst_tokens.get(iid, 0) + int(
+                                    tm.get("tokens", 0) or 0
+                                )
+                                inst_cost[iid] = inst_cost.get(iid, 0.0) + float(
+                                    tm.get("cost", 0.0) or 0.0
+                                )
                             elif et == "instance.agent_completed" and iid:
                                 m = data.get("metrics", {})
                                 if m:
-                                    inst_tokens[iid] = int(m.get("total_tokens", inst_tokens.get(iid, 0)))
-                                    inst_cost[iid] = float(m.get("total_cost", inst_cost.get(iid, 0.0)))
+                                    inst_tokens[iid] = int(
+                                        m.get("total_tokens", inst_tokens.get(iid, 0))
+                                    )
+                                    inst_cost[iid] = float(
+                                        m.get("total_cost", inst_cost.get(iid, 0.0))
+                                    )
                             total_cost = sum(inst_cost.values())
                             total_tokens = sum(inst_tokens.values())
-                            tf.write(f"{ts},{len(running)},{len(completed_set)},{len(failed_set)},{total_cost:.4f},{total_tokens},{et}\n")
+                            tf.write(
+                                f"{ts},{len(running)},{len(completed_set)},{len(failed_set)},{total_cost:.4f},{total_tokens},{et}\n"
+                            )
             except Exception as e:
                 logger.debug(f"Failed generating time-series metrics: {e}")
 
@@ -2505,7 +3025,9 @@ class Orchestrator:
             # Save strategy outputs (summary JSON only); strategy-specific metadata is kept in run state
             for strat_id, strat_info in state.strategies.items():
                 if strat_info.results:
-                    strategy_file = strategy_dir / f"{strat_info.strategy_name}_{strat_id}.json"
+                    strategy_file = (
+                        strategy_dir / f"{strat_info.strategy_name}_{strat_id}.json"
+                    )
                     strategy_data = {
                         "strategy_id": strat_id,
                         "strategy_name": strat_info.strategy_name,
@@ -2513,12 +3035,16 @@ class Orchestrator:
                         # Do not interpret result metadata; just persist minimal success/branch
                         "results": [
                             {
-                                "branch_name": getattr(r, "branch_name", None)
-                                if not isinstance(r, dict)
-                                else r.get("branch_name"),
-                                "success": getattr(r, "success", False)
-                                if not isinstance(r, dict)
-                                else bool(r.get("success", False)),
+                                "branch_name": (
+                                    getattr(r, "branch_name", None)
+                                    if not isinstance(r, dict)
+                                    else r.get("branch_name")
+                                ),
+                                "success": (
+                                    getattr(r, "success", False)
+                                    if not isinstance(r, dict)
+                                    else bool(r.get("success", False))
+                                ),
                             }
                             for r in (strat_info.results or [])
                         ],
@@ -2550,10 +3076,16 @@ class Orchestrator:
                         for r in results:
                             status = "✅" if r.success else "❌"
                             dur = (
-                                f"{r.duration_seconds:.0f}s" if r.duration_seconds else "-"
+                                f"{r.duration_seconds:.0f}s"
+                                if r.duration_seconds
+                                else "-"
                             )
-                            cost = r.metrics.get("total_cost", 0.0) if r.metrics else 0.0
-                            tokens = r.metrics.get("total_tokens", 0) if r.metrics else 0
+                            cost = (
+                                r.metrics.get("total_cost", 0.0) if r.metrics else 0.0
+                            )
+                            tokens = (
+                                r.metrics.get("total_tokens", 0) if r.metrics else 0
+                            )
                             f.write(
                                 f"- {status} {r.branch_name or 'no-branch'} • {dur} • ${cost:.2f} • {tokens} tokens\n"
                             )
