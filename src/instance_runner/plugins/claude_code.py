@@ -31,7 +31,7 @@ class ClaudeCodePlugin(RunnerPlugin):
 
     @property
     def docker_image(self) -> str:
-        return "claude-code:latest"
+        return "pitaya-agents:latest"
 
     @property
     def capabilities(self) -> PluginCapabilities:

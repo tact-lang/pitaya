@@ -201,7 +201,7 @@ class DockerManager:
         run_id: Optional[str] = None,
         strategy_execution_id: Optional[str] = None,
         instance_id: Optional[str] = None,
-        image: str = "claude-code:latest",
+        image: str = "pitaya-agents:latest",
         session_id: Optional[str] = None,
         auth_config: Optional[AuthConfig] = None,
         reuse_container: bool = True,
