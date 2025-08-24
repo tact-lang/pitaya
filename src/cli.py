@@ -380,7 +380,9 @@ class OrchestratorCLI:
 
         # Extract auth values from merged config; select by plugin for consistency
         runner_cfg = full_config.get("runner", {})
-        plugin_name = full_config.get("plugin_name") or getattr(args, "plugin", "claude-code")
+        plugin_name = full_config.get("plugin_name") or getattr(
+            args, "plugin", "claude-code"
+        )
 
         if str(plugin_name) == "codex":
             # Prefer OpenAI keys; allow CLI overrides via generic api_key/base_url
@@ -391,7 +393,9 @@ class OrchestratorCLI:
             # Claude Code: prefer OAuth, then Anthropic API key
             oauth_token = runner_cfg.get("oauth_token")
             api_key = runner_cfg.get("api_key") or runner_cfg.get("anthropic_api_key")
-            base_url = runner_cfg.get("base_url") or runner_cfg.get("anthropic_base_url")
+            base_url = runner_cfg.get("base_url") or runner_cfg.get(
+                "anthropic_base_url"
+            )
 
         # Apply mode selection logic per spec section 6.1
         # 1. If --mode api specified, use API key
@@ -1827,7 +1831,9 @@ class OrchestratorCLI:
                 )
                 return 1
 
-        auth_config = AuthConfig(oauth_token=oauth_token, api_key=api_key, base_url=base_url)
+        auth_config = AuthConfig(
+            oauth_token=oauth_token, api_key=api_key, base_url=base_url
+        )
 
         # Get orchestration settings from merged config
         max_parallel = full_config["orchestration"]["max_parallel_instances"]
