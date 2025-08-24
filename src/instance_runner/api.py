@@ -54,6 +54,7 @@ async def run_instance(
     model_mapping_checksum: Optional[str] = None,
     allow_overwrite_protected_refs: bool = False,
     allow_global_session_volume: bool = False,
+    agent_cli_args: Optional[list[str]] = None,
 ) -> InstanceResult:
     """
     Execute a single AI coding instance in an isolated environment.
@@ -131,6 +132,7 @@ async def run_instance(
         model_mapping_checksum=model_mapping_checksum,
         allow_overwrite_protected_refs=allow_overwrite_protected_refs,
         allow_global_session_volume=allow_global_session_volume,
+        agent_cli_args=agent_cli_args,
     )
 
 

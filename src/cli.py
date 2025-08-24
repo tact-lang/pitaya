@@ -157,6 +157,20 @@ class OrchestratorCLI:
             type=str,
             help="Override Docker image (e.g., myrepo/custom:tag)",
         )
+        # Agent CLI passthrough
+        g_model.add_argument(
+            "--cli-arg",
+            action="append",
+            dest="agent_cli_arg",
+            metavar="ARG",
+            help="Pass-through single argument to the agent CLI (repeatable)",
+        )
+        g_model.add_argument(
+            "--cli-args",
+            dest="agent_cli_args_str",
+            metavar="'ARGS'",
+            help="Quoted list of arguments to pass to the agent CLI (e.g., --cli-args '-c key=\"v\" --flag')",
+        )
 
         # Repository group
         g_repo = parser.add_argument_group("Repository")
@@ -1876,6 +1890,20 @@ class OrchestratorCLI:
 
         # Proxy automatic egress defaults removed
 
+        # Combine agent CLI passthrough args and create orchestrator
+        try:
+            import shlex as _shlex
+
+            _agent_cli_args: list[str] = []
+            if getattr(args, "agent_cli_arg", None):
+                _agent_cli_args.extend(
+                    [str(a) for a in args.agent_cli_arg if a is not None]
+                )
+            if getattr(args, "agent_cli_args_str", None):
+                _agent_cli_args.extend(_shlex.split(str(args.agent_cli_args_str)))
+        except Exception:
+            _agent_cli_args = []
+
         # Create orchestrator
         self.orchestrator = Orchestrator(
             max_parallel_instances=max_parallel_val,
@@ -1936,6 +1964,7 @@ class OrchestratorCLI:
                 full_config.get("model", getattr(args, "model", "sonnet"))
             ),
             default_docker_image=full_config.get("runner", {}).get("docker_image"),
+            default_agent_cli_args=_agent_cli_args or None,
         )
 
         # Initialize orchestrator

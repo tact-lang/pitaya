@@ -145,6 +145,14 @@ class ClaudeCodePlugin(RunnerPlugin):
         if "append_system_prompt" in kwargs and kwargs["append_system_prompt"]:
             command.extend(["--append-system-prompt", kwargs["append_system_prompt"]])
 
+        # Add passthrough CLI args, if any
+        try:
+            extra_args = kwargs.get("agent_cli_args") or []
+            if isinstance(extra_args, (list, tuple)):
+                command.extend([str(x) for x in extra_args if x is not None])
+        except Exception:
+            pass
+
         # Always pass the prompt when provided. On resume, Orchestrator supplies
         # a minimal continuation prompt (e.g., "Continue") so the agent keeps going.
         if prompt:

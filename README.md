@@ -96,6 +96,33 @@ Override Docker image
 pitaya "task" --plugin codex --docker-image ghcr.io/me/codex-cli:mytag
 ```
 
+Agent CLI passthrough
+
+Forward raw arguments directly to the underlying agent CLI (Codex or Claude). This is useful for advanced flags or experimental options exposed by the tools.
+
+```bash
+# Single tokens (repeatable)
+pitaya "fix bug" --plugin codex \
+  --cli-arg -c \
+  --cli-arg 'feature_flag=true' \
+  --cli-arg --no-color
+
+# Quoted list (recommended for ordered sequences)
+pitaya "refactor module" --plugin codex \
+  --cli-args '-c model="gpt-4o-mini" --dry-run -v'
+
+# Mix-and-match
+pitaya "task" --plugin claude-code \
+  --cli-arg --verbose \
+  --cli-args '--max-turns 8'
+```
+
+Notes
+
+- Passthrough args are inserted before the final prompt position.
+- `--cli-args` uses POSIX shlex splitting; quote values that contain spaces.
+- If both forms are provided, Pitaya combines all `--cli-arg` tokens followed by tokens from `--cli-args`. For strict ordering, prefer a single `--cli-args` string.
+
 Resume a run
 
 ```bash

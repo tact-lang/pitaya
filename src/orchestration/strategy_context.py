@@ -140,6 +140,14 @@ class StrategyContext:
             metadata = {}
         metadata["model"] = model
 
+        # Include default agent CLI passthrough args when configured
+        try:
+            _args = getattr(self._orchestrator, "default_agent_cli_args", [])
+            if _args and "agent_cli_args" not in metadata:
+                metadata["agent_cli_args"] = list(_args)
+        except Exception:
+            pass
+
         instance_id = await self._orchestrator.spawn_instance(
             prompt=prompt,
             repo_path=self._orchestrator.repo_path,  # Context knows the repo
@@ -350,6 +358,14 @@ class StrategyContext:
                 else {}
             ),
         }
+
+        # Include default agent CLI passthrough args when configured
+        try:
+            _args = getattr(self._orchestrator, "default_agent_cli_args", [])
+            if _args and "agent_cli_args" not in _metadata:
+                _metadata["agent_cli_args"] = list(_args)
+        except Exception:
+            pass
 
         # Orchestration-level scheduling retry policy
         max_attempts = 1
