@@ -176,6 +176,26 @@ Some plugins (e.g., Claude Code) validate model aliases via `models.yaml`. If an
 - Plugins default to `pitaya-agents:latest`; override per run with `--docker-image <repo/name:tag>`
 - Full isolation per instance: dedicated container, workspace mount, and session volume
 
+### OpenAI‑Compatible Providers (Codex)
+
+- Pass `--api-key` and `--base-url` to target any OpenAI‑compatible endpoint. Pitaya configures the Codex CLI provider under the hood.
+- Example (OpenRouter):
+
+  ```bash
+  pitaya "hello" \
+    --plugin codex \
+    --model "openai/gpt-5" \
+    --api-key "$OPENROUTER_API_KEY" \
+    --base-url https://openrouter.ai/api/v1
+  ```
+
+- This works with any OpenAI‑compatible API (self‑hosted or proxy). The API key is provided to the container via `OPENAI_API_KEY`.
+
+### Anthropic (Claude Code)
+
+- Use `--oauth-token` (subscription) or `--api-key` (API mode). Optional `--base-url` is respected as `ANTHROPIC_BASE_URL`.
+- Env alternatives: `CLAUDE_CODE_OAUTH_TOKEN`, `ANTHROPIC_API_KEY`, and `ANTHROPIC_BASE_URL`.
+
 ## Logs & Artifacts
 
 - Logs: `logs/<run_id>/events.jsonl` and structured component logs
