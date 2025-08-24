@@ -147,8 +147,8 @@ def load_dotenv_config(dotenv_path: Optional[Path] = None) -> Dict[str, Any]:
 
     Supports standard environment variables:
     - CLAUDE_CODE_OAUTH_TOKEN
-    - ANTHROPIC_API_KEY
-    - ANTHROPIC_BASE_URL
+    - ANTHROPIC_API_KEY / ANTHROPIC_BASE_URL
+    - OPENAI_API_KEY / OPENAI_BASE_URL
 
     Args:
         dotenv_path: Path to .env file (default: .env in current directory)
@@ -178,12 +178,22 @@ def load_dotenv_config(dotenv_path: Optional[Path] = None) -> Dict[str, Any]:
     if "ANTHROPIC_API_KEY" in env_values:
         if "runner" not in config:
             config["runner"] = {}
-        config["runner"]["api_key"] = env_values["ANTHROPIC_API_KEY"]
+        config["runner"]["anthropic_api_key"] = env_values["ANTHROPIC_API_KEY"]
 
     if "ANTHROPIC_BASE_URL" in env_values:
         if "runner" not in config:
             config["runner"] = {}
-        config["runner"]["base_url"] = env_values["ANTHROPIC_BASE_URL"]
+        config["runner"]["anthropic_base_url"] = env_values["ANTHROPIC_BASE_URL"]
+
+    if "OPENAI_API_KEY" in env_values:
+        if "runner" not in config:
+            config["runner"] = {}
+        config["runner"]["openai_api_key"] = env_values["OPENAI_API_KEY"]
+
+    if "OPENAI_BASE_URL" in env_values:
+        if "runner" not in config:
+            config["runner"] = {}
+        config["runner"]["openai_base_url"] = env_values["OPENAI_BASE_URL"]
 
     return config
 
@@ -192,7 +202,7 @@ def load_env_config() -> Dict[str, Any]:
     """
     Load environment variables into a config dict.
 
-    Supports standard names (CLAUDE_CODE_OAUTH_TOKEN, ANTHROPIC_API_KEY).
+    Supports standard names (CLAUDE_CODE_OAUTH_TOKEN, ANTHROPIC_*, OPENAI_*).
     """
     config: Dict[str, Any] = {}
 
@@ -205,12 +215,22 @@ def load_env_config() -> Dict[str, Any]:
     if "ANTHROPIC_API_KEY" in os.environ:
         if "runner" not in config:
             config["runner"] = {}
-        config["runner"]["api_key"] = os.environ["ANTHROPIC_API_KEY"]
+        config["runner"]["anthropic_api_key"] = os.environ["ANTHROPIC_API_KEY"]
 
     if "ANTHROPIC_BASE_URL" in os.environ:
         if "runner" not in config:
             config["runner"] = {}
-        config["runner"]["base_url"] = os.environ["ANTHROPIC_BASE_URL"]
+        config["runner"]["anthropic_base_url"] = os.environ["ANTHROPIC_BASE_URL"]
+
+    if "OPENAI_API_KEY" in os.environ:
+        if "runner" not in config:
+            config["runner"] = {}
+        config["runner"]["openai_api_key"] = os.environ["OPENAI_API_KEY"]
+
+    if "OPENAI_BASE_URL" in os.environ:
+        if "runner" not in config:
+            config["runner"] = {}
+        config["runner"]["openai_base_url"] = os.environ["OPENAI_BASE_URL"]
 
     # No Pitaya-specific env variables; use CLI or config file
 

@@ -378,10 +378,20 @@ class OrchestratorCLI:
             cli_config, env_config, dotenv_config, config or {}, defaults
         )
 
-        # Extract auth values from merged config
-        oauth_token = full_config.get("runner", {}).get("oauth_token")
-        api_key = full_config.get("runner", {}).get("api_key")
-        base_url = full_config.get("runner", {}).get("base_url")
+        # Extract auth values from merged config; select by plugin for consistency
+        runner_cfg = full_config.get("runner", {})
+        plugin_name = full_config.get("plugin_name") or getattr(args, "plugin", "claude-code")
+
+        if str(plugin_name) == "codex":
+            # Prefer OpenAI keys; allow CLI overrides via generic api_key/base_url
+            api_key = runner_cfg.get("api_key") or runner_cfg.get("openai_api_key")
+            base_url = runner_cfg.get("base_url") or runner_cfg.get("openai_base_url")
+            oauth_token = None
+        else:
+            # Claude Code: prefer OAuth, then Anthropic API key
+            oauth_token = runner_cfg.get("oauth_token")
+            api_key = runner_cfg.get("api_key") or runner_cfg.get("anthropic_api_key")
+            base_url = runner_cfg.get("base_url") or runner_cfg.get("anthropic_base_url")
 
         # Apply mode selection logic per spec section 6.1
         # 1. If --mode api specified, use API key
@@ -418,15 +428,25 @@ class OrchestratorCLI:
         elif api_key:
             # API mode when only API key is available
             pass
-        # 5. Otherwise, error with clear message
+        # 5. Otherwise, error with clear message (fail fast for both providers)
         else:
-            # Do not hard-fail: non-Anthropic plugins (e.g., Codex) may use OPENAI_API_KEY
-            # or run in OSS mode. Warn and proceed with empty AuthConfig.
-            self.console.print(
-                "[yellow]Warning: No provider credentials found.\n"
-                "- For Anthropic, set CLAUDE_CODE_OAUTH_TOKEN or ANTHROPIC_API_KEY.\n"
-                "- For OpenAI, ensure OPENAI_API_KEY is set (and OPENAI_BASE_URL if applicable).[/yellow]"
-            )
+            if str(plugin_name) == "codex":
+                self.console.print(
+                    "[red]Error: Missing credentials for OpenAI‑compatible provider.[/red]\n"
+                    "Set OPENAI_API_KEY in:\n"
+                    "  - .env file (OPENAI_API_KEY=...)\n"
+                    "  - Environment variables (export OPENAI_API_KEY=...)\n"
+                    "  - Command line: --api-key\n"
+                    "Optionally set --base-url (or OPENAI_BASE_URL) for non-default endpoints."
+                )
+            else:
+                self.console.print(
+                    "[red]Error: Missing credentials for Anthropic.[/red]\n"
+                    "Set CLAUDE_CODE_OAUTH_TOKEN or ANTHROPIC_API_KEY in:\n"
+                    "  - .env file\n"
+                    "  - Environment variables\n"
+                    "  - Command line: --oauth-token or --api-key"
+                )
             return AuthConfig(oauth_token=None, api_key=None, base_url=None)
 
         return AuthConfig(oauth_token=oauth_token, api_key=api_key, base_url=base_url)
@@ -1774,33 +1794,40 @@ class OrchestratorCLI:
 
         retry_config = RetryConfig(max_attempts=3)
 
-        # Create auth config from merged configuration
-        oauth_token = full_config.get("runner", {}).get("oauth_token")
-        api_key = full_config.get("runner", {}).get("api_key")
-        base_url = full_config.get("runner", {}).get("base_url")
-
-        if not oauth_token and not api_key:
-            # Allow non-Anthropic plugins to continue (e.g., Codex with OPENAI_API_KEY)
-            plugin_name = full_config.get("plugin_name") or getattr(
-                args, "plugin", "claude-code"
-            )
-            if str(plugin_name) == "claude-code":
+        # Create auth config from merged configuration (plugin-aware)
+        plugin_name = full_config.get("plugin_name") or getattr(
+            args, "plugin", "claude-code"
+        )
+        rcfg = full_config.get("runner", {})
+        if str(plugin_name) == "codex":
+            api_key = rcfg.get("api_key") or rcfg.get("openai_api_key")
+            base_url = rcfg.get("base_url") or rcfg.get("openai_base_url")
+            oauth_token = None
+            if not api_key:
                 self.console.print(
-                    "[red]Error: Missing credentials for the selected provider.[/red]\n"
+                    "[red]Error: Missing credentials for OpenAI‑compatible provider.[/red]\n"
+                    "Set OPENAI_API_KEY in:\n"
+                    "  - .env file (OPENAI_API_KEY=...)\n"
+                    "  - Environment variables (export OPENAI_API_KEY=...)\n"
+                    "  - Command line: --api-key\n"
+                    "Optionally set --base-url (or OPENAI_BASE_URL) for non-default endpoints."
+                )
+                return 1
+        else:
+            oauth_token = rcfg.get("oauth_token")
+            api_key = rcfg.get("api_key") or rcfg.get("anthropic_api_key")
+            base_url = rcfg.get("base_url") or rcfg.get("anthropic_base_url")
+            if not oauth_token and not api_key:
+                self.console.print(
+                    "[red]Error: Missing credentials for Anthropic.[/red]\n"
                     "Set CLAUDE_CODE_OAUTH_TOKEN or ANTHROPIC_API_KEY in:\n"
                     "  - .env file\n"
                     "  - Environment variables\n"
                     "  - Command line: --oauth-token or --api-key"
                 )
                 return 1
-            else:
-                self.console.print(
-                    "[yellow]Warning: No provider credentials set. Proceeding with selected plugin.[/yellow]"
-                )
 
-        auth_config = AuthConfig(
-            oauth_token=oauth_token, api_key=api_key, base_url=base_url
-        )
+        auth_config = AuthConfig(oauth_token=oauth_token, api_key=api_key, base_url=base_url)
 
         # Get orchestration settings from merged config
         max_parallel = full_config["orchestration"]["max_parallel_instances"]
