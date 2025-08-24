@@ -615,6 +615,21 @@ async def _run_instance_attempt(
             )
 
             # Execute via plugin interface
+            # Provide provider hints to Codex when custom base URL is configured
+            codex_provider_kwargs = {}
+            try:
+                if getattr(plugin, "name", "") == "codex":
+                    purl = None
+                    if auth_config and getattr(auth_config, "base_url", None):
+                        purl = auth_config.base_url
+                    if not purl:
+                        purl = (env_vars or {}).get("OPENAI_BASE_URL")
+                    if purl:
+                        codex_provider_kwargs["provider_base_url"] = purl
+                        codex_provider_kwargs["provider_env_key"] = "OPENAI_API_KEY"
+            except Exception:
+                pass
+
             result_data = await plugin.execute(
                 docker_manager=docker_manager,
                 container=container,
@@ -630,6 +645,7 @@ async def _run_instance_attempt(
                 operator_resume=operator_resume,
                 max_turns=max_turns,
                 stream_log_path=log_path,
+                **codex_provider_kwargs,
             )
 
             agent_session_id = result_data.get("session_id")

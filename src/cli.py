@@ -237,6 +237,10 @@ class OrchestratorCLI:
             "--api-key",
             help="API key (or set ANTHROPIC_API_KEY / OPENAI_API_KEY)",
         )
+        g_auth.add_argument(
+            "--base-url",
+            help="Custom API base URL (e.g., OpenAI/Anthropic proxy)",
+        )
 
         # Execution & limits group
         g_limits = parser.add_argument_group("Execution & Limits")
@@ -363,6 +367,8 @@ class OrchestratorCLI:
             cli_config.setdefault("runner", {})["oauth_token"] = args.oauth_token
         if hasattr(args, "api_key") and args.api_key:
             cli_config.setdefault("runner", {})["api_key"] = args.api_key
+        if hasattr(args, "base_url") and args.base_url:
+            cli_config.setdefault("runner", {})["base_url"] = args.base_url
         # Include plugin selection at top-level for strategy-agnostic wiring
         if hasattr(args, "plugin") and args.plugin:
             cli_config["plugin_name"] = args.plugin
@@ -1601,6 +1607,8 @@ class OrchestratorCLI:
             cli_config.setdefault("runner", {})["oauth_token"] = args.oauth_token
         if hasattr(args, "api_key") and args.api_key:
             cli_config.setdefault("runner", {})["api_key"] = args.api_key
+        if hasattr(args, "base_url") and args.base_url:
+            cli_config.setdefault("runner", {})["base_url"] = args.base_url
 
         # Apply proxy flags to environment early so downstream components observe them
         # Proxy environment mapping removed

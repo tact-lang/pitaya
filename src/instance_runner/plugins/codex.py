@@ -45,7 +45,7 @@ class CodexPlugin(RunnerPlugin):
             supports_streaming=True,
             supports_cost_limits=False,
             requires_auth=False,  # allow OSS mode; OpenAI auth optional
-            auth_methods=["api_key", "oauth", "oss"],
+            auth_methods=["api_key", "oss"],  # reflect actual supported auth paths
         )
 
     async def validate_environment(
@@ -84,22 +84,7 @@ class CodexPlugin(RunnerPlugin):
         if "OPENAI_BASE_URL" in os.environ:
             env.setdefault("OPENAI_BASE_URL", os.environ["OPENAI_BASE_URL"])
 
-        # Fallback to .env file for OPENAI_* if not present in process environment
-        if "OPENAI_API_KEY" not in env or not env.get("OPENAI_API_KEY"):
-            try:
-                from dotenv import dotenv_values  # type: ignore
-
-                values = dotenv_values()
-                if values and values.get("OPENAI_API_KEY"):
-                    env["OPENAI_API_KEY"] = str(values.get("OPENAI_API_KEY"))
-                if (
-                    values
-                    and values.get("OPENAI_BASE_URL")
-                    and "OPENAI_BASE_URL" not in env
-                ):
-                    env["OPENAI_BASE_URL"] = str(values.get("OPENAI_BASE_URL"))
-            except Exception:
-                pass
+        # .env fallback is handled globally by the CLI/config merger; avoid plugin-level dotenv reads
 
         # Proxy passthrough will be handled in DockerManager based on network_egress
         return env
@@ -139,6 +124,24 @@ class CodexPlugin(RunnerPlugin):
         # Model passthrough (if provided)
         if model:
             cmd += ["-m", model]
+
+        # Custom provider wiring: when a base URL is provided (via runner), configure
+        # Codex CLI provider using -c flags. This is required for non-default endpoints.
+        provider_base_url = kwargs.get("provider_base_url")
+        provider_env_key = kwargs.get("provider_env_key") or "OPENAI_API_KEY"
+        if provider_base_url:
+            # Select a custom provider key and map model + provider config
+            cmd += ["-c", "model_provider=pitaya_custom"]
+            if model:
+                cmd += ["-c", f'model="{model}"']
+            # Brace escaping for f-string: double {{ }} to emit literal braces
+            cmd += [
+                "-c",
+                (
+                    f"model_providers.pitaya_custom="
+                    f'{{ name="CustomProvider", base_url="{provider_base_url}", env_key="{provider_env_key}" }}'
+                ),
+            ]
 
         # Resume/reattach: experimental; accept session_id when provided
         # (Codex may expect a rollout path; we pass session id to be safe if supported)
