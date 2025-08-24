@@ -155,6 +155,14 @@ class CodexPlugin(RunnerPlugin):
         if system_prompt:
             cmd += ["--system-prompt", str(system_prompt)]
 
+        # Agent CLI passthrough args: insert before prompt
+        try:
+            extra_args = kwargs.get("agent_cli_args") or []
+            if isinstance(extra_args, (list, tuple)):
+                cmd += [str(x) for x in extra_args if x is not None]
+        except Exception:
+            pass
+
         # Final positional: the prompt
         if prompt:
             cmd.append(prompt)

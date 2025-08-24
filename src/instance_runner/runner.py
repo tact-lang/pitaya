@@ -103,6 +103,7 @@ async def run_instance(
     model_mapping_checksum: Optional[str] = None,
     allow_overwrite_protected_refs: bool = False,
     allow_global_session_volume: bool = False,
+    agent_cli_args: Optional[list[str]] = None,
 ) -> InstanceResult:
     """
     Execute a single AI coding instance in Docker.
@@ -257,6 +258,7 @@ async def run_instance(
             max_turns=max_turns,
             allow_overwrite_protected_refs=allow_overwrite_protected_refs,
             allow_global_session_volume=allow_global_session_volume,
+            agent_cli_args=agent_cli_args,
         )
 
         # Success or non-retryable error
@@ -362,6 +364,7 @@ async def _run_instance_attempt(
     max_turns: Optional[int] = None,
     allow_overwrite_protected_refs: bool = False,
     allow_global_session_volume: bool = False,
+    agent_cli_args: Optional[list[str]] = None,
 ) -> InstanceResult:
     """Single attempt at running an instance (internal helper for retry logic)."""
     start_time = time.time()
@@ -646,6 +649,7 @@ async def _run_instance_attempt(
                 max_turns=max_turns,
                 stream_log_path=log_path,
                 **codex_provider_kwargs,
+                agent_cli_args=(agent_cli_args or []),
             )
 
             agent_session_id = result_data.get("session_id")

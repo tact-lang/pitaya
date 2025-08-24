@@ -72,6 +72,7 @@ class Orchestrator:
         default_plugin_name: str = "claude-code",
         default_model_alias: str = "sonnet",
         default_docker_image: Optional[str] = None,
+        default_agent_cli_args: Optional[List[str]] = None,
     ):
         """
         Initialize orchestrator.
@@ -98,6 +99,11 @@ class Orchestrator:
         self.default_network_egress = str(default_network_egress or "online").lower()
         # Optional global Docker image override
         self.default_docker_image = default_docker_image
+        # Optional default agent CLI passthrough args
+        try:
+            self.default_agent_cli_args: List[str] = list(default_agent_cli_args or [])
+        except Exception:
+            self.default_agent_cli_args = []
         # Load model mapping checksum for handshake (single-process still validates equality)
         try:
             from ..utils.model_mapping import load_model_mapping
@@ -1741,6 +1747,7 @@ class Orchestrator:
                 model_mapping_checksum=self._models_checksum,
                 allow_overwrite_protected_refs=self.allow_overwrite_protected_refs,
                 allow_global_session_volume=self.allow_global_session_volume,
+                agent_cli_args=(info.metadata or {}).get("agent_cli_args"),
             )
             logger.info(
                 f"_execute_instance: run_instance finished iid={instance_id} success={result.success} status={getattr(result,'status',None)}"
@@ -2681,6 +2688,7 @@ class Orchestrator:
                 ),
                 allow_overwrite_protected_refs=self.allow_overwrite_protected_refs,
                 allow_global_session_volume=self.allow_global_session_volume,
+                agent_cli_args=(instance_info.metadata or {}).get("agent_cli_args"),
             )
 
             # Update state
