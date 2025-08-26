@@ -104,6 +104,7 @@ async def run_instance(
     allow_overwrite_protected_refs: bool = False,
     allow_global_session_volume: bool = False,
     agent_cli_args: Optional[list[str]] = None,
+    force_commit: bool = False,
 ) -> InstanceResult:
     """
     Execute a single AI coding instance in Docker.
@@ -259,6 +260,7 @@ async def run_instance(
             allow_overwrite_protected_refs=allow_overwrite_protected_refs,
             allow_global_session_volume=allow_global_session_volume,
             agent_cli_args=agent_cli_args,
+            force_commit=force_commit,
         )
 
         # Success or non-retryable error
@@ -365,6 +367,7 @@ async def _run_instance_attempt(
     allow_overwrite_protected_refs: bool = False,
     allow_global_session_volume: bool = False,
     agent_cli_args: Optional[list[str]] = None,
+    force_commit: bool = False,
 ) -> InstanceResult:
     """Single attempt at running an instance (internal helper for retry logic)."""
     start_time = time.time()
@@ -669,6 +672,40 @@ async def _run_instance_attempt(
             # Phase 5: Result Collection (includes branch import)
             logger.info("Collecting results and importing branch")
             emit_event("instance.result_collection_started", {})
+
+            # Optional: force a commit if there are uncommitted changes
+            if force_commit and workspace_dir:
+                try:
+                    # Check for uncommitted changes
+                    status_cmd = [
+                        "git",
+                        "-C",
+                        str(workspace_dir),
+                        "status",
+                        "--porcelain",
+                    ]
+                    rc, out = await git_ops._run_command(status_cmd)  # type: ignore[attr-defined]
+                    if rc == 0 and (out or "").strip():
+                        # Stage all and commit
+                        await git_ops._run_command(["git", "-C", str(workspace_dir), "add", "-A"])  # type: ignore[attr-defined]
+                        msg = f"pitaya: force commit (run_id={run_id or ''} iid={instance_id})"
+                        commit_cmd = [
+                            "git",
+                            "-C",
+                            str(workspace_dir),
+                            "commit",
+                            "-m",
+                            msg,
+                        ]
+                        rc2, out2 = await git_ops._run_command(commit_cmd)  # type: ignore[attr-defined]
+                        if rc2 != 0:
+                            logger.debug(
+                                f"force-commit skipped (git commit failed): {out2}"
+                            )
+                        else:
+                            logger.info("force-commit created a commit in workspace")
+                except Exception as e:
+                    logger.debug(f"force-commit error ignored: {e}")
 
             # Import work from workspace to host repository according to policy
             import_info = await git_ops.import_branch(

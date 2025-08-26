@@ -73,6 +73,7 @@ class Orchestrator:
         default_model_alias: str = "sonnet",
         default_docker_image: Optional[str] = None,
         default_agent_cli_args: Optional[List[str]] = None,
+        force_commit: bool = False,
     ):
         """
         Initialize orchestrator.
@@ -104,6 +105,8 @@ class Orchestrator:
             self.default_agent_cli_args: List[str] = list(default_agent_cli_args or [])
         except Exception:
             self.default_agent_cli_args = []
+        # Runner behavior: force a commit if workspace has changes
+        self.force_commit: bool = bool(force_commit)
         # Load model mapping checksum for handshake (single-process still validates equality)
         try:
             from ..utils.model_mapping import load_model_mapping
@@ -1748,6 +1751,7 @@ class Orchestrator:
                 allow_overwrite_protected_refs=self.allow_overwrite_protected_refs,
                 allow_global_session_volume=self.allow_global_session_volume,
                 agent_cli_args=(info.metadata or {}).get("agent_cli_args"),
+                force_commit=self.force_commit,
             )
             logger.info(
                 f"_execute_instance: run_instance finished iid={instance_id} success={result.success} status={getattr(result,'status',None)}"
@@ -2689,6 +2693,7 @@ class Orchestrator:
                 allow_overwrite_protected_refs=self.allow_overwrite_protected_refs,
                 allow_global_session_volume=self.allow_global_session_volume,
                 agent_cli_args=(instance_info.metadata or {}).get("agent_cli_args"),
+                force_commit=self.force_commit,
             )
 
             # Update state
