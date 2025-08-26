@@ -74,6 +74,7 @@ class Orchestrator:
         default_docker_image: Optional[str] = None,
         default_agent_cli_args: Optional[List[str]] = None,
         force_commit: bool = False,
+        explicit_max_parallel: bool = False,
     ):
         """
         Initialize orchestrator.
@@ -107,6 +108,8 @@ class Orchestrator:
             self.default_agent_cli_args = []
         # Runner behavior: force a commit if workspace has changes
         self.force_commit: bool = bool(force_commit)
+        # Whether operator explicitly set max_parallel (override guards/policies)
+        self._explicit_max_parallel = bool(explicit_max_parallel)
         # Load model mapping checksum for handshake (single-process still validates equality)
         try:
             from ..utils.model_mapping import load_model_mapping
@@ -251,9 +254,11 @@ class Orchestrator:
                 logger.info(
                     f"Parallelism(auto): host_cpu={host_cpu}, per_container={per_container} -> max_parallel_instances={adaptive}"
                 )
-            # Oversubscription warning
+            # Oversubscription warning only when not explicit
             try:
-                if (int(self.max_parallel_instances) * per_container) > host_cpu:
+                if (
+                    int(self.max_parallel_instances) * per_container
+                ) > host_cpu and not getattr(self, "_explicit_max_parallel", False):
                     logger.warning(
                         f"Configured parallelism may oversubscribe CPU: max_parallel_instances={self.max_parallel_instances}, per_container_cpu={per_container}, host_cpu={host_cpu}"
                     )
@@ -266,8 +271,11 @@ class Orchestrator:
         self._resource_pool = asyncio.Semaphore(int(self.max_parallel_instances or 1))
 
         # Start multiple background executors for true parallel execution
-        # Start a reasonable number of executors (min of max_parallel and 10)
-        num_executors = min(int(self.max_parallel_instances or 1), 10)
+        # If explicit max-parallel set, honor fully; otherwise cap at 10
+        if getattr(self, "_explicit_max_parallel", False):
+            num_executors = int(self.max_parallel_instances or 1)
+        else:
+            num_executors = min(int(self.max_parallel_instances or 1), 10)
         for i in range(num_executors):
             task = asyncio.create_task(self._instance_executor())
             self._executor_tasks.append(task)
@@ -1359,13 +1367,21 @@ class Orchestrator:
                 slope = 0.0
 
             async with self._admission_lock:
-                cpu_ok = (self._cpu_in_use + cpu_need) <= self._host_cpu
-                mem_ok = (self._mem_in_use_gb + mem_need_gb) <= int(
-                    self._host_mem_gb * self._mem_guard_pct
-                )
-                disk_ok = (free_gb >= self._disk_min_free_gb) and (
-                    slope <= self._pack_max_slope_mib_per_min
-                )
+                if getattr(self, "_explicit_max_parallel", False):
+                    # Honor operator's explicit parallel setting: bypass CPU/memory guard; keep disk guard
+                    disk_ok = (free_gb >= self._disk_min_free_gb) and (
+                        slope <= self._pack_max_slope_mib_per_min
+                    )
+                    cpu_ok = True
+                    mem_ok = True
+                else:
+                    cpu_ok = (self._cpu_in_use + cpu_need) <= self._host_cpu
+                    mem_ok = (self._mem_in_use_gb + mem_need_gb) <= int(
+                        self._host_mem_gb * self._mem_guard_pct
+                    )
+                    disk_ok = (free_gb >= self._disk_min_free_gb) and (
+                        slope <= self._pack_max_slope_mib_per_min
+                    )
 
                 if cpu_ok and mem_ok and disk_ok:
                     self._cpu_in_use += cpu_need

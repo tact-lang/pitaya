@@ -10,8 +10,8 @@ from dataclasses import dataclass
 from typing import List, TYPE_CHECKING
 
 from ...shared import InstanceResult
-from .base import Strategy, StrategyConfig
 from ...exceptions import StrategyError
+from .base import Strategy, StrategyConfig
 
 if TYPE_CHECKING:
     from ..strategy_context import StrategyContext
@@ -67,6 +67,8 @@ class ScoringStrategy(Strategy):
         Returns:
             List containing the scored instance result
         """
+        if not (prompt or "").strip():
+            raise StrategyError("scoring: prompt is required (non-empty)")
         config = self.create_config()
 
         # Phase 1: Generate solution

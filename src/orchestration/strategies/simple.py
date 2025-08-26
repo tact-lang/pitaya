@@ -9,6 +9,7 @@ import logging
 from typing import List, TYPE_CHECKING
 
 from ...shared import InstanceResult
+from ...exceptions import StrategyError
 from .base import Strategy, StrategyConfig
 
 if TYPE_CHECKING:
@@ -50,6 +51,8 @@ class SimpleStrategy(Strategy):
         Returns:
             List containing the single instance result
         """
+        if not (prompt or "").strip():
+            raise StrategyError("simple: prompt is required (non-empty)")
         logger.info(f"SimpleStrategy.execute called with prompt: {prompt[:50]}...")
 
         # Durable run with key

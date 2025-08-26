@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from typing import List, TYPE_CHECKING
 
 from ...shared import InstanceResult
+from ...exceptions import StrategyError
 from .base import Strategy, StrategyConfig
 
 if TYPE_CHECKING:
@@ -65,6 +66,8 @@ class IterativeStrategy(Strategy):
         Returns:
             List containing the final refined result
         """
+        if not (prompt or "").strip():
+            raise StrategyError("iterative: prompt is required (non-empty)")
         config = self.create_config()
 
         # Start with the initial implementation

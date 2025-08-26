@@ -267,11 +267,7 @@ class OrchestratorCLI:
         g_limits.add_argument(
             "--timeout", type=int, default=3600, help="Timeout per instance (seconds)"
         )
-        g_limits.add_argument(
-            "--parallel",
-            choices=["conservative", "balanced", "aggressive"],
-            help="Preset resources: 1C/2G, 2C/4G, 3C/6-8G",
-        )
+        # Legacy parallel presets removed; use --max-parallel or auto
         g_limits.add_argument(
             "--allow-global-session-volume",
             action="store_true",
@@ -1573,12 +1569,9 @@ class OrchestratorCLI:
         if args.show_run:
             return await self.run_show_run(args)
 
-        # Check for prompt or resume
-        if not args.prompt and not args.resume and not args.resume_fresh:
-            self.console.print(
-                "[red]Error: Either provide a prompt or use --resume/--resume-fresh[/red]"
-            )
-            return 1
+        # Normalize missing prompt to empty string and let strategies validate if needed
+        if not args.resume and not args.resume_fresh:
+            args.prompt = getattr(args, "prompt", "") or ""
 
         # Perform pre-flight checks for new runs
         if not args.resume and not args.resume_fresh:
@@ -1786,20 +1779,7 @@ class OrchestratorCLI:
         # Store allow flags for constructor
         allow_overwrite = bool(getattr(args, "allow_overwrite_protected_refs", False))
 
-        # Apply parallel preset before building limits
-        preset = getattr(args, "parallel", None)
-        if preset:
-            runner = full_config.setdefault("runner", {})
-            if preset == "conservative":
-                runner["cpu_limit"] = 1
-                runner["memory_limit"] = "2g"
-            elif preset == "balanced":
-                runner["cpu_limit"] = 2
-                runner["memory_limit"] = "4g"
-            elif preset == "aggressive":
-                runner["cpu_limit"] = 3
-                # Allow operator to override memory via env/config; default 6g
-                runner["memory_limit"] = runner.get("memory_limit", "6g")
+        # Parallel presets removed. Concurrency is either auto (default) or explicitly set via --max-parallel.
 
         # Configure container limits from merged config
         memory_limit_str = full_config["runner"]["memory_limit"]
