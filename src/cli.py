@@ -277,6 +277,11 @@ class OrchestratorCLI:
             action="store_true",
             help="Share agent session across runs (advanced)",
         )
+        g_limits.add_argument(
+            "--force-commit",
+            action="store_true",
+            help="Force a git commit in the workspace after agent finishes (if there are changes)",
+        )
 
         # Config, state & logs group
         g_state = parser.add_argument_group("Config, State & Logs")
@@ -1623,6 +1628,8 @@ class OrchestratorCLI:
             ] = args.max_parallel
         if hasattr(args, "timeout") and args.timeout:
             cli_config.setdefault("runner", {})["timeout"] = args.timeout
+        if hasattr(args, "force_commit") and args.force_commit:
+            cli_config.setdefault("runner", {})["force_commit"] = True
         if args.model:
             cli_config["model"] = args.model
         if hasattr(args, "plugin") and args.plugin:
@@ -1965,6 +1972,7 @@ class OrchestratorCLI:
             ),
             default_docker_image=full_config.get("runner", {}).get("docker_image"),
             default_agent_cli_args=_agent_cli_args or None,
+            force_commit=bool(full_config.get("runner", {}).get("force_commit", False)),
         )
 
         # Initialize orchestrator
