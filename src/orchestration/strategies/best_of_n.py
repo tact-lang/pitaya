@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from typing import List, TYPE_CHECKING
 
 from ...shared import InstanceResult
+from ...exceptions import StrategyError
 from .base import Strategy, StrategyConfig
 from .scoring import ScoringStrategy
 
@@ -76,6 +77,8 @@ class BestOfNStrategy(Strategy):
         Returns:
             List containing the best scoring result
         """
+        if not (prompt or "").strip():
+            raise StrategyError("best-of-n: prompt is required (non-empty)")
         config = self.create_config()
         logger.info(f"BestOfNStrategy starting with n={config.n}")
 

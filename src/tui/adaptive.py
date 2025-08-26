@@ -15,7 +15,7 @@ from rich.align import Align
 from rich.console import Group
 
 from .models import RunDisplay, InstanceDisplay, InstanceStatus
-from datetime import datetime
+from datetime import datetime, timezone
 
 
 class AdaptiveDisplay:
@@ -29,6 +29,14 @@ class AdaptiveDisplay:
             "dense": self._render_dense,
         }
         self._color_scheme = "default"  # default|accessible
+
+    def _aware(self, dt: datetime | None) -> datetime:
+        """Return a timezone-aware datetime (UTC) for safe comparisons/sorts."""
+        if dt is None:
+            return datetime.now(timezone.utc)
+        if dt.tzinfo is None:
+            return dt.replace(tzinfo=timezone.utc)
+        return dt
 
     def set_color_scheme(self, scheme: str) -> None:
         s = (scheme or "default").strip().lower()
@@ -108,7 +116,7 @@ class AdaptiveDisplay:
                 strategy_instances,
                 key=lambda i: (
                     status_order.get(i.status, 3),
-                    i.started_at or datetime.now(),
+                    self._aware(i.started_at),
                 ),
             )
             # Create instance panels
@@ -333,7 +341,7 @@ class AdaptiveDisplay:
             key=lambda i: (
                 i.strategy_name,
                 status_order.get(i.status, 3),
-                i.started_at or datetime.now(),
+                self._aware(i.started_at),
             ),
         )
 
@@ -434,7 +442,7 @@ class AdaptiveDisplay:
 
         return Panel(table, border_style="blue", padding=(0, 1))
 
-    def _render_dense(self, run: RunDisplay) -> RenderableType:
+    def _render_dense(self, run: RunDisplay, frame_now=None) -> RenderableType:
         """Render dense view for >30 instances with minimal per-instance lines (phase/runtime)."""
         panels = []
         try:
@@ -463,7 +471,7 @@ class AdaptiveDisplay:
                 items,
                 key=lambda i: (
                     status_order.get(i.status, 3),
-                    i.started_at or datetime.now(),
+                    self._aware(i.started_at),
                 ),
             )
             table = Table(show_header=False, expand=True, padding=(0, 1))
@@ -492,11 +500,18 @@ class AdaptiveDisplay:
                 try:
                     secs = inst.duration_seconds or 0
                     if inst.status == InstanceStatus.RUNNING and inst.started_at:
-                        now = (
-                            datetime.now(inst.started_at.tzinfo)
-                            if inst.started_at.tzinfo
-                            else datetime.now()
-                        )
+                        if frame_now is not None:
+                            now = (
+                                frame_now
+                                if inst.started_at.tzinfo
+                                else frame_now.replace(tzinfo=None)
+                            )
+                        else:
+                            now = (
+                                datetime.now(inst.started_at.tzinfo)
+                                if inst.started_at.tzinfo
+                                else datetime.now()
+                            )
                         secs = max(secs, (now - inst.started_at).total_seconds())
                     if secs > 0:
                         dur = self._format_duration(secs)
