@@ -136,7 +136,7 @@ The CLI is designed to be discoverable and production-ready. Run `pitaya --help`
 Highlights
 
 - Strategy: `--strategy <name>` (use `-S key=value` for strategy params)
-- Model: `--model <alias>` (aliases resolved via `models.yaml` when applicable)
+- Model: `--model <name>`
 - Plugin: `--plugin <claude-code|codex>`
 - Parallel runs: `--runs <N>`
 - TUI controls: `--no-tui`, `--output <streaming|json|quiet>`
@@ -195,7 +195,7 @@ CLI overrides config; `-S` only affects the selected strategy.
 
 ## Models
 
-Some plugins (e.g., Claude Code) validate model aliases via `models.yaml`. If an alias isn’t defined, Pitaya warns and passes the string through to the plugin.
+Plugins accept model identifiers as provided. Claude Code commonly uses `sonnet`, `haiku`, or `opus`; OpenAI‑compatible providers accept their own model IDs. No `models.yaml` mapping is used.
 
 ## Docker & Plugins
 
@@ -234,7 +234,7 @@ Some plugins (e.g., Claude Code) validate model aliases via `models.yaml`. If an
 
 - Cannot connect to Docker: start Docker Desktop / system service; run `docker info`
 - Missing credentials: set `CLAUDE_CODE_OAUTH_TOKEN` or `ANTHROPIC_API_KEY` (Claude), or `OPENAI_API_KEY` (Codex)
-- Model alias not found: add it to `models.yaml` or pass a direct model ID
+- Model not recognized by the agent: pass a valid model ID for your provider
 - Slow or flaky network: use `--parallel conservative` or `--max-parallel <n>`
 - Clean stale state: `pitaya --prune` and `pitaya --clean-containers <run_id>`
 

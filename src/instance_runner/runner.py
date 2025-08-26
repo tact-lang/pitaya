@@ -100,7 +100,6 @@ async def run_instance(
     skip_empty_import: bool = True,
     network_egress: Optional[str] = None,
     max_turns: Optional[int] = None,
-    model_mapping_checksum: Optional[str] = None,
     allow_overwrite_protected_refs: bool = False,
     allow_global_session_volume: bool = False,
     agent_cli_args: Optional[list[str]] = None,
@@ -161,36 +160,9 @@ async def run_instance(
     # Use plugin's default image if not specified
     if docker_image is None:
         docker_image = plugin.docker_image
-    # Defensive model validation and resolution (via models.yaml mapping)
-    # For non-validated plugins, allow passthrough model ids to the plugin.
+    # Model IDs are passed through as provided; no models.yaml enforcement.
+    # Plugins can interpret model identifiers as they see fit.
     resolved_model_id = model
-    try:
-        from ..utils.model_mapping import load_model_mapping
-
-        mapping, _checksum = load_model_mapping()
-        # Optional handshake: ensure checksum matches orchestrator's view
-        if model_mapping_checksum and _checksum != model_mapping_checksum:
-            raise ValidationError(
-                "models.yaml checksum mismatch between orchestration and runner"
-            )
-        allowed_models = set(mapping.keys())
-        if model in allowed_models:
-            resolved_model_id = mapping.get(model, model)
-        else:
-            # Only enforce strict validation for plugins that require mapping
-            if getattr(plugin, "name", "claude-code") == "claude-code":
-                raise ValidationError(
-                    f"Unknown model: {model}. Allowed: {sorted(allowed_models)}"
-                )
-            # For other plugins, keep original model (passthrough)
-    except Exception:
-        # Fallback strictness only for plugins that require mapping
-        if getattr(plugin, "name", "claude-code") == "claude-code":
-            allowed_models = {"sonnet", "opus", "haiku"}
-            if model not in allowed_models:
-                raise ValidationError(
-                    f"Unknown model: {model}. Allowed: {sorted(allowed_models)}"
-                )
 
     # Validate plugin environment
     # Convert AuthConfig to dict for plugin
