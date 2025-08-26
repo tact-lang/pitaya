@@ -1844,20 +1844,17 @@ class OrchestratorCLI:
         # Respect global session volume consent by setting env for runner
         allow_global_session = bool(getattr(args, "allow_global_session_volume", False))
 
-        # Resolve 'auto' for max_parallel per spec
-        if isinstance(max_parallel, str) and max_parallel.lower() == "auto":
-            try:
-                host_cpu = max(1, os.cpu_count() or 1)
-                per_container = max(1, int(container_limits.cpu_count))
-                computed = max(2, min(20, host_cpu // per_container))
-                max_parallel_val = computed
-            except Exception:
-                max_parallel_val = 20
-        else:
-            try:
+        # Resolve max_parallel without host resource calculations
+        try:
+            if isinstance(max_parallel, str):
+                # Accept numeric strings; treat non-numeric (e.g., 'auto') as default 5
                 max_parallel_val = int(max_parallel)
-            except Exception:
-                max_parallel_val = 20
+            elif isinstance(max_parallel, int):
+                max_parallel_val = max_parallel
+            else:
+                max_parallel_val = 5
+        except Exception:
+            max_parallel_val = 5
 
         # Proxy automatic egress defaults removed
 
