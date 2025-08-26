@@ -124,8 +124,11 @@ class GitOperations:
                 sidx = "0"
                 khash = (instance_id or "")[0:8] or "x"
 
-            # Path: {base}/pitaya/${run_id}/i_${sidx}_${khash} (stable across resume suffixes)
-            workspace_dir = base_dir / f"pitaya/{run_id}/i_{sidx}_{khash}"
+            # Path: {base}/pitaya/${run_id}/i_${sidx}_${khash}_${iid8}
+            # Include a short instance_id suffix to avoid collisions when many
+            # parallel instances share the same durable key (khash).
+            iid8 = (instance_id or "")[:8] or "x"
+            workspace_dir = base_dir / f"pitaya/{run_id}/i_{sidx}_{khash}_{iid8}"
         else:
             # Fallback for standalone usage
             workspace_dir = base_dir / f"pitaya/instance_{instance_id}"
