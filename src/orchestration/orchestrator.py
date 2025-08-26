@@ -207,68 +207,17 @@ class Orchestrator:
         # Clean up orphaned containers from previous runs
         await self.cleanup_orphaned_containers()
 
-        # Resolve max_parallel_instances (simple adaptive default)
-        try:
-            import os
-            import math
-
-            host_cpu = max(1, os.cpu_count() or 1)
-            # cgroup-aware effective CPUs (best-effort)
-            try:
-                import platform
-                from pathlib import Path as _P
-
-                if platform.system() == "Linux":
-                    cpu_max = _P("/sys/fs/cgroup/cpu.max")
-                    if cpu_max.exists():
-                        parts = cpu_max.read_text().strip().split()
-                        if len(parts) >= 2 and parts[0] != "max":
-                            quota = float(parts[0])
-                            period = float(parts[1]) or 100000.0
-                            eff = int(math.ceil(quota / period))
-                            if eff > 0:
-                                host_cpu = eff
-                    else:
-                        q = _P("/sys/fs/cgroup/cpu/cpu.cfs_quota_us")
-                        p = _P("/sys/fs/cgroup/cpu/cpu.cfs_period_us")
-                        if q.exists() and p.exists():
-                            quota = float(q.read_text().strip() or "0")
-                            period = float(p.read_text().strip() or "100000")
-                            if quota > 0 and period > 0:
-                                eff = int(math.ceil(quota / period))
-                                if eff > 0:
-                                    host_cpu = eff
-            except Exception:
-                pass
-            per_container = max(1, int(self.container_limits.cpu_count))
-            adaptive = max(2, min(20, host_cpu // per_container))
-            if self.max_parallel_instances is None:
-                self.max_parallel_instances = adaptive
-                logger.info(
-                    f"Parallelism(auto): host_cpu={host_cpu}, per_container={per_container} -> max_parallel_instances={adaptive}"
-                )
-            # Oversubscription warning only when not explicit
-            try:
-                if (
-                    int(self.max_parallel_instances) * per_container
-                ) > host_cpu and not getattr(self, "_explicit_max_parallel", False):
-                    logger.warning(
-                        f"Configured parallelism may oversubscribe CPU: max_parallel_instances={self.max_parallel_instances}, per_container_cpu={per_container}, host_cpu={host_cpu}"
-                    )
-            except Exception:
-                pass
-        except Exception as e:
-            logger.debug(f"Adaptive parallelism calc failed: {e}")
+        # Resolve max_parallel_instances without any host CPU/memory calculations.
+        # Default to 5 if not provided by the caller/CLI.
+        if self.max_parallel_instances is None:
+            self.max_parallel_instances = 5
+            logger.info("Parallelism(default): max_parallel_instances=5")
 
         # Initialize resource pool semaphore now that parallelism is resolved
         self._resource_pool = asyncio.Semaphore(int(self.max_parallel_instances or 1))
 
-        # Start multiple background executors for true parallel execution
-        # If explicit max-parallel set, honor fully; otherwise cap at 10
-        if getattr(self, "_explicit_max_parallel", False):
-            num_executors = int(self.max_parallel_instances or 1)
-        else:
-            num_executors = min(int(self.max_parallel_instances or 1), 10)
+        # Start multiple background executors equal to max_parallel_instances
+        num_executors = int(self.max_parallel_instances or 1)
         for i in range(num_executors):
             task = asyncio.create_task(self._instance_executor())
             self._executor_tasks.append(task)
@@ -1321,86 +1270,11 @@ class Orchestrator:
                 break
 
     async def _admission_wait(self, cpu_need: int, mem_need_gb: int) -> None:
-        """Wait until CPU+memory tokens available and disk guard healthy."""
-        import shutil
-        import time as _time
-
-        repo_path = getattr(self, "repo_path", Path.cwd())
-        pack_dir = repo_path / ".git" / "objects" / "pack"
-        start = _time.monotonic()
-        while not self._shutdown:
-            # Disk free space guard
-            try:
-                stat = shutil.disk_usage(str(repo_path))
-                free_gb = stat.free / (1024**3)
-            except Exception:
-                free_gb = self._disk_min_free_gb  # assume OK if unknown
-            # Pack growth slope (MiB/min), best-effort
-            try:
-                size_bytes = 0
-                if pack_dir.exists():
-                    for p in pack_dir.iterdir():
-                        if p.is_file() and (p.suffix in (".pack", ".idx")):
-                            size_bytes += p.stat().st_size
-                now = _time.time()
-                self._pack_series.append((now, size_bytes))
-                slope = 0.0
-                # compute against oldest point >= 5min ago if available
-                oldest = None
-                for ts, sz in list(self._pack_series):
-                    if now - ts >= 300:
-                        oldest = (ts, sz)
-                        break
-                if oldest:
-                    dt_min = max(0.001, (now - oldest[0]) / 60.0)
-                    slope = max(
-                        0.0, (size_bytes - oldest[1]) / (1024.0 * 1024.0) / dt_min
-                    )
-            except Exception:
-                slope = 0.0
-
-            async with self._admission_lock:
-                if getattr(self, "_explicit_max_parallel", False):
-                    # Honor operator's explicit parallel setting: bypass CPU/memory guard; keep disk guard
-                    disk_ok = (free_gb >= self._disk_min_free_gb) and (
-                        slope <= self._pack_max_slope_mib_per_min
-                    )
-                    cpu_ok = True
-                    mem_ok = True
-                else:
-                    cpu_ok = (self._cpu_in_use + cpu_need) <= self._host_cpu
-                    mem_ok = (self._mem_in_use_gb + mem_need_gb) <= int(
-                        self._host_mem_gb * self._mem_guard_pct
-                    )
-                    disk_ok = (free_gb >= self._disk_min_free_gb) and (
-                        slope <= self._pack_max_slope_mib_per_min
-                    )
-
-                if cpu_ok and mem_ok and disk_ok:
-                    self._cpu_in_use += cpu_need
-                    self._mem_in_use_gb += mem_need_gb
-                    return
-
-            # Log periodically while waiting
-            try:
-                if (int((_time.monotonic() - start)) % 10) == 0:
-                    logger.info(
-                        f"admission.wait: cpu_ok={cpu_ok} mem_ok={mem_ok} disk_ok={disk_ok} free_gb={free_gb:.1f} slope_mib_per_min={slope:.1f} in_use(cpu={self._cpu_in_use}/{self._host_cpu}, mem={self._mem_in_use_gb}/{int(self._host_mem_gb*self._mem_guard_pct)})"
-                    )
-            except Exception:
-                pass
-            # Trigger on-run GC/backpressure attempt when disk is the bottleneck
-            if not disk_ok:
-                try:
-                    await self._attempt_on_run_gc()
-                except Exception as e:
-                    logger.debug(f"on-run GC attempt failed: {e}")
-            await asyncio.sleep(0.5)
+        """No-op admission: do not gate on CPU/memory/disk; honor only max_parallel semaphore."""
+        return
 
     async def _admission_release(self, cpu: int, mem_gb: int) -> None:
-        async with self._admission_lock:
-            self._cpu_in_use = max(0, self._cpu_in_use - cpu)
-            self._mem_in_use_gb = max(0, self._mem_in_use_gb - mem_gb)
+        return
 
     async def _attempt_on_run_gc(self) -> None:
         """Best-effort GC to free disk by removing oldest failed workspaces for this run.

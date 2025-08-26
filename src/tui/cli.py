@@ -92,9 +92,7 @@ class OrchestratorTUI:
             "--event-types", nargs="+", help="Filter by event type(s)"
         )
 
-        # Diagnostics
-        g_diag = parser.add_argument_group("Diagnostics")
-        g_diag.add_argument("--debug", action="store_true", help="Enable debug logging")
+        # Diagnostics (debug mode removed; verbose by default)
 
         return parser
 
@@ -137,8 +135,7 @@ class OrchestratorTUI:
             return 2
         except (OSError, IOError) as e:
             self.console.print(f"[red]Error: {e}[/red]")
-            if args.debug:
-                self.console.print_exception()
+            self.console.print_exception()
             return 1
 
     # Connected modes removed

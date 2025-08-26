@@ -245,7 +245,7 @@ def get_default_config() -> Dict[str, Any]:
         "output": "tui",
         "state_dir": Path("./pitaya_state"),
         "logs_dir": Path("./logs"),
-        "debug": False,
+        # Debug mode removed; logs are verbose by default
         # Normative defaults per spec §6.1.1 (subset applied where supported)
         "import_policy": "auto",  # auto|never|always
         "import_conflict_policy": "fail",  # fail|overwrite|suffix
@@ -262,8 +262,8 @@ def get_default_config() -> Dict[str, Any]:
             "tmpfs_size_mb": 512,
         },
         "orchestration": {
-            # Spec default: auto => max(2, min(20, floor(host_cpu / runner.container_cpu)))
-            "max_parallel_instances": "auto",
+            # Default concurrency: 5; use --max-parallel to override
+            "max_parallel_instances": 5,
             # Branch namespace is hierarchical by default
             # Format: orc/<strategy>/<run_id>/k<short8>
             "branch_namespace": "hierarchical",

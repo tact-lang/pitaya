@@ -360,7 +360,6 @@ class OrchestratorCLI:
 
         # Diagnostics group
         g_diag = parser.add_argument_group("Diagnostics")
-        g_diag.add_argument("--debug", action="store_true", help="Enable debug logging")
         g_diag.add_argument(
             "--yes", action="store_true", help="Assume 'yes' for prompts"
         )
@@ -1034,8 +1033,7 @@ class OrchestratorCLI:
 
         except (OSError, json.JSONDecodeError) as e:
             self.console.print(f"[red]Error listing runs: {e}[/red]")
-            if args.debug:
-                self.console.print_exception()
+            self.console.print_exception()
             return 1
 
     async def run_show_run(self, args: argparse.Namespace) -> int:
@@ -1140,8 +1138,7 @@ class OrchestratorCLI:
 
         except (OSError, json.JSONDecodeError) as e:
             self.console.print(f"[red]Error showing run: {e}[/red]")
-            if args.debug:
-                self.console.print_exception()
+            self.console.print_exception()
             return 1
 
     async def run_prune(self, args: argparse.Namespace) -> int:
@@ -1238,8 +1235,7 @@ class OrchestratorCLI:
             return 0
         except Exception as e:
             self.console.print(f"[red]Prune failed: {e}[/red]")
-            if args.debug:
-                self.console.print_exception()
+            self.console.print_exception()
             return 1
 
     def _display_detailed_results(
@@ -1481,7 +1477,7 @@ class OrchestratorCLI:
         setup_structured_logging(
             logs_dir=args.logs_dir,
             run_id=run_id,
-            debug=args.debug,
+            debug=True,
             quiet=args.no_tui and args.output == "quiet",
             no_tui=args.no_tui,
         )
@@ -1638,8 +1634,7 @@ class OrchestratorCLI:
         if args.output:
             cli_config["output"] = args.output
         # Server extension support removed
-        if args.debug:
-            cli_config.setdefault("logging", {})["level"] = "DEBUG"
+        # Always use full logging; no debug toggle
         # Add CLI auth args
         if hasattr(args, "oauth_token") and args.oauth_token:
             cli_config.setdefault("runner", {})["oauth_token"] = args.oauth_token
@@ -1829,35 +1824,30 @@ class OrchestratorCLI:
             "logs_dir"
         ) or full_config.get("logs_dir", Path("./logs"))
 
-        # Log configuration sources (only in debug mode)
-        if full_config.get("debug") or args.debug:
-            self.console.print("[dim]Configuration loaded from:[/dim]")
-            if cli_config:
-                self.console.print("  - Command line arguments")
-            # No Pitaya-specific environment variables are used
-            if dotenv_config:
-                self.console.print("  - .env file")
-            if config:
-                self.console.print(f"  - Config file: {args.config or 'pitaya.yaml'}")
-            self.console.print("  - Built-in defaults")
+        # Log configuration sources unconditionally
+        self.console.print("[dim]Configuration loaded from:[/dim]")
+        if cli_config:
+            self.console.print("  - Command line arguments")
+        if dotenv_config:
+            self.console.print("  - .env file")
+        if config:
+            self.console.print(f"  - Config file: {args.config or 'pitaya.yaml'}")
+        self.console.print("  - Built-in defaults")
 
         # Respect global session volume consent by setting env for runner
         allow_global_session = bool(getattr(args, "allow_global_session_volume", False))
 
-        # Resolve 'auto' for max_parallel per spec
-        if isinstance(max_parallel, str) and max_parallel.lower() == "auto":
-            try:
-                host_cpu = max(1, os.cpu_count() or 1)
-                per_container = max(1, int(container_limits.cpu_count))
-                computed = max(2, min(20, host_cpu // per_container))
-                max_parallel_val = computed
-            except Exception:
-                max_parallel_val = 20
-        else:
-            try:
+        # Resolve max_parallel without host resource calculations
+        try:
+            if isinstance(max_parallel, str):
+                # Accept numeric strings; treat non-numeric (e.g., 'auto') as default 5
                 max_parallel_val = int(max_parallel)
-            except Exception:
-                max_parallel_val = 20
+            elif isinstance(max_parallel, int):
+                max_parallel_val = max_parallel
+            else:
+                max_parallel_val = 5
+        except Exception:
+            max_parallel_val = 5
 
         # Proxy automatic egress defaults removed
 
@@ -2221,8 +2211,7 @@ class OrchestratorCLI:
             return 2
         except (OrchestratorError, DockerError, ValidationError) as e:
             self.console.print(f"[red]Error: {e}[/red]")
-            if args.debug:
-                self.console.print_exception()
+            self.console.print_exception()
             # Shutdown orchestrator
             await self.orchestrator.shutdown()
             return 1
@@ -2653,8 +2642,7 @@ class OrchestratorCLI:
             return 2
         except (OrchestratorError, DockerError, ValidationError) as e:
             self.console.print(f"[red]Error: {e}[/red]")
-            if args.debug:
-                self.console.print_exception()
+            self.console.print_exception()
             # Shutdown orchestrator
             await self.orchestrator.shutdown()
             return 1
