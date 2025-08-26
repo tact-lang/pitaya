@@ -245,7 +245,7 @@ def get_default_config() -> Dict[str, Any]:
         "output": "tui",
         "state_dir": Path("./pitaya_state"),
         "logs_dir": Path("./logs"),
-        "debug": False,
+        # Debug mode removed; logs are verbose by default
         # Normative defaults per spec §6.1.1 (subset applied where supported)
         "import_policy": "auto",  # auto|never|always
         "import_conflict_policy": "fail",  # fail|overwrite|suffix
