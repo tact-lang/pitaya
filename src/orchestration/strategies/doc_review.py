@@ -146,29 +146,8 @@ class DocReviewStrategy(Strategy):
             report_rel = f"{cfg.report_dir}/raw/REPORT_{page['slug']}__r{r_idx}.md"
             ok = _verify_file_in_branch(repo_path, result.branch_name, report_rel)
             if not (result.success and result.branch_name and ok):
-                # One corrective retry with explicit instruction
-                retry_prompt = _build_reviewer_prompt(
-                    page_title=page["title"],
-                    page_path=page["path"],
-                    report_path=report_rel,
-                    corrective=True,
-                )
-                retry_task = {
-                    "prompt": retry_prompt,
-                    "base_branch": base_branch,
-                    "model": cfg.model,
-                }
-                retry_key = ctx.key(
-                    "page", page["slug"], f"r{r_idx}", "review", "attempt-2"
-                )
-                retry_handle = await ctx.run(retry_task, key=retry_key)
-                try:
-                    result = await ctx.wait(retry_handle)
-                except Exception:
-                    return None
-                ok = _verify_file_in_branch(repo_path, result.branch_name, report_rel)
-                if not (result.success and result.branch_name and ok):
-                    return None
+                # No corrective retries; rely on strict prompt to ensure commit
+                return None
 
             # Schedule validator on the reviewer branch
             validator_prompt = _build_validator_prompt(
@@ -207,26 +186,8 @@ class DocReviewStrategy(Strategy):
             try:
                 vres = await ctx.wait(handle)
             except Exception:
-                # One corrective retry prompting to ensure file commit
-                corrective_prompt = _build_validator_prompt(
-                    page_title=page["title"],
-                    page_path=page["path"],
-                    report_path=report_rel,
-                    corrective=True,
-                )
-                vt = {
-                    "prompt": corrective_prompt,
-                    "base_branch": base_branch,
-                    "model": cfg.model,
-                }
-                vkey = ctx.key(
-                    "page", page["slug"], f"r{r_idx}", "validate", "attempt-2"
-                )
-                h2 = await ctx.run(vt, key=vkey)
-                try:
-                    vres = await ctx.wait(h2)
-                except Exception:
-                    return None
+                # No corrective retries
+                return None
 
             ok = _verify_file_in_branch(repo_path, vres.branch_name, report_rel)
             if not (vres.success and vres.branch_name and ok):
@@ -368,13 +329,7 @@ def _build_reviewer_prompt(
     page_title: str,
     page_path: str,
     report_path: str,
-    corrective: bool = False,
 ) -> str:
-    corrective_text = (
-        "IMPORTANT: The required report file was not created previously. Create it at the specified path and commit it in a single commit.\n\n"
-        if corrective
-        else ""
-    )
 
     return (
         f"<role>\n"
@@ -450,18 +405,18 @@ def _build_reviewer_prompt(
         f"Stop only after: the full page has been read; checks executed; all user-visible defects captured; the report file exists with the exact format; "
         f"numbering is continuous; the file is added; and exactly one commit has been made.\n"
         f"</stop_conditions>\n\n"
-        f"{corrective_text}"
+        f"<commit_requirements>\n"
+        f"CRITICAL: This run is considered failed unless you add and commit the report file. "
+        f"Uncommitted workspace changes are ignored by orchestration.\n"
+        f"- Required file: {report_path}\n"
+        f'- Commit exactly once after writing: git add {report_path} && git commit -m "doc-review: add {Path(report_path).name}"\n'
+        f"</commit_requirements>\n"
     )
 
 
 def _build_validator_prompt(
-    *, page_title: str, page_path: str, report_path: str, corrective: bool = False
+    *, page_title: str, page_path: str, report_path: str
 ) -> str:
-    corrective_text = (
-        "IMPORTANT: Ensure the refined report file exists at the specified path and commit it in a single commit.\n\n"
-        if corrective
-        else ""
-    )
 
     return (
         f"<role>\n"
@@ -511,7 +466,12 @@ def _build_validator_prompt(
         f"<persistence>\n"
         f"Keep going until all findings are validated or removed, the format is exact, numbering is correct, and the single commit is made.\n"
         f"</persistence>\n\n"
-        f"{corrective_text}"
+        f"<commit_requirements>\n"
+        f"CRITICAL: This run is considered failed unless you add and commit the refined report file. "
+        f"Uncommitted workspace changes are ignored by orchestration.\n"
+        f"- Required file: {report_path}\n"
+        f'- Commit exactly once after refining: git add {report_path} && git commit -m "doc-review: refine {Path(report_path).name}"\n'
+        f"</commit_requirements>\n"
     )
 
 
@@ -557,6 +517,12 @@ def _build_composer_prompt(inputs: List[Tuple[str, str, str]], report_dir: str) 
         f"<persistence>\n"
         f"Keep going until the final merged report exists at the required path with continuous numbering and the single commit is made.\n"
         f"</persistence>\n\n"
+        f"<commit_requirements>\n"
+        f"CRITICAL: This run is considered failed unless you add and commit the final report file. "
+        f"Uncommitted workspace changes are ignored by orchestration.\n"
+        f"- Required file: {report_dir}/REPORT.md\n"
+        f'- Commit exactly once after composing: git add {report_dir}/REPORT.md && git commit -m "doc-review: compose final report"\n'
+        f"</commit_requirements>\n\n"
     )
 
     # Concatenate inputs; include a clear, minimal provenance marker before each source
