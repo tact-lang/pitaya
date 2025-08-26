@@ -110,14 +110,7 @@ class Orchestrator:
         self.force_commit: bool = bool(force_commit)
         # Whether operator explicitly set max_parallel (override guards/policies)
         self._explicit_max_parallel = bool(explicit_max_parallel)
-        # Load model mapping checksum for handshake (single-process still validates equality)
-        try:
-            from ..utils.model_mapping import load_model_mapping
-
-            _map, _cs = load_model_mapping()
-            self._models_checksum = _cs
-        except Exception:
-            self._models_checksum = None
+        # models.yaml mapping removed; no checksum handshake
 
         # Log auth config for debugging
         if self.auth_config:
@@ -1763,7 +1756,6 @@ class Orchestrator:
                 reuse_container=bool(
                     (info.metadata or {}).get("reuse_container", True)
                 ),
-                model_mapping_checksum=self._models_checksum,
                 allow_overwrite_protected_refs=self.allow_overwrite_protected_refs,
                 allow_global_session_volume=self.allow_global_session_volume,
                 agent_cli_args=(info.metadata or {}).get("agent_cli_args"),

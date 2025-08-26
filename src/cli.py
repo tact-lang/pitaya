@@ -144,7 +144,7 @@ class OrchestratorCLI:
             "--model",
             type=str,
             default="sonnet",
-            help="Model name/alias (plugin-agnostic; see models.yaml)",
+            help="Model name (plugin-agnostic)",
         )
         g_model.add_argument(
             "--plugin",
@@ -1753,23 +1753,7 @@ class OrchestratorCLI:
         except Exception:
             pass
 
-        # Optional models.yaml drift note: only when alias missing/mismatch
-        try:
-            from .utils.model_mapping import load_model_mapping
-
-            mapping, checksum = load_model_mapping()
-            alias = full_config.get("model")
-            if alias:
-                if alias not in mapping:
-                    self.console.print(
-                        f"[yellow]models.yaml: alias '{alias}' not found (checksum {checksum[:8]}). Using alias as-is.[/yellow]"
-                    )
-                elif mapping.get(alias) != alias:
-                    self.console.print(
-                        f"[dim]models.yaml drift: checksum {checksum[:8]} • {alias} -> {mapping.get(alias)}[/dim]"
-                    )
-        except Exception:
-            pass
+        # models.yaml alias mapping removed; no drift checks
 
         # Validate merged configuration; render compact error table on invalid
         if not self._validate_full_config(full_config, args):
@@ -2803,14 +2787,7 @@ class OrchestratorCLI:
                 )
         except Exception:
             pass
-        # models.yaml
-        try:
-            from .utils.model_mapping import load_model_mapping
-
-            mapping, cs = load_model_mapping()
-            pass_line("models.yaml", f"checksum {cs[:8]}")
-        except Exception as e:
-            info_line("models.yaml", f"warn: {e}")
+        # models.yaml checks removed
         # SELinux / WSL2 hints
         try:
             import platform
