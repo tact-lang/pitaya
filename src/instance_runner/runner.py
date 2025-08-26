@@ -699,7 +699,9 @@ async def _run_instance_attempt(
                         ]
                         rc2, out2 = await git_ops._run_command(commit_cmd)  # type: ignore[attr-defined]
                         if rc2 != 0:
-                            logger.debug(f"force-commit skipped (git commit failed): {out2}")
+                            logger.debug(
+                                f"force-commit skipped (git commit failed): {out2}"
+                            )
                         else:
                             logger.info("force-commit created a commit in workspace")
                 except Exception as e:
