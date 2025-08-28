@@ -233,7 +233,9 @@ class Orchestrator:
         # Initialize resource pool semaphore now that parallelism is resolved
         self._resource_pool = asyncio.Semaphore(int(self.max_parallel_instances or 1))
         # Initialize startup pool (caps concurrent workspace preparations)
-        self._startup_pool = asyncio.Semaphore(int(self.max_parallel_startup or self.max_parallel_instances or 1))
+        self._startup_pool = asyncio.Semaphore(
+            int(self.max_parallel_startup or self.max_parallel_instances or 1)
+        )
 
         # Start multiple background executors equal to max_parallel_instances
         num_executors = int(self.max_parallel_instances or 1)

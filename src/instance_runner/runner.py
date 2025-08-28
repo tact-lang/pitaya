@@ -437,7 +437,9 @@ async def _run_instance_attempt(
                     emit_event(
                         "instance.workspace_preparing", {"base_branch": base_branch}
                     )
-                    logger.info("Calling git_ops.prepare_workspace (startup slot acquired)...")
+                    logger.info(
+                        "Calling git_ops.prepare_workspace (startup slot acquired)..."
+                    )
                     workspace_dir = await git_ops.prepare_workspace(
                         repo_path=repo_path,
                         base_branch=base_branch,
