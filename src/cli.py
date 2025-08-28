@@ -545,7 +545,6 @@ class OrchestratorCLI:
             True if all checks pass, False otherwise
         """
         from pathlib import Path
-        import shutil
 
         def _try(message: str, bullets: list[str]) -> None:
             self.console.print(f"[red]{message}[/red]")
@@ -631,23 +630,7 @@ class OrchestratorCLI:
             self.console.print(f"[red]Error checking working tree: {e}[/red]")
             return False
 
-        # 4. Check disk space (20GB minimum as per spec)
-        try:
-            stat = shutil.disk_usage(str(repo_path))
-            free_gb = stat.free / (1024**3)
-            if free_gb < 20:
-                _try(
-                    f"insufficient disk space: {free_gb:.1f}GB free (<20GB)",
-                    [
-                        "free space on this volume",
-                        "change repo to a disk with more space",
-                    ],
-                )
-                return False
-        except OSError as e:
-            self.console.print(
-                f"[yellow]Warning: Could not check disk space: {e}[/yellow]"
-            )
+        # 4. Disk space check removed: do not block runs based on free space.
 
         # 5. Quick test of Docker image availability (non-blocking)
         # This is a quick check - actual image pull happens later if needed

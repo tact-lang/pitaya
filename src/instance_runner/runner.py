@@ -401,18 +401,7 @@ async def _run_instance_attempt(
         if not branch_name:
             raise ValidationError("Branch name must be provided by orchestration")
 
-        # Validate disk space (20GB minimum as per spec)
-        try:
-            import shutil
-
-            stat = shutil.disk_usage(str(repo_path))
-            free_gb = stat.free / (1024**3)
-            if free_gb < 20:
-                raise ValidationError(
-                    f"Insufficient disk space: {free_gb:.1f}GB free (20GB required)"
-                )
-        except OSError as e:
-            logger.warning(f"Could not check disk space: {e}")
+        # Disk space check removed: proceed without enforcing a minimum.
 
         # Initialize components
         docker_manager = DockerManager()
