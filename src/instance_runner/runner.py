@@ -734,7 +734,7 @@ async def _run_instance_attempt(
             emit_event("instance.phase_completed", {"phase": "result_collection"})
 
             # Phase 6: Cleanup Decision
-            # For successful instances, clean up workspace but keep container
+            # For successful instances, clean up workspace and remove container immediately
             logger.info("Instance completed successfully")
 
             # Calculate duration before any cleanup
@@ -773,30 +773,31 @@ async def _run_instance_attempt(
                     "instance.workspace_cleaned", {"workspace_dir": str(workspace_dir)}
                 )
 
-            # Update container status before stopping
+            # Update container status and remove it immediately
             if container:
-                await docker_manager.update_container_status(container, "success")
-
-            # Stop container if finalize=True (but keep it for session persistence)
-            if finalize and container:
-                # Stop container in background to avoid blocking result return
-                async def stop_container_background():
+                try:
+                    await docker_manager.update_container_status(container, "success")
+                except Exception:
+                    pass
+                if finalize:
                     try:
                         try:
                             await docker_manager.stop_heartbeat(container)
                         except Exception:
                             pass
-                        await docker_manager.stop_container(container)
-                        emit_event(
-                            "instance.container_stopped",
-                            {"container_name": container_name},
-                        )
+                        # Inform UI it was stopped, then remove
+                        try:
+                            emit_event(
+                                "instance.container_stopped",
+                                {"container_name": container_name},
+                            )
+                        except Exception:
+                            pass
+                        await docker_manager.cleanup_container(container)
                     except Exception as e:
                         logger.warning(
-                            f"Failed to stop container {container_name}: {e}"
+                            f"Failed to cleanup container {container_name}: {e}"
                         )
-
-                asyncio.create_task(stop_container_background())
 
             emit_event("instance.phase_completed", {"phase": "cleanup_decision"})
 
@@ -885,6 +886,20 @@ async def _run_instance_attempt(
 
             # Keep workspace for debugging on timeout
             completed_at = datetime.now(timezone.utc).isoformat()
+            # Remove container on timeout (treat as failure for cleanup policy)
+            if container:
+                try:
+                    await docker_manager.update_container_status(container, "failed")
+                except Exception:
+                    pass
+                try:
+                    try:
+                        await docker_manager.stop_heartbeat(container)
+                    except Exception:
+                        pass
+                    await docker_manager.cleanup_container(container)
+                except Exception:
+                    pass
             return InstanceResult(
                 success=False,
                 error=str(e),
@@ -918,10 +933,20 @@ async def _run_instance_attempt(
                 },
             )
 
-            # Keep container for debugging and potential resume (per spec)
-            # Update container status to failed
+            # Update container status and remove container immediately on failure
             if container:
-                await docker_manager.update_container_status(container, "failed")
+                try:
+                    await docker_manager.update_container_status(container, "failed")
+                except Exception:
+                    pass
+                try:
+                    try:
+                        await docker_manager.stop_heartbeat(container)
+                    except Exception:
+                        pass
+                    await docker_manager.cleanup_container(container)
+                except Exception:
+                    pass
 
             completed_at = datetime.now(timezone.utc).isoformat()
             return InstanceResult(
@@ -985,10 +1010,20 @@ async def _run_instance_attempt(
                 },
             )
 
-            # Keep container for debugging and potential resume (per spec)
-            # Update container status to failed
+            # Update container status and remove container immediately on unexpected failure
             if container:
-                await docker_manager.update_container_status(container, "failed")
+                try:
+                    await docker_manager.update_container_status(container, "failed")
+                except Exception:
+                    pass
+                try:
+                    try:
+                        await docker_manager.stop_heartbeat(container)
+                    except Exception:
+                        pass
+                    await docker_manager.cleanup_container(container)
+                except Exception:
+                    pass
 
             completed_at = datetime.now(timezone.utc).isoformat()
             return InstanceResult(

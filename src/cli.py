@@ -339,36 +339,7 @@ class OrchestratorCLI:
         g_maint.add_argument(
             "--prune-dry-run", action="store_true", help="Show what would be pruned"
         )
-        g_maint.add_argument(
-            "--clean-containers",
-            metavar="RUN_ID",
-            help="Remove containers and state for a run",
-        )
-        g_maint.add_argument(
-            "--cleanup-run",
-            metavar="RUN_ID",
-            dest="clean_containers",
-            help="Alias for --clean-containers",
-        )
-        g_maint.add_argument(
-            "--clean-volumes",
-            action="store_true",
-            help="Remove unreferenced session volumes (pitaya_home_*)",
-        )
-        g_maint.add_argument(
-            "--older-than",
-            type=float,
-            default=24.0,
-            help="Age threshold in hours for --clean-volumes",
-        )
-        g_maint.add_argument(
-            "--dry-run",
-            action="store_true",
-            help="List cleanup targets without deleting",
-        )
-        g_maint.add_argument(
-            "--force", action="store_true", help="Bypass confirmations for cleanup"
-        )
+        # Cleanup commands removed for simpler UX
 
         # Diagnostics group
         g_diag = parser.add_argument_group("Diagnostics")
@@ -700,108 +671,6 @@ class OrchestratorCLI:
             self.console.print(f"[red]Error loading config file: {e}[/red]")
             sys.exit(1)
 
-    async def run_cleanup(self, args: argparse.Namespace) -> int:
-        """Clean up containers and state for a specific run."""
-        run_id = args.clean_containers
-        # Interactive confirmation unless --yes
-        if not args.yes:
-            if not sys.stdout.isatty():
-                self.console.print(
-                    "[red]Operation requires confirmation. Re-run with --yes.[/red]"
-                )
-                # Spec: non-TTY prompts fail with error exit code (1)
-                return 1
-            self.console.print(
-                f"[yellow]About to clean up run {run_id}. Proceed? (y/N)[/yellow] ",
-                end="",
-            )
-            try:
-                choice = input().strip().lower()
-            except Exception:
-                choice = "n"
-            if choice not in ("y", "yes"):
-                self.console.print("Aborted.")
-                return 1
-        self.console.print(f"[yellow]Cleaning up run {run_id}...[/yellow]")
-
-        # Create Pitaya orchestrator instance just for cleanup
-        orchestrator = Orchestrator(state_dir=args.state_dir, logs_dir=args.logs_dir)
-
-        try:
-            # Initialize Pitaya
-            await orchestrator.initialize()
-
-            # Clean up containers for this specific run
-            from ..instance_runner.docker_manager import DockerManager
-
-            docker_manager = DockerManager()
-            try:
-                await docker_manager.initialize()
-
-                # Find and remove containers with this run_id
-                containers = await docker_manager._list_containers(all=True)
-                cleaned = 0
-
-                for container in containers:
-                    labels = container.labels or {}
-                    c_run_id = labels.get("run_id")
-                    if c_run_id == run_id:
-                        try:
-                            if args.dry_run:
-                                self.console.print(
-                                    f"  Would remove container: {container.name}"
-                                )
-                            else:
-                                if container.status == "running":
-                                    await asyncio.to_thread(container.stop)
-                                await asyncio.to_thread(container.remove)
-                                cleaned += 1
-                                self.console.print(
-                                    f"  Removed container: {container.name}"
-                                )
-                        except Exception as e:
-                            self.console.print(
-                                f"  [red]Failed to remove {container.name}: {e}[/red]"
-                            )
-            finally:
-                docker_manager.close()
-
-            # Remove state directory for this run
-            state_file = args.state_dir / f"{run_id}.json"
-            if state_file.exists():
-                state_file.unlink()
-                self.console.print(f"  Removed state file: {state_file.name}")
-
-            # Remove logs directory for this run
-            logs_dir = args.logs_dir / run_id
-            if logs_dir.exists():
-                import shutil
-
-                shutil.rmtree(logs_dir)
-                self.console.print(f"  Removed logs directory: {logs_dir.name}")
-
-            # Remove results directory for this run
-            results_dir = Path("./results") / run_id
-            if results_dir.exists():
-                import shutil
-
-                shutil.rmtree(results_dir)
-                self.console.print(f"  Removed results directory: {results_dir.name}")
-
-            if args.dry_run:
-                self.console.print(f"[yellow]Dry run complete for {run_id}[/yellow]")
-            else:
-                self.console.print(
-                    f"[green]Cleaned up run {run_id} ({cleaned} containers)[/green]"
-                )
-            return 0
-
-        except (DockerError, OrchestratorError) as e:
-            self.console.print(f"[red]Cleanup failed: {e}[/red]")
-            return 1
-        finally:
-            await orchestrator.shutdown()
-
     def _validate_full_config(
         self, full_config: Dict[str, Any], args: argparse.Namespace
     ) -> bool:
@@ -915,49 +784,6 @@ class OrchestratorCLI:
                 self.console.print(f"{f} | {r} | {ex}")
             return False
         return True
-
-    async def run_clean_volumes(self, args: argparse.Namespace) -> int:
-        """Clean up unreferenced session volumes (pitaya_home_*) per age threshold."""
-        self.console.print(
-            "[yellow]Scanning session volumes (pitaya_home_*)...[/yellow]"
-        )
-        try:
-            from .instance_runner.docker_manager import DockerManager
-
-            dm = DockerManager()
-            await dm.initialize()
-            report = await dm.cleanup_unused_volumes(
-                older_than_hours=float(getattr(args, "older_than", 24.0) or 24.0),
-                dry_run=bool(getattr(args, "dry_run", False)),
-            )
-            dm.close()
-            # Summarize
-            cand = report.get("candidates", [])
-            in_use = report.get("in_use", [])
-            too_young = report.get("too_young", [])
-            removed = report.get("removed", [])
-            errors = report.get("errors", [])
-            if args.dry_run:
-                self.console.print(
-                    f"[blue]Dry-run[/blue]: would remove {len(removed)} volume(s):"
-                )
-                for n in removed:
-                    self.console.print(f"  - {n}")
-            else:
-                self.console.print(f"[green]Removed {len(removed)} volume(s).[/green]")
-            if in_use:
-                self.console.print(f"[dim]In use (skipped): {len(in_use)}[/dim]")
-            if too_young:
-                self.console.print(f"[dim]Too young (skipped): {len(too_young)}[/dim]")
-            if errors:
-                self.console.print(f"[red]Errors: {len(errors)}[/red]")
-                for e in errors[:5]:
-                    self.console.print(f"  - {e}")
-            self.console.print(f"Total candidates: {len(cand)}")
-            return 0
-        except Exception as e:
-            self.console.print(f"[red]Volume cleanup failed: {e}[/red]")
-            return 1
 
     async def run_list_runs(self, args: argparse.Namespace) -> int:
         """List all previous runs."""
@@ -1563,11 +1389,7 @@ class OrchestratorCLI:
             for rec in recommendations:
                 self.console.print(f"[yellow]Platform Note:[/yellow] {rec}")
 
-        # Handle cleanup mode
-        if args.clean_containers:
-            return await self.run_cleanup(args)
-        if getattr(args, "clean_volumes", False):
-            return await self.run_clean_volumes(args)
+        # Cleanup modes removed
 
         # Handle list-runs mode
         if args.list_runs:
@@ -1925,32 +1747,6 @@ class OrchestratorCLI:
             ),
             event_buffer_size=int(
                 full_config.get("orchestration", {}).get("event_buffer_size", 10000)
-            ),
-            container_retention_failed_hours=int(
-                full_config.get("orchestration", {}).get(
-                    "container_retention_failed", 86400
-                )
-                // 3600
-                if isinstance(
-                    full_config.get("orchestration", {}).get(
-                        "container_retention_failed", 86400
-                    ),
-                    int,
-                )
-                else 24
-            ),
-            container_retention_success_hours=int(
-                full_config.get("orchestration", {}).get(
-                    "container_retention_success", 7200
-                )
-                // 3600
-                if isinstance(
-                    full_config.get("orchestration", {}).get(
-                        "container_retention_success", 7200
-                    ),
-                    int,
-                )
-                else 2
             ),
             runner_timeout_seconds=int(
                 full_config.get("runner", {}).get("timeout", 3600)

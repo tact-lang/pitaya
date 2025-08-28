@@ -86,8 +86,6 @@ class Orchestrator:
         auth_config: Optional[AuthConfig] = None,
         snapshot_interval: int = 30,
         event_buffer_size: int = 10000,
-        container_retention_failed_hours: int = 24,
-        container_retention_success_hours: int = 2,
         runner_timeout_seconds: int = 3600,
         default_network_egress: str = "online",
         branch_namespace: str = "flat",
@@ -121,8 +119,6 @@ class Orchestrator:
         self.auth_config = auth_config
         self.snapshot_interval = snapshot_interval
         self.event_buffer_size = event_buffer_size
-        self.container_retention_failed_hours = container_retention_failed_hours
-        self.container_retention_success_hours = container_retention_success_hours
         self.runner_timeout_seconds = max(1, int(runner_timeout_seconds))
         self.default_network_egress = str(default_network_egress or "online").lower()
         # Optional global Docker image override
@@ -235,8 +231,7 @@ class Orchestrator:
         if not self.event_bus:
             self.event_bus = EventBus(max_events=self.event_buffer_size)
 
-        # Clean up orphaned containers from previous runs
-        await self.cleanup_orphaned_containers()
+        # Orphaned container cleanup removed; containers are deleted immediately on success/failure
 
         # Resolve parallelism defaults: CPU-based for total; startup=min(10, total)
         if self.max_parallel_instances is None or int(self.max_parallel_instances) <= 0:
