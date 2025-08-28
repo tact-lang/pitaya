@@ -1438,17 +1438,7 @@ class DockerManager:
                     # Check container status to determine retention period
                     # Read status from host file
                     status = "unknown"
-                    try:
-                        status_file = Path(
-                            f"/tmp/pitaya_status/{container.id[:12]}.status"
-                        )
-                        if status_file.exists():
-                            status = status_file.read_text().strip()
-                            # Clean up old status file
-                            status_file.unlink()
-                    except (OSError, IOError):
-                        # If we can't read status, use default
-                        pass
+                    # Host status files removed; default classification by label only
 
                     if status == "failed":
                         max_age = failed_retention_hours
@@ -1458,17 +1448,7 @@ class DockerManager:
                         # Default to failed retention for unknown status (safer)
                         max_age = failed_retention_hours
                     # Prefer last-active file mtime if present
-                    try:
-                        active_file = Path(
-                            f"/tmp/pitaya_status/{container.id[:12]}.active"
-                        )
-                        if active_file.exists():
-                            atime = datetime.fromtimestamp(
-                                active_file.stat().st_mtime, tz=timezone.utc
-                            )
-                            age_hours = (current_time - atime).total_seconds() / 3600
-                    except Exception:
-                        pass
+                    # No host last-active file; rely on created_at age
                     if age_hours > max_age:
                         # Before removal, compute associated resources
                         try:
@@ -1571,30 +1551,6 @@ class DockerManager:
         except (docker.errors.APIError, docker.errors.DockerException) as e:
             logger.error(f"Failed to cleanup orphaned containers: {e}")
             return 0
-
-    async def update_container_status(self, container: Container, status: str) -> None:
-        """
-        Track container completion status for cleanup differentiation.
-
-        Since Docker doesn't allow updating labels after creation and containers
-        will be stopped, we'll store the status in a file on the host.
-
-        Args:
-            container: Container to update
-            status: New status (success/failed)
-        """
-        try:
-            # Store status in a host file indexed by container ID
-            status_dir = Path("/tmp/pitaya_status")
-            status_dir.mkdir(exist_ok=True)
-
-            status_file = status_dir / f"{container.id[:12]}.status"
-            status_file.write_text(f"{status}\n")
-
-            logger.debug(f"Recorded container {container.name} status as: {status}")
-
-        except (OSError, IOError) as e:
-            logger.warning(f"Could not record container status: {e}")
 
     def get_container(self, name: str) -> Optional[Container]:
         """Return container by name or None if missing."""

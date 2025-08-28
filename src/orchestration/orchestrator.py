@@ -206,8 +206,6 @@ class Orchestrator:
 
         # Background tasks
         self._executor_tasks: List[asyncio.Task] = []
-        # Map instance_id -> container_id[:12] for last-active tracking
-        self._inst_container_id: Dict[str, str] = {}
 
         # Server extension support removed
         self._initialized: bool = False
@@ -1466,8 +1464,6 @@ class Orchestrator:
             )
 
         # Create event callback (forward and capture session_id for resume)
-        last_active_write = {"t": 0.0}
-
         def event_callback(event: Dict[str, Any]) -> None:
             data = event.get("data", {})
             sid = data.get("session_id")
@@ -1476,44 +1472,6 @@ class Orchestrator:
                     self.state_manager.update_instance_session_id(instance_id, sid)
                 except Exception:
                     pass
-            # Track container id for last-active updates
-            try:
-                if event.get("type") == "instance.container_created":
-                    cid = data.get("container_id")
-                    if cid:
-                        self._inst_container_id[instance_id] = str(cid)
-            except Exception:
-                pass
-            # Update last-active file for cleanup logic; throttle and offload to thread
-            try:
-                cid = self._inst_container_id.get(instance_id)
-                if cid:
-                    import time as _time
-
-                    now = _time.time()
-                    if (now - last_active_write["t"]) >= 0.5:
-                        last_active_write["t"] = now
-
-                        def _write_last_active():
-                            from pathlib import Path as _P
-
-                            p = _P(f"/tmp/pitaya_status/{cid}.active")
-                            try:
-                                p.parent.mkdir(parents=True, exist_ok=True)
-                            except Exception:
-                                pass
-                            try:
-                                p.write_text(datetime.now(timezone.utc).isoformat())
-                            except Exception:
-                                pass
-
-                        try:
-                            loop = asyncio.get_running_loop()
-                            loop.run_in_executor(None, _write_last_active)
-                        except Exception:
-                            _write_last_active()
-            except Exception:
-                pass
             # Forward runner-level events to in-memory bus for local diagnostics
             try:
                 self.event_bus.emit(

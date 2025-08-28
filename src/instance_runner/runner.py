@@ -773,12 +773,8 @@ async def _run_instance_attempt(
                     "instance.workspace_cleaned", {"workspace_dir": str(workspace_dir)}
                 )
 
-            # Update container status and remove it immediately
+            # Remove container immediately
             if container:
-                try:
-                    await docker_manager.update_container_status(container, "success")
-                except Exception:
-                    pass
                 if finalize:
                     try:
                         try:
@@ -889,10 +885,6 @@ async def _run_instance_attempt(
             # Remove container on timeout (treat as failure for cleanup policy)
             if container:
                 try:
-                    await docker_manager.update_container_status(container, "failed")
-                except Exception:
-                    pass
-                try:
                     try:
                         await docker_manager.stop_heartbeat(container)
                     except Exception:
@@ -978,9 +970,7 @@ async def _run_instance_attempt(
                 },
             )
 
-            # Record container as interrupted for cleanup policy
-            if container:
-                await docker_manager.update_container_status(container, "interrupted")
+            # Nothing to do with container status on cancel
 
             completed_at = datetime.now(timezone.utc).isoformat()
             return InstanceResult(
@@ -1010,12 +1000,8 @@ async def _run_instance_attempt(
                 },
             )
 
-            # Update container status and remove container immediately on unexpected failure
+            # Remove container immediately on unexpected failure
             if container:
-                try:
-                    await docker_manager.update_container_status(container, "failed")
-                except Exception:
-                    pass
                 try:
                     try:
                         await docker_manager.stop_heartbeat(container)
