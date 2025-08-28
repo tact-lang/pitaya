@@ -8,12 +8,8 @@ Stages:
    reports/doc-review/raw/REPORT_{slug}__r{n}.md and commits once.
 2) Validators (streamed, 1:1): run on each reviewer branch, strictly validate
    and refine the report in place, committing once.
-3) Composer (global): after all validators complete, combine all validated
-   reports into a single final reports/doc-review/REPORT.md on one branch.
-
-Merging model: no git merges; the composer reads validated reports via git show
-from their branches. To keep runner isolation, we inject the file contents into
-the composer prompt (no workspace injection required).
+Note: The composer stage has been removed. This strategy returns the
+successful validator results; downstream tooling can aggregate reports if needed.
 
 Minimal configuration:
 - pages_file (YAML or JSON): list of {title, path, slug?}
@@ -36,7 +32,7 @@ from ...shared import InstanceResult
 from .base import Strategy, StrategyConfig
 
 if TYPE_CHECKING:
-    from ..strategy_context import StrategyContext, Handle
+    from ..strategy_context import StrategyContext
 
 
 @dataclass
@@ -46,6 +42,9 @@ class DocReviewConfig(StrategyConfig):
     pages_file: str = ""  # YAML or JSON list of pages
     reviewers_per_page: int = 1
     report_dir: str = "reports/doc-review"
+    # Unified retry controls (retries = additional attempts after the first)
+    reviewer_max_retries: int = 3
+    validator_max_retries: int = 3
 
     def validate(self) -> None:
         super().validate()
@@ -53,6 +52,11 @@ class DocReviewConfig(StrategyConfig):
             raise ValueError("pages_file is required for doc-review strategy")
         if self.reviewers_per_page < 1:
             raise ValueError("reviewers_per_page must be at least 1")
+        if self.reviewer_max_retries < 0:
+            raise ValueError("reviewer_max_retries must be >= 0")
+        if self.validator_max_retries < 0:
+            raise ValueError("validator_max_retries must be >= 0")
+        # no composer
 
 
 class DocReviewStrategy(Strategy):
@@ -102,13 +106,16 @@ class DocReviewStrategy(Strategy):
         except Exception:
             pass
 
-        # Stage 1: reviewers
-        reviewer_handles: List[Tuple[Dict[str, Any], int, Handle]] = (
-            []
-        )  # (page, r_idx, handle)
-        for page in normalized_pages:
-            for r_idx in range(1, int(cfg.reviewers_per_page) + 1):
-                report_rel = f"{cfg.report_dir}/raw/REPORT_{page['slug']}__r{r_idx}.md"
+        # Unified helpers ---------------------------------------------------
+
+        async def _run_reviewer_with_retries(
+            page: Dict[str, Any], r_idx: int
+        ) -> Optional[InstanceResult]:
+            report_rel = f"{cfg.report_dir}/raw/REPORT_{page['slug']}__r{r_idx}.md"
+            attempts = cfg.reviewer_max_retries + 1
+            last_result: Optional[InstanceResult] = None
+            for i in range(attempts):
+                corrective = i > 0
                 review_prompt = _build_reviewer_prompt(
                     page_title=page["title"],
                     page_path=page["path"],
@@ -118,118 +125,86 @@ class DocReviewStrategy(Strategy):
                     "prompt": review_prompt,
                     "base_branch": base_branch,
                     "model": cfg.model,
-                    # The reviewer should create the report file and commit it
                 }
-                key = ctx.key("page", page["slug"], f"r{r_idx}", "review")
-                handle = await ctx.run(task, key=key)
-                reviewer_handles.append((page, r_idx, handle))
+                key_parts = ["page", page["slug"], f"r{r_idx}", "review"]
+                if corrective:
+                    key_parts.append(f"attempt-{i}")
+                key = ctx.key(*key_parts)
+                try:
+                    h = await ctx.run(task, key=key)
+                    result = await ctx.wait(h)
+                except Exception:
+                    result = None  # Treat as failed attempt, continue
+                if result:
+                    last_result = result
+                    ok = _verify_file_in_branch(
+                        repo_path, result.branch_name, report_rel
+                    )
+                    if result.success and result.branch_name and ok:
+                        return result
+            return last_result if (last_result and last_result.success) else None
 
-        # As reviewers finish, schedule validators immediately
-        validator_handles: List[Tuple[Dict[str, Any], int, Handle]] = []
-        # Map instance_id -> (page, r_idx)
-        reviewer_map: Dict[str, Tuple[Dict[str, Any], int]] = {
-            h.instance_id: (pg, idx) for (pg, idx, h) in reviewer_handles
-        }
-
-        async def _wait_and_validate(
-            handle: Handle,
-        ) -> Optional[Tuple[Dict[str, Any], int, Handle, InstanceResult]]:
-            page, r_idx = reviewer_map[handle.instance_id]
-            result: InstanceResult
-            try:
-                result = await ctx.wait(handle)
-            except Exception:
-                # Reviewer failed
-                return None
-
-            # Guardrail: ensure report exists in branch
+        async def _run_validator_with_retries(
+            page: Dict[str, Any], r_idx: int, reviewer_branch: str
+        ) -> Optional[InstanceResult]:
             report_rel = f"{cfg.report_dir}/raw/REPORT_{page['slug']}__r{r_idx}.md"
-            ok = _verify_file_in_branch(repo_path, result.branch_name, report_rel)
-            if not (result.success and result.branch_name and ok):
-                # No corrective retries; rely on strict prompt to ensure commit
-                return None
+            attempts = cfg.validator_max_retries + 1
+            last_vres: Optional[InstanceResult] = None
+            for i in range(attempts):
+                corrective = i > 0
+                validator_prompt = _build_validator_prompt(
+                    page_title=page["title"],
+                    page_path=page["path"],
+                    report_path=report_rel,
+                )
+                v_task = {
+                    "prompt": validator_prompt,
+                    "base_branch": reviewer_branch,
+                    "model": cfg.model,
+                }
+                v_key_parts = ["page", page["slug"], f"r{r_idx}", "validate"]
+                if corrective:
+                    v_key_parts.append(f"attempt-{i}")
+                v_key = ctx.key(*v_key_parts)
+                try:
+                    vh = await ctx.run(v_task, key=v_key)
+                    vres = await ctx.wait(vh)
+                except Exception:
+                    vres = None
+                if vres:
+                    last_vres = vres
+                    ok = _verify_file_in_branch(repo_path, vres.branch_name, report_rel)
+                    if vres.success and vres.branch_name and ok:
+                        return vres
+            return last_vres if (last_vres and last_vres.success) else None
 
-            # Schedule validator on the reviewer branch
-            validator_prompt = _build_validator_prompt(
-                page_title=page["title"],
-                page_path=page["path"],
-                report_path=report_rel,
-            )
-            v_task = {
-                "prompt": validator_prompt,
-                "base_branch": result.branch_name or base_branch,
-                "model": cfg.model,
-            }
-            v_key = ctx.key("page", page["slug"], f"r{r_idx}", "validate")
-            v_handle = await ctx.run(v_task, key=v_key)
-            return (page, r_idx, v_handle, result)
+        # (composer stage removed)
 
-        # Kick off waits concurrently
-        wait_tasks = [
-            asyncio.create_task(_wait_and_validate(h)) for (_, _, h) in reviewer_handles
-        ]
-        for coro in asyncio.as_completed(wait_tasks):
-            res = await coro
-            if res is None:
-                continue
-            page, r_idx, v_handle, _ = res
-            validator_handles.append((page, r_idx, v_handle))
-
-        # Stage 2: wait for all validators and verify outputs
-        validated_reports: List[Tuple[Dict[str, Any], int, InstanceResult]] = []
-
-        async def _await_validator(
-            entry: Tuple[Dict[str, Any], int, Handle],
+        # Stage 1+2: Run reviewers with retries and chain validators with retries
+        async def _review_then_validate(
+            page: Dict[str, Any], r_idx: int
         ) -> Optional[Tuple[Dict[str, Any], int, InstanceResult]]:
-            page, r_idx, handle = entry
-            report_rel = f"{cfg.report_dir}/raw/REPORT_{page['slug']}__r{r_idx}.md"
-            try:
-                vres = await ctx.wait(handle)
-            except Exception:
-                # No corrective retries
+            rres = await _run_reviewer_with_retries(page, r_idx)
+            if not (rres and rres.success and rres.branch_name):
                 return None
-
-            ok = _verify_file_in_branch(repo_path, vres.branch_name, report_rel)
-            if not (vres.success and vres.branch_name and ok):
+            vres = await _run_validator_with_retries(page, r_idx, rres.branch_name)
+            if not (vres and vres.success and vres.branch_name):
                 return None
             return (page, r_idx, vres)
 
-        v_waits = [asyncio.create_task(_await_validator(v)) for v in validator_handles]
-        for coro in asyncio.as_completed(v_waits):
+        tasks = []
+        for page in normalized_pages:
+            for r_idx in range(1, int(cfg.reviewers_per_page) + 1):
+                tasks.append(asyncio.create_task(_review_then_validate(page, r_idx)))
+
+        validated_reports: List[Tuple[Dict[str, Any], int, InstanceResult]] = []
+        for coro in asyncio.as_completed(tasks):
             r = await coro
             if r is not None:
                 validated_reports.append(r)
 
-        # Stage 3: composer
-        # Collect all validated report contents via git show and inject into composer prompt
-        inputs: List[Tuple[str, str, str]] = []  # (slug, title, content)
-        for page, r_idx, vres in validated_reports:
-            report_rel = f"{cfg.report_dir}/raw/REPORT_{page['slug']}__r{r_idx}.md"
-            content = _read_file_from_branch(repo_path, vres.branch_name, report_rel)
-            if content:
-                inputs.append((page["slug"], page["title"], content))
-
-        composer_prompt = _build_composer_prompt(inputs, cfg.report_dir)
-        compose_task = {
-            "prompt": composer_prompt,
-            "base_branch": base_branch,
-            "model": cfg.model,
-        }
-        c_key = ctx.key("compose")
-        c_handle = await ctx.run(compose_task, key=c_key)
-        c_result = await ctx.wait(c_handle)
-
-        # Verify final report exists
-        final_rel = f"{cfg.report_dir}/REPORT.md"
-        c_ok = _verify_file_in_branch(repo_path, c_result.branch_name, final_rel)
-        if not (c_result.success and c_result.branch_name and c_ok):
-            # Best effort: return result but mark as failed
-            c_result.success = False
-            c_result.status = "failed"
-            c_result.error = c_result.error or "Final report missing or not committed"
-
-        # Return only the final composer result for strategy output
-        return [c_result]
+        # Composer removed: return successful validator results directly
+        return [vres for (_page, _idx, vres) in validated_reports]
 
 
 # ---------------------------
@@ -307,21 +282,6 @@ def _verify_file_in_branch(repo: Path, branch: Optional[str], rel_path: str) -> 
         return r.returncode == 0 and bool(r.stdout)
     except Exception:
         return False
-
-
-def _read_file_from_branch(
-    repo: Path, branch: Optional[str], rel_path: str
-) -> Optional[str]:
-    if not branch:
-        return None
-    try:
-        cmd = ["git", "-C", str(repo), "show", f"{branch}:{rel_path}"]
-        r = subprocess.run(cmd, capture_output=True, text=True)
-        if r.returncode == 0:
-            return r.stdout
-    except Exception:
-        return None
-    return None
 
 
 def _build_reviewer_prompt(
@@ -474,63 +434,4 @@ def _build_validator_prompt(
         f"</commit_requirements>\n"
     )
 
-
-def _build_composer_prompt(inputs: List[Tuple[str, str, str]], report_dir: str) -> str:
-    """
-    inputs: List of tuples (slug, title, content) where content is the FULL validated report text for that page.
-    """
-    header = (
-        f"<role>\n"
-        f"You are composing a single, final user-facing documentation defect report by merging multiple validated per-page reports. "
-        f"Your job is to deduplicate, standardize, and sequence findings while preserving precision and the required format.\n"
-        f"</role>\n\n"
-        f"<target>\n"
-        f"OUTPUT FILE (required): {report_dir}/REPORT.md\n"
-        f"</target>\n\n"
-        f"<scope>\n"
-        f"Include only user-facing issues. Exclude any items about repository internals, build/CI, docs engine internals, or anything not visible to readers.\n"
-        f"</scope>\n\n"
-        f"<truth_sources>\n"
-        f"Do not invent new domain facts while merging. When findings conflict, prefer the most conservative reading or mark that a domain decision is required within the description. "
-        f"The glossary remains canonical; if absent or silent, prefer the dominant/most recent usage across the docs.\n"
-        f"</truth_sources>\n\n"
-        f"<workflow>\n"
-        f"1) Read all source reports in full.\n"
-        f"2) Deduplicate: if two items are materially the same, keep one with the clearest description and best citation; fold any unique details from the duplicate into the survivor.\n"
-        f"3) Normalize: align terminology, citation style, tone, and fix proposals across items.\n"
-        f"4) Sequence: produce a single continuous numbering from 1..N. Grouping is not allowed in the output; only a flat list.\n"
-        f"5) Output a single file at the required path and commit it once.\n"
-        f"</workflow>\n\n"
-        f"<report_format>\n"
-        f"Keep this exact format for every finding:\n"
-        f"- [ ] **<number>. <Short Precise Title>**\n\n"
-        f"<repo-relative path or stable URL with optional line anchors>\n\n"
-        f"<Detailed description of the issue and the correct version or fix. Include cross-doc citations as repo-relative paths with anchors. "
-        f"If the entry relies on general knowledge for a basic rule, say so in one short sentence. If a domain decision is required, state it explicitly.>\n\n"
-        f"---\n\n"
-        f"</report_format>\n\n"
-        f"<constraints>\n"
-        f"- Produce exactly one file: REPORT.md at the specified path.\n"
-        f"- Do not modify any other files.\n"
-        f"- Make a single commit.\n"
-        f"</constraints>\n\n"
-        f"<persistence>\n"
-        f"Keep going until the final merged report exists at the required path with continuous numbering and the single commit is made.\n"
-        f"</persistence>\n\n"
-        f"<commit_requirements>\n"
-        f"CRITICAL: This run is considered failed unless you add and commit the final report file. "
-        f"Uncommitted workspace changes are ignored by orchestration.\n"
-        f"- Required file: {report_dir}/REPORT.md\n"
-        f'- Commit exactly once after composing: git add {report_dir}/REPORT.md && git commit -m "doc-review: compose final report"\n'
-        f"</commit_requirements>\n\n"
-    )
-
-    # Concatenate inputs; include a clear, minimal provenance marker before each source
-    body_parts = []
-    for slug, title, content in inputs:
-        body_parts.append(f"# Source Report: {slug} - {title}\n\n{content}\n")
-    sources = (
-        "".join(body_parts) if body_parts else "No validated reports were provided.\n"
-    )
-
-    return header + sources
+    # composer removed
