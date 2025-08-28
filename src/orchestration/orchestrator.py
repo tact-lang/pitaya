@@ -54,6 +54,7 @@ class Orchestrator:
     def __init__(
         self,
         max_parallel_instances: Optional[int] = None,
+        max_parallel_startup: Optional[int] = None,
         state_dir: Path = Path("./pitaya_state"),
         logs_dir: Path = Path("./logs"),
         container_limits: Optional[ContainerLimits] = None,
@@ -87,6 +88,7 @@ class Orchestrator:
             auth_config: Authentication configuration for AI tools
         """
         self.max_parallel_instances: Optional[int] = max_parallel_instances
+        self.max_parallel_startup: Optional[int] = max_parallel_startup
         self.state_dir = state_dir
         self.logs_dir = logs_dir
         self.container_limits = container_limits or ContainerLimits()
@@ -131,6 +133,8 @@ class Orchestrator:
 
         # Resource pool semaphore (initialized after adaptive calc in initialize())
         self._resource_pool: asyncio.Semaphore = asyncio.Semaphore(1)
+        # Separate startup semaphore to throttle expensive workspace prep
+        self._startup_pool: asyncio.Semaphore = asyncio.Semaphore(1)
         # Branch namespace strategy: 'flat' (default) or 'hierarchical'
         self.branch_namespace = str(branch_namespace or "flat").lower()
         self.allow_overwrite_protected_refs = bool(allow_overwrite_protected_refs)
@@ -206,14 +210,32 @@ class Orchestrator:
         # Clean up orphaned containers from previous runs
         await self.cleanup_orphaned_containers()
 
-        # Resolve max_parallel_instances without any host CPU/memory calculations.
-        # Default to 5 if not provided by the caller/CLI.
-        if self.max_parallel_instances is None:
-            self.max_parallel_instances = 5
-            logger.info("Parallelism(default): max_parallel_instances=5")
+        # Resolve parallelism defaults: CPU-based for total; startup=min(10, total)
+        if self.max_parallel_instances is None or int(self.max_parallel_instances) <= 0:
+            try:
+                import os as _os
+
+                cpu = int(_os.cpu_count() or 2)
+            except Exception:
+                cpu = 2
+            self.max_parallel_instances = max(1, cpu)
+            logger.info(
+                f"Parallelism(default): max_parallel_instances={self.max_parallel_instances} (cpu-based)"
+            )
+        if self.max_parallel_startup is None or int(self.max_parallel_startup) <= 0:
+            self.max_parallel_startup = max(
+                1, min(10, int(self.max_parallel_instances or 1))
+            )
+            logger.info(
+                f"Parallelism(default): max_parallel_startup={self.max_parallel_startup} (min(10,total))"
+            )
 
         # Initialize resource pool semaphore now that parallelism is resolved
         self._resource_pool = asyncio.Semaphore(int(self.max_parallel_instances or 1))
+        # Initialize startup pool (caps concurrent workspace preparations)
+        self._startup_pool = asyncio.Semaphore(
+            int(self.max_parallel_startup or self.max_parallel_instances or 1)
+        )
 
         # Start multiple background executors equal to max_parallel_instances
         num_executors = int(self.max_parallel_instances or 1)
@@ -222,7 +244,8 @@ class Orchestrator:
             self._executor_tasks.append(task)
 
         logger.info(
-            f"Pitaya initialized with {self.max_parallel_instances} max parallel instances and {num_executors} executor tasks"
+            f"Pitaya initialized with max_parallel_instances={self.max_parallel_instances} "
+            f"max_parallel_startup={self.max_parallel_startup} and {num_executors} executor tasks"
         )
         self._initialized = True
 
@@ -1499,6 +1522,11 @@ class Orchestrator:
                         "container_env_preparing",
                         "Preparing container env...",
                     )
+                elif et == "instance.startup_waiting":
+                    phase, activity = (
+                        "startup_waiting",
+                        "Waiting for startup slot...",
+                    )
                 elif et == "instance.container_env_prepared":
                     phase, activity = "container_env_prepared", "Container env ready"
                 elif et == "instance.container_created":
@@ -1608,6 +1636,7 @@ class Orchestrator:
                 ),
                 operator_resume=op_resume,
                 event_callback=event_callback,
+                startup_semaphore=self._startup_pool,
                 timeout_seconds=self.runner_timeout_seconds,
                 container_limits=ContainerLimits(
                     cpu_count=eff_cpu, memory_gb=eff_mem, memory_swap_gb=eff_mem
@@ -2555,6 +2584,7 @@ class Orchestrator:
                     instance_id=instance_info.instance_id,
                 ),
                 container_name=instance_info.container_name,
+                startup_semaphore=self._startup_pool,
                 container_limits=ContainerLimits(
                     cpu_count=eff_cpu, memory_gb=eff_mem, memory_swap_gb=eff_mem
                 ),

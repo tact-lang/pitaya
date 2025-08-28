@@ -7,6 +7,7 @@ are prohibited to maintain clean architectural boundaries.
 """
 
 from pathlib import Path
+import asyncio
 from typing import Any, Callable, Dict, Optional
 
 from ..shared import (
@@ -34,6 +35,7 @@ async def run_instance(
     session_id: Optional[str] = None,
     operator_resume: bool = False,
     event_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
+    startup_semaphore: Optional[asyncio.Semaphore] = None,
     timeout_seconds: int = 3600,
     container_limits: Optional[ContainerLimits] = None,
     auth_config: Optional[AuthConfig] = None,
@@ -114,6 +116,7 @@ async def run_instance(
         operator_resume=operator_resume,
         session_group_key=session_group_key,
         event_callback=event_callback,
+        startup_semaphore=startup_semaphore,
         timeout_seconds=timeout_seconds,
         container_limits=container_limits,
         auth_config=auth_config,

@@ -262,8 +262,10 @@ def get_default_config() -> Dict[str, Any]:
             "tmpfs_size_mb": 512,
         },
         "orchestration": {
-            # Default concurrency: 5; use --max-parallel to override
-            "max_parallel_instances": 5,
+            # Default concurrency: auto-calculated from CPU count
+            "max_parallel_instances": "auto",
+            # Startup cap: auto -> min(10, max_parallel_instances)
+            "max_parallel_startup": "auto",
             # Branch namespace is hierarchical by default
             # Format: orc/<strategy>/<run_id>/k<short8>
             "branch_namespace": "hierarchical",

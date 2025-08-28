@@ -84,6 +84,7 @@ async def run_instance(
     operator_resume: bool = False,
     session_group_key: Optional[str] = None,
     event_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
+    startup_semaphore: Optional[asyncio.Semaphore] = None,
     timeout_seconds: int = 3600,
     container_limits: Optional[ContainerLimits] = None,
     auth_config: Optional[AuthConfig] = None,
@@ -210,6 +211,7 @@ async def run_instance(
             operator_resume=operator_resume,
             session_group_key=session_group_key,
             event_callback=event_callback,
+            startup_semaphore=startup_semaphore,
             timeout_seconds=timeout_seconds,
             container_limits=container_limits,
             auth_config=auth_config,
@@ -317,6 +319,7 @@ async def _run_instance_attempt(
     operator_resume: bool,
     session_group_key: Optional[str],
     event_callback: Optional[Callable[[Dict[str, Any]], None]],
+    startup_semaphore: Optional[asyncio.Semaphore],
     timeout_seconds: int,
     container_limits: ContainerLimits,
     auth_config: Optional[AuthConfig],
@@ -419,20 +422,45 @@ async def _run_instance_attempt(
 
             emit_event("instance.phase_completed", {"phase": "validation"})
 
-            # Phase 2: Workspace Preparation (NEW - happens BEFORE container)
+            # Phase 2: Workspace Preparation (happens BEFORE container)
             logger.info(f"Preparing isolated workspace for branch {base_branch}")
-            emit_event("instance.workspace_preparing", {"base_branch": base_branch})
-
-            logger.info("Calling git_ops.prepare_workspace...")
-            workspace_dir = await git_ops.prepare_workspace(
-                repo_path=repo_path,
-                base_branch=base_branch,
-                instance_id=instance_id,
-                run_id=run_id,
-                strategy_execution_id=strategy_execution_id,
-                container_name=container_name,
-                reuse_if_exists=operator_resume,
-            )
+            if startup_semaphore is not None:
+                # Signal that we are waiting on startup slot
+                try:
+                    emit_event(
+                        "instance.startup_waiting",
+                        {"base_branch": base_branch},
+                    )
+                except Exception:
+                    pass
+                async with startup_semaphore:
+                    emit_event(
+                        "instance.workspace_preparing", {"base_branch": base_branch}
+                    )
+                    logger.info(
+                        "Calling git_ops.prepare_workspace (startup slot acquired)..."
+                    )
+                    workspace_dir = await git_ops.prepare_workspace(
+                        repo_path=repo_path,
+                        base_branch=base_branch,
+                        instance_id=instance_id,
+                        run_id=run_id,
+                        strategy_execution_id=strategy_execution_id,
+                        container_name=container_name,
+                        reuse_if_exists=operator_resume,
+                    )
+            else:
+                emit_event("instance.workspace_preparing", {"base_branch": base_branch})
+                logger.info("Calling git_ops.prepare_workspace...")
+                workspace_dir = await git_ops.prepare_workspace(
+                    repo_path=repo_path,
+                    base_branch=base_branch,
+                    instance_id=instance_id,
+                    run_id=run_id,
+                    strategy_execution_id=strategy_execution_id,
+                    container_name=container_name,
+                    reuse_if_exists=operator_resume,
+                )
             logger.info(f"Workspace prepared at: {workspace_dir}")
 
             emit_event(

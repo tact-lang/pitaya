@@ -265,6 +265,12 @@ class OrchestratorCLI:
             help="Max parallel instances (auto if omitted)",
         )
         g_limits.add_argument(
+            "--max-startup-parallel",
+            type=int,
+            default=None,
+            help="Max parallel startup initializations (default: min(10,max-parallel))",
+        )
+        g_limits.add_argument(
             "--timeout", type=int, default=3600, help="Timeout per instance (seconds)"
         )
         # Legacy parallel presets removed; use --max-parallel or auto
@@ -844,6 +850,7 @@ class OrchestratorCLI:
                 _add("import_conflict_policy", "must be fail|overwrite|suffix", "fail")
         except Exception:
             pass
+        # Allow 'auto' for both
         try:
             mpi = full_config.get("orchestration", {}).get(
                 "max_parallel_instances", "auto"
@@ -861,6 +868,26 @@ class OrchestratorCLI:
         except Exception:
             _add(
                 "orchestration.max_parallel_instances",
+                "must be integer or 'auto'",
+                "auto",
+            )
+        try:
+            mps = full_config.get("orchestration", {}).get(
+                "max_parallel_startup", "auto"
+            )
+            if isinstance(mps, str) and mps.lower() == "auto":
+                pass
+            else:
+                v2 = int(mps)
+                if v2 <= 0:
+                    _add(
+                        "orchestration.max_parallel_startup",
+                        "must be > 0 or 'auto'",
+                        "auto",
+                    )
+        except Exception:
+            _add(
+                "orchestration.max_parallel_startup",
                 "must be integer or 'auto'",
                 "auto",
             )
@@ -1598,6 +1625,10 @@ class OrchestratorCLI:
             cli_config.setdefault("orchestration", {})[
                 "max_parallel_instances"
             ] = args.max_parallel
+        if getattr(args, "max_startup_parallel", None):
+            cli_config.setdefault("orchestration", {})[
+                "max_parallel_startup"
+            ] = args.max_startup_parallel
         if hasattr(args, "timeout") and args.timeout:
             cli_config.setdefault("runner", {})["timeout"] = args.timeout
         if hasattr(args, "force_commit") and args.force_commit:
@@ -1800,6 +1831,9 @@ class OrchestratorCLI:
 
         # Get orchestration settings from merged config
         max_parallel = full_config["orchestration"]["max_parallel_instances"]
+        max_startup_parallel = full_config["orchestration"].get(
+            "max_parallel_startup", "auto"
+        )
         state_dir = full_config.get("orchestration", {}).get(
             "state_dir"
         ) or full_config.get("state_dir", Path("./pitaya_state"))
@@ -1820,17 +1854,38 @@ class OrchestratorCLI:
         # Respect global session volume consent by setting env for runner
         allow_global_session = bool(getattr(args, "allow_global_session_volume", False))
 
-        # Resolve max_parallel without host resource calculations
-        try:
-            if isinstance(max_parallel, str):
-                # Accept numeric strings; treat non-numeric (e.g., 'auto') as default 5
-                max_parallel_val = int(max_parallel)
-            elif isinstance(max_parallel, int):
-                max_parallel_val = max_parallel
+        # Resolve parallelism
+        import os as _os
+
+        def _cpu_default() -> int:
+            try:
+                return max(2, int(_os.cpu_count() or 2))
+            except Exception:
+                return 2
+
+        # Total parallel: auto -> cpu-based
+        if isinstance(max_parallel, str):
+            if max_parallel.lower() == "auto":
+                max_parallel_val = _cpu_default()
             else:
-                max_parallel_val = 5
-        except Exception:
-            max_parallel_val = 5
+                max_parallel_val = int(max_parallel)
+        elif isinstance(max_parallel, int):
+            max_parallel_val = max(1, max_parallel)
+        else:
+            max_parallel_val = _cpu_default()
+
+        # Startup parallel: auto -> min(10, total)
+        if isinstance(max_startup_parallel, str):
+            if max_startup_parallel.lower() == "auto":
+                max_startup_parallel_val = min(10, max_parallel_val)
+            else:
+                max_startup_parallel_val = int(max_startup_parallel)
+        elif isinstance(max_startup_parallel, int):
+            max_startup_parallel_val = max(1, max_startup_parallel)
+        else:
+            max_startup_parallel_val = min(10, max_parallel_val)
+        # Clamp startup to not exceed total
+        max_startup_parallel_val = min(max_startup_parallel_val, max_parallel_val)
 
         # Proxy automatic egress defaults removed
 
@@ -1851,6 +1906,7 @@ class OrchestratorCLI:
         # Create orchestrator
         self.orchestrator = Orchestrator(
             max_parallel_instances=max_parallel_val,
+            max_parallel_startup=max_startup_parallel_val,
             state_dir=Path(state_dir),
             logs_dir=Path(logs_dir),
             container_limits=container_limits,
