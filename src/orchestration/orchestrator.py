@@ -2034,25 +2034,8 @@ class Orchestrator:
             offset=offset, limit=limit, event_types=event_types, timestamp=timestamp
         )
 
-    async def cleanup_orphaned_containers(self) -> None:
-        """Clean up orphaned containers from previous runs."""
-        try:
-            from ..instance_runner.docker_manager import DockerManager
-
-            docker_manager = DockerManager()
-
-            # Clean up containers with differentiated retention times
-            cleaned = await docker_manager.cleanup_orphaned_containers(
-                failed_retention_hours=self.container_retention_failed_hours,
-                success_retention_hours=self.container_retention_success_hours,
-            )
-
-            if cleaned > 0:
-                logger.info(f"Cleaned up {cleaned} orphaned containers")
-
-        except (DockerError, OSError) as e:
-            logger.warning(f"Failed to cleanup orphaned containers: {e}")
-            # Don't fail initialization if cleanup fails
+    # Removed: Orchestrator-level orphan cleanup. Containers are removed immediately
+    # on success/failure/timeout at the runner level.
 
     async def resume_run(
         self, run_id: str, force_fresh: bool = False
