@@ -284,6 +284,12 @@ class OrchestratorCLI:
             action="store_true",
             help="Force a git commit in the workspace after agent finishes (if there are changes)",
         )
+        g_limits.add_argument(
+            "--randomize-queue",
+            dest="randomize_queue",
+            action="store_true",
+            help="Execute queued instances in random order instead of FIFO",
+        )
 
         # Config, state & logs group
         g_state = parser.add_argument_group("Config, State & Logs")
@@ -1629,6 +1635,8 @@ class OrchestratorCLI:
             cli_config.setdefault("orchestration", {})[
                 "max_parallel_startup"
             ] = args.max_startup_parallel
+        if getattr(args, "randomize_queue", False):
+            cli_config.setdefault("orchestration", {})["randomize_queue_order"] = True
         if hasattr(args, "timeout") and args.timeout:
             cli_config.setdefault("runner", {})["timeout"] = args.timeout
         if hasattr(args, "force_commit") and args.force_commit:
@@ -1966,6 +1974,9 @@ class OrchestratorCLI:
             default_docker_image=full_config.get("runner", {}).get("docker_image"),
             default_agent_cli_args=_agent_cli_args or None,
             force_commit=bool(full_config.get("runner", {}).get("force_commit", False)),
+            randomize_queue_order=bool(
+                full_config.get("orchestration", {}).get("randomize_queue_order", False)
+            ),
         )
 
         # Initialize orchestrator

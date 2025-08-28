@@ -139,6 +139,7 @@ Highlights
 - Model: `--model <name>`
 - Plugin: `--plugin <claude-code|codex>`
 - Parallel runs: `--runs <N>`
+- Scheduling: `--randomize-queue` (dequeue tasks in random order)
 - TUI controls: `--no-tui`, `--output <streaming|json|quiet>`
 - Maintenance: `--list-runs`, `--show-run <id>`, `--prune`, `--clean-containers <id>`
 - Docker image override: `--docker-image <repo/name:tag>`
@@ -183,6 +184,7 @@ orchestration:
   max_parallel_instances: auto
   branch_namespace: hierarchical
   snapshot_interval: 30
+  randomize_queue_order: false  # set true to dequeue in random order
 
 strategies:
   best-of-n:

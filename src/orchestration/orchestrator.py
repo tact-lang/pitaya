@@ -9,6 +9,7 @@ public API.
 import asyncio
 import json
 import logging
+import random
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -36,6 +37,29 @@ from ..exceptions import (
 
 
 logger = logging.getLogger(__name__)
+
+
+class RandomAsyncQueue:
+    """Random-pick async queue with a minimal asyncio.Queue-like interface."""
+
+    def __init__(self) -> None:
+        self._items: List[Any] = []
+        self._cv: asyncio.Condition = asyncio.Condition()
+
+    async def put(self, item: Any) -> None:
+        async with self._cv:
+            self._items.append(item)
+            self._cv.notify(1)
+
+    async def get(self) -> Any:
+        async with self._cv:
+            while not self._items:
+                await self._cv.wait()
+            idx = random.randrange(len(self._items))
+            return self._items.pop(idx)
+
+    def qsize(self) -> int:
+        return len(self._items)
 
 
 class Orchestrator:
@@ -74,6 +98,7 @@ class Orchestrator:
         default_docker_image: Optional[str] = None,
         default_agent_cli_args: Optional[List[str]] = None,
         force_commit: bool = False,
+        randomize_queue_order: bool = False,
         explicit_max_parallel: bool = False,
     ):
         """
@@ -127,7 +152,10 @@ class Orchestrator:
 
         # Execution tracking
         self._active_instances: Set[str] = set()
-        self._instance_queue: asyncio.Queue = asyncio.Queue()
+        self._randomize_queue_order = bool(randomize_queue_order)
+        self._instance_queue = (
+            RandomAsyncQueue() if self._randomize_queue_order else asyncio.Queue()
+        )
         self._instance_futures: Dict[str, asyncio.Future] = {}
         self._shutdown = False
 
