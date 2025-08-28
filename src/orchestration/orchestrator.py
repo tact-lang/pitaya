@@ -32,7 +32,6 @@ from ..exceptions import (
     DockerError,
     GitError,
     StrategyError,
-    ValidationError,
 )
 
 
@@ -192,7 +191,7 @@ class Orchestrator:
         self.state_dir.mkdir(parents=True, exist_ok=True)
         self.logs_dir.mkdir(parents=True, exist_ok=True)
 
-        # Check disk space (20GB minimum as per spec)
+        # Disk space check removed: keep informational logging only
         await self._check_disk_space()
 
         # Initialize components
@@ -2614,8 +2613,8 @@ class Orchestrator:
 
     async def _check_disk_space(self) -> None:
         """
-        Check available disk space per spec section 8.1.
-        Requires at least 20GB free space for Docker images and temporary workspaces.
+        Log available disk space (informational only).
+        No enforcement; runs proceed regardless of free space.
         """
         try:
             import shutil
@@ -2632,12 +2631,7 @@ class Orchestrator:
                 f"Disk space: {free_gb:.1f}GB free of {total_gb:.1f}GB ({used_percent:.1f}% used)"
             )
 
-            # Check minimum requirement (20GB as per spec)
-            if free_gb < 20:
-                raise ValidationError(
-                    f"Insufficient disk space: {free_gb:.1f}GB free, need at least 20GB "
-                    f"for Docker images and temporary workspaces"
-                )
+            # No minimum threshold enforced.
 
         except (OSError, ImportError) as e:
             logger.warning(f"Could not check disk space: {e}")
