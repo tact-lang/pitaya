@@ -215,19 +215,30 @@ class DocReviewStrategy(Strategy):
 def _load_pages_file(p: Path, repo_path: Path) -> List[Dict[str, Any]]:
     """Load pages from YAML or JSON file.
 
+    Expands '~' and environment variables in the pages_file path. If the path is
+    relative and the file exists under the repository root, that location is used.
+
     Returns a list of dicts with at least {title, path}. Relative paths are
-    normalized relative to the repo root.
+    expected to be repo-relative.
     """
+    # Resolve user/env expansions and prefer repo-relative when applicable
     try:
-        raw = p.read_text(encoding="utf-8")
+        import os
+
+        p_expanded = Path(os.path.expanduser(os.path.expandvars(str(p))))
+        if not p_expanded.is_absolute():
+            candidate = (repo_path / p_expanded).resolve()
+            if candidate.exists():
+                p_expanded = candidate
+        raw = p_expanded.read_text(encoding="utf-8")
     except Exception as e:
         raise ValueError(f"Could not read pages_file: {p}: {e}")
 
     pages: List[Dict[str, Any]] = []
     try:
-        if p.suffix.lower() in (".yaml", ".yml"):
+        if p_expanded.suffix.lower() in (".yaml", ".yml"):
             data = yaml.safe_load(raw)
-        elif p.suffix.lower() == ".json":
+        elif p_expanded.suffix.lower() == ".json":
             data = json.loads(raw)
         else:
             # Try YAML first, then JSON
