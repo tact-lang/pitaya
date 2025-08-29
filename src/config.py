@@ -273,18 +273,11 @@ def get_default_config() -> Dict[str, Any]:
             "event_buffer_size": 10000,
             # When true, execute queued instances in random order (not FIFO)
             "randomize_queue_order": False,
-            "container_retention_failed": 86400,  # 24 hours
-            "container_retention_success": 7200,  # 2 hours
         },
         "strategy_config": {
             "n": 3,
             "threshold": 0.8,
             "max_iterations": 3,
-        },
-        # Events retention (terminal runs only after grace)
-        "events": {
-            "retention_days": 30,
-            "retention_grace_days": 7,
         },
         "tui": {
             # preferred configuration is ms; keep Hz fallback for compatibility

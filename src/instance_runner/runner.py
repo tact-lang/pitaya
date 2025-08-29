@@ -411,7 +411,7 @@ async def _run_instance_attempt(
         git_ops = GitOperations()
 
         try:
-            # Initialize Docker manager (performs orphan cleanup)
+            # Initialize Docker manager
             await docker_manager.initialize()
 
             # Validate Docker daemon
@@ -440,6 +440,8 @@ async def _run_instance_attempt(
                     logger.info(
                         "Calling git_ops.prepare_workspace (startup slot acquired)..."
                     )
+                    # Reuse workspace only when resuming an existing session
+                    _reuse_ws = bool(operator_resume and session_id)
                     workspace_dir = await git_ops.prepare_workspace(
                         repo_path=repo_path,
                         base_branch=base_branch,
@@ -447,11 +449,13 @@ async def _run_instance_attempt(
                         run_id=run_id,
                         strategy_execution_id=strategy_execution_id,
                         container_name=container_name,
-                        reuse_if_exists=operator_resume,
+                        reuse_if_exists=_reuse_ws,
                     )
             else:
                 emit_event("instance.workspace_preparing", {"base_branch": base_branch})
                 logger.info("Calling git_ops.prepare_workspace...")
+                # Reuse workspace only when resuming an existing session
+                _reuse_ws = bool(operator_resume and session_id)
                 workspace_dir = await git_ops.prepare_workspace(
                     repo_path=repo_path,
                     base_branch=base_branch,
@@ -459,7 +463,7 @@ async def _run_instance_attempt(
                     run_id=run_id,
                     strategy_execution_id=strategy_execution_id,
                     container_name=container_name,
-                    reuse_if_exists=operator_resume,
+                    reuse_if_exists=_reuse_ws,
                 )
             logger.info(f"Workspace prepared at: {workspace_dir}")
 
@@ -625,10 +629,12 @@ async def _run_instance_attempt(
             except Exception:
                 pass
 
+            # Choose per-attempt prompt: use continuation only when resuming with a session
+            _attempt_prompt = "Continue" if (operator_resume and session_id) else prompt
             result_data = await plugin.execute(
                 docker_manager=docker_manager,
                 container=container,
-                prompt=prompt,
+                prompt=_attempt_prompt,
                 model=(resolved_model_id or model),
                 session_id=session_id,
                 timeout_seconds=timeout_seconds,
@@ -734,7 +740,7 @@ async def _run_instance_attempt(
             emit_event("instance.phase_completed", {"phase": "result_collection"})
 
             # Phase 6: Cleanup Decision
-            # For successful instances, clean up workspace but keep container
+            # For successful instances, clean up workspace and remove container immediately
             logger.info("Instance completed successfully")
 
             # Calculate duration before any cleanup
@@ -773,30 +779,29 @@ async def _run_instance_attempt(
                     "instance.workspace_cleaned", {"workspace_dir": str(workspace_dir)}
                 )
 
-            # Update container status before stopping
+            # Remove container immediately
             if container:
-                await docker_manager.update_container_status(container, "success")
-
-            # Stop container if finalize=True (but keep it for session persistence)
-            if finalize and container:
-                # Stop container in background to avoid blocking result return
-                async def stop_container_background():
+                if finalize:
                     try:
                         try:
                             await docker_manager.stop_heartbeat(container)
                         except Exception:
                             pass
-                        await docker_manager.stop_container(container)
-                        emit_event(
-                            "instance.container_stopped",
-                            {"container_name": container_name},
+                        # Inform UI it was stopped, then remove
+                        try:
+                            emit_event(
+                                "instance.container_stopped",
+                                {"container_name": container_name},
+                            )
+                        except Exception:
+                            pass
+                        await docker_manager.cleanup_container(
+                            container, remove_home_volume=True
                         )
                     except Exception as e:
                         logger.warning(
-                            f"Failed to stop container {container_name}: {e}"
+                            f"Failed to cleanup container {container_name}: {e}"
                         )
-
-                asyncio.create_task(stop_container_background())
 
             emit_event("instance.phase_completed", {"phase": "cleanup_decision"})
 
@@ -885,6 +890,29 @@ async def _run_instance_attempt(
 
             # Keep workspace for debugging on timeout
             completed_at = datetime.now(timezone.utc).isoformat()
+            # Remove container on timeout (treat as failure for cleanup policy)
+            if container:
+                try:
+                    try:
+                        await docker_manager.stop_heartbeat(container)
+                    except Exception:
+                        pass
+                    await docker_manager.cleanup_container(
+                        container, remove_home_volume=False
+                    )
+                except Exception:
+                    pass
+            # Always clean up workspace; do not retain for debugging
+            try:
+                if workspace_dir:
+                    await git_ops.cleanup_workspace(workspace_dir)
+                    emit_event(
+                        "instance.workspace_cleaned",
+                        {"workspace_dir": str(workspace_dir)},
+                    )
+            except Exception:
+                pass
+
             return InstanceResult(
                 success=False,
                 error=str(e),
@@ -896,7 +924,7 @@ async def _run_instance_attempt(
                 completed_at=completed_at,
                 retry_attempts=attempt_number - 1,
                 log_path=log_path,
-                workspace_path=str(workspace_dir) if workspace_dir else None,
+                workspace_path=None,
                 status="timeout",
             )
 
@@ -918,10 +946,33 @@ async def _run_instance_attempt(
                 },
             )
 
-            # Keep container for debugging and potential resume (per spec)
-            # Update container status to failed
+            # Update container status and remove container immediately on failure
             if container:
-                await docker_manager.update_container_status(container, "failed")
+                try:
+                    await docker_manager.update_container_status(container, "failed")
+                except Exception:
+                    pass
+                try:
+                    try:
+                        await docker_manager.stop_heartbeat(container)
+                    except Exception:
+                        pass
+                    await docker_manager.cleanup_container(
+                        container, remove_home_volume=False
+                    )
+                except Exception:
+                    pass
+
+            # Always clean up workspace; do not retain for debugging
+            try:
+                if workspace_dir:
+                    await git_ops.cleanup_workspace(workspace_dir)
+                    emit_event(
+                        "instance.workspace_cleaned",
+                        {"workspace_dir": str(workspace_dir)},
+                    )
+            except Exception:
+                pass
 
             completed_at = datetime.now(timezone.utc).isoformat()
             return InstanceResult(
@@ -935,7 +986,7 @@ async def _run_instance_attempt(
                 completed_at=completed_at,
                 retry_attempts=attempt_number - 1,
                 log_path=log_path,
-                workspace_path=str(workspace_dir) if workspace_dir else None,
+                workspace_path=None,
                 status="failed",
             )
 
@@ -953,9 +1004,12 @@ async def _run_instance_attempt(
                 },
             )
 
-            # Record container as interrupted for cleanup policy
+            # Preserve container and session volume for resume; stop heartbeat only
             if container:
-                await docker_manager.update_container_status(container, "interrupted")
+                try:
+                    await docker_manager.stop_heartbeat(container)
+                except Exception:
+                    pass
 
             completed_at = datetime.now(timezone.utc).isoformat()
             return InstanceResult(
@@ -985,10 +1039,29 @@ async def _run_instance_attempt(
                 },
             )
 
-            # Keep container for debugging and potential resume (per spec)
-            # Update container status to failed
+            # Remove container immediately on unexpected failure
             if container:
-                await docker_manager.update_container_status(container, "failed")
+                try:
+                    try:
+                        await docker_manager.stop_heartbeat(container)
+                    except Exception:
+                        pass
+                    await docker_manager.cleanup_container(
+                        container, remove_home_volume=True
+                    )
+                except Exception:
+                    pass
+
+            # Always clean up workspace; do not retain for debugging
+            try:
+                if workspace_dir:
+                    await git_ops.cleanup_workspace(workspace_dir)
+                    emit_event(
+                        "instance.workspace_cleaned",
+                        {"workspace_dir": str(workspace_dir)},
+                    )
+            except Exception:
+                pass
 
             completed_at = datetime.now(timezone.utc).isoformat()
             return InstanceResult(
@@ -1002,7 +1075,7 @@ async def _run_instance_attempt(
                 completed_at=completed_at,
                 retry_attempts=attempt_number - 1,
                 log_path=log_path,
-                workspace_path=str(workspace_dir) if workspace_dir else None,
+                workspace_path=None,
                 status="failed",
             )
 
