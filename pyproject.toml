@@ -1,6 +1,6 @@
 [project]
 name = "pitaya"
-version = "0.1.0"
+version = "0.2.0"
 description = "Pitaya — an orchestrator of AI coding agents (e.g., Claude Code, Codex CLI) with pluggable and custom strategies"
 readme = "README.md"
 requires-python = "==3.13.*"
@@ -32,7 +32,7 @@ authors = [
 maintainers = [
   { name = "TON Studio" }
 ]
-urls = { "Repository" = "https://github.com/tact-lang/agent-orchestrator", "Issues" = "https://github.com/tact-lang/agent-orchestrator/issues" }
+urls = { "Repository" = "https://github.com/tact-lang/pitaya", "Issues" = "https://github.com/tact-lang/pitaya/issues" }
 
 [project.scripts]
 pitaya = "src.cli:main"
