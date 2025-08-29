@@ -13,6 +13,7 @@ from typing import Optional, Any
 from pathlib import Path
 
 from rich.console import Console
+from rich.console import Group
 from rich.layout import Layout
 from rich.live import Live
 from rich.panel import Panel
@@ -89,6 +90,10 @@ class TUIDisplay:
         from datetime import datetime as _dt
 
         self._ui_started_at = _dt.now(timezone.utc)
+        # Render throttling & diff hints
+        self._last_render_events: int = -1
+        self._last_runtime_tick: int = -1
+        self._last_updated_iid: Optional[str] = None
 
         # Layout components
         self._layout = self._create_layout()
@@ -97,11 +102,11 @@ class TUIDisplay:
         """Create the three-zone layout."""
         layout = Layout()
 
-        # Split into header, body, footer
+        # Split into header, body, footer (header/footer sizes adjusted dynamically)
         layout.split_column(
             Layout(name="header", size=3),
             Layout(name="body", ratio=1),
-            Layout(name="footer", size=3),  # Footer needs space for content
+            Layout(name="footer", size=3),
         )
 
         # Initialize with placeholder content
@@ -202,6 +207,25 @@ class TUIDisplay:
                     logger.debug(f"Render loop iteration {iterations}")
 
                 t0 = time.perf_counter()
+                # Throttle: update only when events progressed or once per second for runtime tick
+                try:
+                    import time as _t
+
+                    now_tick = int(_t.time())
+                except Exception:
+                    now_tick = 0
+                events_changed = (
+                    getattr(self.state, "events_processed", -1)
+                    != self._last_render_events
+                )
+                tick_changed = now_tick != self._last_runtime_tick
+                sel_changed = (
+                    getattr(self.state, "last_updated_instance_id", None)
+                    != self._last_updated_iid
+                )
+                if not (events_changed or tick_changed or sel_changed):
+                    await asyncio.sleep(self.refresh_rate)
+                    continue
                 # Synchronize all duration calculations to a single timestamp
                 from datetime import datetime as _dt
 
@@ -227,6 +251,12 @@ class TUIDisplay:
                     except Exception:
                         pass
                 t_paint = time.perf_counter()
+                # Record diff hints
+                self._last_render_events = getattr(self.state, "events_processed", -1)
+                self._last_runtime_tick = now_tick
+                self._last_updated_iid = getattr(
+                    self.state, "last_updated_instance_id", None
+                )
 
                 # Wait for next render cycle
                 # Emit diagnostics for this frame
@@ -456,15 +486,16 @@ class TUIDisplay:
                 header_content = Text("Pitaya TUI - No Active Run", style="bold yellow")
             else:
                 run = run_src
-                # Simple header text for now
+                # Multi-line header for proper wrapping
                 header_content = Text()
-                header_content.append(f"{run.run_id}", style="bold cyan")
-                # Strategy with params appended below when available
-                # Strategy name(params) and Model (from first strategy config)
+                rows: list[Text] = []
+                # Row 1: Run • Strategy • Base • Model
+                r1 = Text()
+                r1.append("Run: ", style="bold white")
+                r1.append(f"{run.run_id}", style="bold bright_cyan")
                 try:
                     if run.strategies:
                         first = next(iter(list(run.strategies.values())))
-                        # Strategy with params
                         params = []
                         cfg = getattr(first, "config", {}) or {}
                         for k in sorted(cfg.keys()):
@@ -474,22 +505,26 @@ class TUIDisplay:
                         strat_label = first.strategy_name
                         if params:
                             strat_label += f"({','.join(params)})"
-                        header_content.append(" • ")
-                        header_content.append(f"strategy={strat_label}", style="green")
-                        # Model
+                        r1.append("  •  ", style="white")
+                        r1.append("Strategy: ", style="bold white")
+                        r1.append(strat_label, style="bold green")
                         model = cfg.get("model")
                         if model:
-                            header_content.append(" • ")
-                            header_content.append(f"model {model}", style="magenta")
+                            r1.append("  •  ", style="white")
+                            r1.append("Model: ", style="bold white")
+                            r1.append(str(model), style="bright_magenta")
                 except Exception:
                     pass
-                header_content.append(" • ")
-                # Show UI session start as authoritative global start (immediate)
-                header_content.append(
-                    f"Started: {self._format_time(self._ui_started_at)}", style="dim"
-                )
-                # Total runtime inline
+                r1.append("  •  ", style="white")
+                r1.append("Base: ", style="bold white")
+                r1.append(run.base_branch or "-", style="bright_blue")
+                rows.append(r1)
+
+                # Row 2: started + runtime
+                r2 = Text()
                 try:
+                    r2.append("Started: ", style="bold white")
+                    r2.append(self._format_time(self._ui_started_at), style="white")
                     st = self._ui_started_at
                     if st and st.tzinfo is None:
                         st = st.replace(tzinfo=timezone.utc)
@@ -499,12 +534,14 @@ class TUIDisplay:
                         hours, rem = divmod(int(elapsed.total_seconds()), 3600)
                         minutes, seconds = divmod(rem, 60)
                         duration = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
-                        header_content.append(" • ")
-                        header_content.append(f"runtime {duration}", style="dim")
+                        r2.append("  •  ")
+                        r2.append("Runtime: ", style="bold white")
+                        r2.append(duration, style="bright_yellow")
                 except Exception:
                     pass
+                rows.append(r2)
 
-                # Instance counts summary in header for quick glance
+                # Row 3: counts (R/Q/D/I/Total) and IDs verbosity
                 try:
                     inst_list = list(run.instances.values())
                     total = len(inst_list)
@@ -524,21 +561,48 @@ class TUIDisplay:
                             InstanceStatus.INTERRUPTED,
                         )
                     )
-                    header_content.append(" • ")
-                    header_content.append(
-                        f"tasks: R:{running} Q:{queued} D:{done} • total:{total}",
-                        style="cyan",
+                    interrupted = sum(
+                        1 for i in inst_list if i.status == InstanceStatus.INTERRUPTED
                     )
-                    # Note if IDs are in full verbosity mode
+                    r3 = Text()
+                    r3.append("Tasks: ", style="bold white")
+                    r3.append(f"R:{running} ", style="yellow")
+                    r3.append(f"Q:{queued} ", style="bright_white")
+                    r3.append(f"D:{done} ", style="green")
+                    r3.append(f"I:{interrupted} ", style="magenta")
+                    r3.append("• ", style="white")
+                    r3.append("Total: ", style="bold white")
+                    r3.append(f"{total}", style="bright_white")
                     if getattr(self, "_ids_full", False):
-                        header_content.append(" • ")
-                        header_content.append("ids: full", style="dim")
+                        r3.append("  •  ")
+                        r3.append("IDs: full", style="white")
+                    rows.append(r3)
                 except Exception:
                     pass
 
-            # Update layout with simple panel
+                # Row 4: latest error (optional)
+                try:
+                    if getattr(self.state, "errors", None):
+                        err = str(self.state.errors[-1])[:160]
+                        rows.append(Text(f"ERR: {err}", style="red"))
+                except Exception:
+                    pass
+
+                # Append rows to header content
+                for idx, row in enumerate(rows):
+                    if idx:
+                        header_content.append("\n")
+                    header_content.append(row)
+
+            # Dynamically size header to fit content lines (+2 for borders)
+            try:
+                lines = max(1, header_content.plain.count("\n") + 1)
+                self._layout["header"].size = max(1, lines + 2)
+            except Exception:
+                pass
+            # Update layout with simple panel (no fixed height)
             self._layout["header"].update(
-                Panel(Align.center(header_content), style="blue", height=3)
+                Panel(Align.left(header_content), style="blue")
             )
         except (AttributeError, TypeError, KeyError, RuntimeError) as e:
             # Fallback on error
@@ -663,39 +727,25 @@ class TUIDisplay:
     def _update_footer(self) -> None:
         """Update footer zone with aggregate metrics."""
         try:
-            # Build footer text as simple string
+            # Build footer text as a clean, consistent summary
             footer_lines = []
 
-            # Show stats as per specification
             run_src = self._render_run
             if run_src:
                 run = run_src
 
-                # Count instances by status
+                # Aggregate metrics
                 inst_list = list(run.instances.values())
-                active_count = sum(
-                    1 for i in inst_list if i.status == InstanceStatus.RUNNING
-                )
-                queued_count = sum(
-                    1 for i in inst_list if i.status == InstanceStatus.QUEUED
-                )
-                completed_count = sum(
-                    1 for i in inst_list if i.status == InstanceStatus.COMPLETED
-                )
-                failed_count = sum(
-                    1 for i in inst_list if i.status == InstanceStatus.FAILED
-                )
-                interrupted_count = sum(
-                    1 for i in inst_list if i.status == InstanceStatus.INTERRUPTED
-                )
-
-                # Global Duration: strictly from UI session start (immediate and independent)
+                total_tokens_in = sum(i.input_tokens for i in inst_list)
+                total_tokens_out = sum(i.output_tokens for i in inst_list)
+                total_tokens = sum(i.total_tokens for i in inst_list)
+                total_cost = sum(i.cost for i in inst_list)
+                # Runtime (UI session)
                 duration = "--:--:--"
                 try:
                     start_dt = self._ui_started_at
                     if start_dt:
                         now_dt = self._frame_now or datetime.now(timezone.utc)
-                        # Align tz
                         if start_dt.tzinfo is None:
                             start_dt = start_dt.replace(tzinfo=timezone.utc)
                         elapsed = now_dt - start_dt
@@ -704,38 +754,72 @@ class TUIDisplay:
                         duration = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
                 except Exception:
                     pass
+                # Burn rate ($/h)
+                burn = 0.0
+                try:
+                    total_secs = (
+                        (self._frame_now - self._ui_started_at).total_seconds()
+                        if self._frame_now and self._ui_started_at
+                        else 0
+                    )
+                    if total_secs > 0:
+                        burn = total_cost / (total_secs / 3600.0)
+                except Exception:
+                    pass
 
-                # Aggregate metrics
-                total_cost = sum(i.cost for i in inst_list)
-                total_tokens_in = sum(i.input_tokens for i in inst_list)
-                total_tokens_out = sum(i.output_tokens for i in inst_list)
-                total_tokens = sum(i.total_tokens for i in inst_list)
-
-                # First line: instance counts and duration
-                line1 = (
-                    f"Instances: {len(run.instances)} | Active: {active_count} | Queue: {queued_count} | Completed: {completed_count} | "
-                    f"Failed: {failed_count} | Interrupted: {interrupted_count} | Duration: {duration}"
-                )
+                # Line 1 (styled): Events • Tokens (in/out/total) • Cost • Burn • Runtime
+                line1 = Text()
+                line1.append("Events: ", style="bold white")
+                line1.append(str(self.state.events_processed), style="bright_white")
+                line1.append("  •  ", style="white")
+                line1.append("Tokens: ", style="bold white")
+                line1.append(f"{total_tokens:,}", style="bright_white")
+                line1.append(" (", style="white")
+                line1.append(f"↓{total_tokens_in:,}", style="bright_white")
+                line1.append(" ", style="white")
+                line1.append(f"↑{total_tokens_out:,}", style="bright_white")
+                line1.append(")  •  ", style="white")
+                line1.append("Cost: ", style="bold white")
+                line1.append(f"${total_cost:.4f}", style="bright_magenta")
+                line1.append("  •  ", style="white")
+                line1.append("Burn: ", style="bold white")
+                line1.append(f"${burn:.2f}/h", style="bright_yellow")
+                line1.append("  •  ", style="white")
+                line1.append("Runtime: ", style="bold white")
+                line1.append(duration, style="bright_yellow")
                 footer_lines.append(line1)
 
-                # Second line: events, tokens, and cost (run totals)
-                line2 = f"Events: {self.state.events_processed} | Tokens: {total_tokens:,} (↓{total_tokens_in:,} ↑{total_tokens_out:,}) | Cost: ${total_cost:.4f}"
+                # Line 2: paths (logs • results)
+                try:
+                    logs_path = (
+                        str(self._events_file.parent)
+                        if getattr(self, "_events_file", None)
+                        else f"logs/{run.run_id}"
+                    )
+                except Exception:
+                    logs_path = f"logs/{run.run_id}"
+                results_path = f"results/{run.run_id}"
+                line2 = Text()
+                line2.append("Logs: ", style="bold white")
+                line2.append(str(logs_path), style="bright_blue")
+                line2.append("  •  ", style="white")
+                line2.append("Results: ", style="bold white")
+                line2.append(results_path, style="bright_blue")
                 footer_lines.append(line2)
-
-                # Third line: active subtotals (approximate)
-                active = [i for i in inst_list if i.status == InstanceStatus.RUNNING]
-                a_tokens_in = sum(i.input_tokens for i in active)
-                a_tokens_out = sum(i.output_tokens for i in active)
-                a_tokens = sum(i.total_tokens for i in active)
-                a_cost = sum(i.cost for i in active)
-                line3 = f"Active: tokens {a_tokens:,} (↓{a_tokens_in:,} ↑{a_tokens_out:,}) | Cost: ${a_cost:.4f}"
-                footer_lines.append(line3)
             else:
-                footer_lines.append(
-                    f"Not connected | Events: {self.state.events_processed}"
-                )
+                line = Text()
+                line.append("Not Connected", style="bold white")
+                line.append("  •  ", style="white")
+                line.append("Events: ", style="bold white")
+                line.append(str(self.state.events_processed), style="bright_white")
+                footer_lines.append(line)
 
-            footer_content = "\n".join(footer_lines)
+            footer_content = Group(*footer_lines)
+            # Dynamically size footer based on number of lines (+2 border)
+            try:
+                self._layout["footer"].size = max(1, len(footer_lines) + 2)
+            except Exception:
+                pass
             self._layout["footer"].update(Panel(footer_content, style="blue"))
         except (AttributeError, TypeError, KeyError, RuntimeError) as e:
             # Log the error for debugging
