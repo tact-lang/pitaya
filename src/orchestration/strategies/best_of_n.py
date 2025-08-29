@@ -1,14 +1,15 @@
 """
-Best-of-N strategy that generates multiple solutions and selects the best.
+Best‑of‑N Strategy — parallel candidates with structured scoring and robust selection.
 
-This is the workhorse strategy - leverages AI's variability as a strength
-by running N instances in parallel and selecting the highest scoring result.
+Runs N generation+scoring pipelines in parallel (via ScoringStrategy) and selects
+the candidate with the highest score. Designed for production use: deterministic
+keys, configurable scoring rubric, optional diversity hints, and clear metadata.
 """
 
 import asyncio
 import logging
-from dataclasses import dataclass
-from typing import List, TYPE_CHECKING
+from dataclasses import dataclass, field
+from typing import Any, Dict, List, Optional, Tuple, TYPE_CHECKING
 
 from ...shared import InstanceResult
 from ...exceptions import StrategyError
@@ -25,20 +26,44 @@ logger = logging.getLogger(__name__)
 class BestOfNConfig(StrategyConfig):
     """Configuration for best-of-n strategy."""
 
-    n: int = 5  # Number of solutions to generate
-    scorer_prompt: str = (
-        "Review this code implementation and provide a score from 1-10 based on quality, completeness, and correctness. Return the score as a JSON object with 'score' and 'feedback' fields."
-    )
-    # Optional reviewer model override; defaults to StrategyConfig.model
-    scorer_model: str | None = None
+    n: int = 5  # number of candidates
+    # Scoring controls (passed through to ScoringStrategy)
+    scorer_model: str = ""  # default: generator model
+    weight_correctness: float = 0.5
+    weight_completeness: float = 0.3
+    weight_quality: float = 0.2
+    score_scale_max: int = 10
+    fail_below_score: Optional[float] = None
+    scorer_max_retries: int = 2
+    read_only_scoring: bool = True
+    max_turns: Optional[int] = None
+    # Diversity: optional hints to encourage different approaches per candidate
+    diversity_hints: List[str] = field(default_factory=list)
+    # Selection behavior
+    tie_breaker: str = "first"  # "first" | "random"
+    require_min_success: int = 1
 
-    def validate(self) -> None:
-        """Validate best-of-n configuration."""
+    def validate(self) -> None:  # type: ignore[override]
         super().validate()
         if self.n < 1:
             raise ValueError("n must be at least 1")
-        if self.n > 100:
-            raise ValueError("n must be at most 100 (for sanity)")
+        if self.n > 50:
+            raise ValueError("n must be at most 50 (safety)")
+        if self.score_scale_max not in (10, 100):
+            raise ValueError("score_scale_max must be 10 or 100")
+        for name in ("weight_correctness", "weight_completeness", "weight_quality"):
+            v = getattr(self, name)
+            try:
+                if float(v) < 0:
+                    raise ValueError
+            except Exception:
+                raise ValueError(f"{name} must be a non‑negative number")
+        if self.scorer_max_retries < 0:
+            raise ValueError("scorer_max_retries must be >= 0")
+        if self.fail_below_score is not None and self.fail_below_score < 0:
+            raise ValueError("fail_below_score must be >= 0 when provided")
+        if self.tie_breaker not in ("first", "random"):
+            raise ValueError("tie_breaker must be 'first' or 'random'")
 
 
 class BestOfNStrategy(Strategy):
@@ -79,56 +104,63 @@ class BestOfNStrategy(Strategy):
         """
         if not (prompt or "").strip():
             raise StrategyError("best-of-n: prompt is required (non-empty)")
-        config = self.create_config()
-        logger.info(f"BestOfNStrategy starting with n={config.n}")
+        cfg: BestOfNConfig = self.create_config()  # type: ignore
+        logger.info(f"BestOfNStrategy starting with n={cfg.n}")
 
-        # Helper function to run a single scoring strategy
-        async def run_scoring_strategy(index: int):
-            # Create a new ScoringStrategy instance for each execution
-            # This ensures no shared state between parallel executions
-            scoring_strategy = ScoringStrategy()
-            overrides = {
-                "model": config.model,
-                "timeout_seconds": config.timeout_seconds,
-                "container_limits": config.container_limits,
-                "scorer_prompt": config.scorer_prompt,
-                # Optional per-phase model override for reviewer
-                "scorer_model": config.scorer_model,
-                # Ensure unique durable keys per candidate
-                "key_prefix": f"cand{index}",
+        async def run_candidate(idx: int) -> List[InstanceResult]:
+            # Prepare candidate-specific prompt (diversity hint if provided)
+            c_prompt = prompt
+            hint = None
+            if 0 <= idx < len(cfg.diversity_hints):
+                hint = str(cfg.diversity_hints[idx]).strip()
+                if hint:
+                    c_prompt = f"{prompt}\n\n[Diversity hint #{idx+1}] Consider this approach: {hint}"
+
+            scoring = ScoringStrategy()
+            overrides: Dict[str, Any] = {
+                "model": cfg.model,
+                "timeout_seconds": cfg.timeout_seconds,
+                "container_limits": cfg.container_limits,
+                "scorer_model": cfg.scorer_model,
+                "weight_correctness": cfg.weight_correctness,
+                "weight_completeness": cfg.weight_completeness,
+                "weight_quality": cfg.weight_quality,
+                "score_scale_max": cfg.score_scale_max,
+                "fail_below_score": cfg.fail_below_score,
+                "scorer_max_retries": cfg.scorer_max_retries,
+                "read_only_scoring": cfg.read_only_scoring,
+                "max_turns": cfg.max_turns,
+                # Unique durable key namespace per candidate
+                "key_prefix": f"cand{idx+1}",
             }
+            scoring.set_config_overrides(overrides)
+            res = await scoring.execute(c_prompt, base_branch, ctx)
+            # Annotate candidate metadata
+            if res and len(res) > 0:
+                r0 = res[0]
+                if r0.metrics is None:
+                    r0.metrics = {}
+                r0.metrics["bestofn_index"] = idx + 1
+                r0.metrics["bestofn_total"] = cfg.n
+                if hint:
+                    r0.metadata = r0.metadata or {}
+                    r0.metadata["diversity_hint"] = hint
+            return res
 
-            scoring_strategy.set_config_overrides(overrides)
+        tasks = [run_candidate(i) for i in range(cfg.n)]
+        results_list = await asyncio.gather(*tasks, return_exceptions=True)
 
-            # Add metadata to track which instance this is
-            # Tag keys for durable scheduling inside composed strategy
-            results = await scoring_strategy.execute(prompt, base_branch, ctx)
-            if results and len(results) > 0:
-                if results[0].metrics is None:
-                    results[0].metrics = {}
-                results[0].metrics["bestofn_index"] = index + 1
-                results[0].metrics["bestofn_total"] = config.n
-            return results
-
-        # Run N scoring strategies in parallel
-        strategy_tasks = [run_scoring_strategy(i) for i in range(config.n)]
-
-        # Execute all scoring strategies in parallel
-        all_results = await asyncio.gather(*strategy_tasks, return_exceptions=True)
-
-        # Flatten results and filter out exceptions
-        scored_results = []
-        for i, result in enumerate(all_results):
-            if isinstance(result, Exception):
-                logger.error(f"Strategy execution {i+1} failed: {result}")
+        # Flatten and filter
+        candidates: List[InstanceResult] = []
+        for i, r in enumerate(results_list):
+            if isinstance(r, Exception):
+                logger.error(f"candidate {i+1} failed: {r}")
                 continue
-            if isinstance(result, list) and result:
-                # ScoringStrategy returns a list with one result
-                scored_results.extend(result)
+            if isinstance(r, list) and r:
+                candidates.extend(r)
 
-        if not scored_results:
-            # All strategies failed - raise per spec (NoViableCandidates)
-            logger.error(f"All {config.n} strategy executions failed")
+        if not candidates:
+            logger.error(f"All {cfg.n} candidates failed")
             try:
                 from ...exceptions import NoViableCandidates
 
@@ -136,52 +168,82 @@ class BestOfNStrategy(Strategy):
             except Exception:
                 return []
 
-        # Filter successful results with valid scores
-        valid_results = []
-        for result in scored_results:
-            if (
-                result.success
-                and result.metrics
-                and result.metrics.get("score") is not None
-            ):
-                score = result.metrics.get("score")
-                # Validate score is numeric and in reasonable range
-                if isinstance(score, (int, float)) and 0 <= score <= 100:
-                    valid_results.append(result)
-                else:
-                    logger.warning(
-                        f"Invalid score {score} for result {result.branch_name}"
-                    )
+        # Successful and scored
+        valid: List[Tuple[float, InstanceResult]] = []
+        for r in candidates:
+            if not r.success:
+                continue
+            s = (r.metrics or {}).get("score") if r.metrics is not None else None
+            if isinstance(s, (int, float)):
+                # Accept either 10 or 100 scale; normalize to 100 for comparison
+                scale = (r.metrics or {}).get("score_scale_max") or cfg.score_scale_max
+                try:
+                    scale = int(scale)
+                except Exception:
+                    scale = cfg.score_scale_max
+                norm = float(s) * (100.0 / float(scale or 100))
+                valid.append((norm, r))
 
-        if not valid_results:
-            # No successfully scored results
-            successful = [r for r in scored_results if r.success]
+        # Enforce minimum successes when configured
+        successful = [r for r in candidates if r.success]
+        if len(successful) < max(1, int(cfg.require_min_success)):
+            logger.warning(
+                f"Only {len(successful)} successful candidates (< require_min_success={cfg.require_min_success})"
+            )
+
+        if not valid:
             if successful:
-                logger.warning("No scored results, returning first successful result")
-                return [successful[0]]
+                logger.warning(
+                    "No scored candidates; returning first successful result"
+                )
+                r0 = successful[0]
+                r0.metrics = r0.metrics or {}
+                r0.metrics["selected"] = True
+                r0.metrics["selection_reason"] = "first_success_no_scores"
+                r0.metrics["total_candidates"] = cfg.n
+                r0.metrics["successful_candidates"] = len(successful)
+                return [r0]
             # All failed
             try:
                 from ...exceptions import NoViableCandidates
 
                 raise NoViableCandidates()
             except Exception:
-                return [scored_results[0]] if scored_results else []
+                return [candidates[0]] if candidates else []
 
-        # Find the best scoring result
-        best_result = max(valid_results, key=lambda r: r.metrics.get("score", 0))
+        # Choose best with tie‑breaker
+        best_score = max(v for v, _ in valid)
+        top = [r for v, r in valid if abs(v - best_score) < 1e-9]
+        selected: InstanceResult
+        tie = False
+        if len(top) == 1 or cfg.tie_breaker == "first":
+            selected = top[0]
+            tie = len(top) > 1
+        else:
+            # Deterministic random using strategy context RNG
+            # Emit strategy.rand events for observability
+            import math
 
-        # Mark it as the selected result
-        if best_result.metrics is None:
-            best_result.metrics = {}
-        best_result.metrics["selected"] = True
-        best_result.metrics["selection_reason"] = (
-            f"Best score: {best_result.metrics.get('score', 'N/A')}"
+            idx = int(math.floor(ctx.rand() * len(top)))
+            if idx >= len(top):
+                idx = 0
+            selected = top[idx]
+            tie = len(top) > 1
+
+        # Annotate selection metadata
+        sel_metrics = selected.metrics or {}
+        sel_metrics["selected"] = True
+        sel_metrics["selection_reason"] = (
+            "highest_score_tie_rand"
+            if tie and cfg.tie_breaker == "random"
+            else "highest_score"
         )
-        best_result.metrics["total_candidates"] = config.n
-        best_result.metrics["successful_candidates"] = len(valid_results)
+        sel_metrics["total_candidates"] = cfg.n
+        sel_metrics["successful_candidates"] = len(successful)
+        selected.metrics = sel_metrics
 
         logger.info(
-            f"Selected instance {best_result.metrics.get('bestofn_index', 'N/A')}/{config.n} with score {best_result.metrics.get('score', 'N/A')}"
+            f"Selected candidate index={sel_metrics.get('bestofn_index','?')}/{cfg.n} score={sel_metrics.get('score','?')}"
         )
 
-        return [best_result]
+        return [selected]
