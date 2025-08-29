@@ -184,10 +184,17 @@ class BestOfNStrategy(Strategy):
 
         # Enforce minimum successes when configured
         successful = [r for r in candidates if r.success]
-        if len(successful) < max(1, int(cfg.require_min_success)):
-            logger.warning(
-                f"Only {len(successful)} successful candidates (< require_min_success={cfg.require_min_success})"
+        min_required = max(1, int(cfg.require_min_success))
+        if len(successful) < min_required:
+            logger.error(
+                f"successful candidates {len(successful)} < require_min_success={cfg.require_min_success}"
             )
+            try:
+                from ...exceptions import NoViableCandidates
+
+                raise NoViableCandidates()
+            except Exception:
+                return successful if successful else []
 
         if not valid:
             if successful:

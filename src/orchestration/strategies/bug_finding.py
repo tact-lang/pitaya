@@ -141,7 +141,21 @@ class BugFindingStrategy(Strategy):
             val_result = vr or val_result
 
         if not val_result:
-            # Should not happen, but keep safe default
+            # Surface validation failure explicitly
+            try:
+                from ...shared import InstanceResult as _IR
+
+                failed_val = _IR(
+                    success=False,
+                    error="validation did not complete",
+                    error_type="validation_failed",
+                    status="failed",
+                )
+            except Exception:
+                failed_val = None
+            if failed_val is not None:
+                failed_val.metadata["bug_confirmed"] = False
+                return [disc_result, failed_val]
             return [disc_result]
 
         # Confirm bug via commit and artifact presence
