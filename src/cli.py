@@ -208,12 +208,6 @@ class OrchestratorCLI:
             help="TUI density (default: auto)",
         )
         g_display.add_argument(
-            "--display-details",
-            choices=["none", "right"],
-            default="none",
-            help="Show details pane (default: none)",
-        )
-        g_display.add_argument(
             "--output",
             choices=["streaming", "json", "quiet"],
             default="streaming",
@@ -2074,11 +2068,7 @@ class OrchestratorCLI:
                 self.tui_display.set_forced_display_mode(args.display)
             except Exception:
                 pass
-        # Apply details pane mode
-        try:
-            self.tui_display.set_details_mode(getattr(args, "display_details", "none"))
-        except Exception:
-            pass
+        # Details pane mode removed from CLI; TUI defaults apply
         # IDs verbosity note in TUI header
         try:
             self.tui_display.set_ids_full(getattr(args, "show_ids", "short") == "full")
