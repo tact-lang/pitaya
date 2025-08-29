@@ -62,26 +62,36 @@ class OrchestratorCLI:
         parser = argparse.ArgumentParser(
             prog="pitaya",
             description=(
-                "Pitaya: Orchestrate AI coding agents (e.g., Claude Code, Codex CLI) with pluggable and custom strategies,\n"
-                "plus a rich TUI. Use -S key=value to pass strategy params."
+                "Orchestrate AI coding agents with pluggable strategies and a clean TUI.\n"
+                "Quote your prompt; pass strategy params with -S key=value."
             ),
             formatter_class=argparse.RawDescriptionHelpFormatter,
             epilog=(
-                "Examples:\n"
-                "  # Simple strategy\n"
+                "Quick examples:\n"
+                "  # One-shot\n"
                 '  pitaya "implement auth" --strategy simple\n\n'
-                "  # Best-of-N with params\n"
-                '  pitaya "fix bug in user.py" --strategy best-of-n -S n=5\n\n'
-                "  # Doc review (pages file, 2 reviewers)\n"
-                '  pitaya "Review docs" --strategy doc-review -S pages_file=pages.yml -S reviewers_per_page=2\n\n'
-                "  # Custom model and multiple runs\n"
-                '  pitaya "add tests" --model opus --runs 3\n\n'
-                "  # Override Docker image\n"
-                '  pitaya "task" --plugin codex --docker-image ghcr.io/me/codex-cli:mytag\n\n'
-                "  # Resume a run\n"
+                "  # Best-of-N with scoring\n"
+                '  pitaya "fix bug in user.py" --strategy best-of-n -S n=5 -S scorer_model=opus\n\n'
+                "  # Iterative refine (3 rounds)\n"
+                '  pitaya "refactor module" --strategy iterative -S iterations=3\n\n'
+                "  # Bug finding (target area)\n"
+                '  pitaya "find a bug" --strategy bug-finding -S target_area=src/parser\n\n'
+                "  # Custom strategy (module or file)\n"
+                '  pitaya "task" --strategy examples.fanout_two:FanOutTwoStrategy\n'
+                '  pitaya "task" --strategy ./examples/propose_refine.py\n\n'
+                "  # Headless modes\n"
+                '  pitaya "task" --no-tui --output streaming --verbose\n'
+                '  pitaya "task" --json\n\n'
+                "  # Run management\n"
+                "  pitaya --list-runs\n"
+                "  pitaya --show-run run_20250114_123456\n"
                 "  pitaya --resume run_20250114_123456\n\n"
-                "  # Headless JSON output\n"
-                '  pitaya "implement feature" --no-tui --output json\n'
+                "Tips:\n"
+                "  • Built-ins: "
+                + ", ".join(sorted(list(AVAILABLE_STRATEGIES.keys())))
+                + "\n"
+                "  • Strategies accept -S key=value (numbers/bools auto-parsed).\n"
+                "  • --model picks the agent model; --plugin chooses the runner.\n"
             ),
         )
 
@@ -936,7 +946,9 @@ class OrchestratorCLI:
                 tree = Tree("[bold]Strategies[/bold]")
 
                 for strat_id, strat_data in data["strategies"].items():
-                    strat_node = tree.add(f"{strat_data['name']} ({strat_id})")
+                    strat_node = tree.add(
+                        f"{strat_data.get('strategy_name','unknown')} ({strat_id})"
+                    )
                     strat_node.add(f"State: {strat_data['state']}")
                     strat_node.add(f"Started: {strat_data['started_at']}")
 
