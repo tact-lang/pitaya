@@ -119,8 +119,6 @@ class BestOfNStrategy(Strategy):
             scoring = ScoringStrategy()
             overrides: Dict[str, Any] = {
                 "model": cfg.model,
-                "timeout_seconds": cfg.timeout_seconds,
-                "container_limits": cfg.container_limits,
                 "scorer_model": cfg.scorer_model,
                 "weight_correctness": cfg.weight_correctness,
                 "weight_completeness": cfg.weight_completeness,
