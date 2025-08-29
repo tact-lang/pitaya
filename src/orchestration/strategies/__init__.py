@@ -9,6 +9,7 @@ from .best_of_n import BestOfNStrategy, BestOfNConfig
 from .iterative import IterativeStrategy, IterativeConfig
 from .bug_finding import BugFindingStrategy, BugFindingConfig
 from .doc_review import DocReviewStrategy, DocReviewConfig
+from .doc_score import DocScoreStrategy, DocScoreConfig
 
 # Registry of available strategies
 AVAILABLE_STRATEGIES = {
@@ -18,6 +19,7 @@ AVAILABLE_STRATEGIES = {
     "iterative": IterativeStrategy,
     "bug-finding": BugFindingStrategy,
     "doc-review": DocReviewStrategy,
+    "doc-score": DocScoreStrategy,
 }
 
 __all__ = [
@@ -34,5 +36,7 @@ __all__ = [
     "BugFindingConfig",
     "DocReviewStrategy",
     "DocReviewConfig",
+    "DocScoreStrategy",
+    "DocScoreConfig",
     "AVAILABLE_STRATEGIES",
 ]
