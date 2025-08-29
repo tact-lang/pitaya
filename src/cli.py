@@ -305,11 +305,6 @@ class OrchestratorCLI:
             default="true",
             help="For 'config print': redact secrets (default: true)",
         )
-        g_state.add_argument(
-            "--ci-artifacts",
-            metavar="OUT_ZIP",
-            help="Create minimal CI artifact zip (summary, branches, JSON)",
-        )
 
         # Maintenance group
         g_maint = parser.add_argument_group("Maintenance")
@@ -1902,14 +1897,7 @@ class OrchestratorCLI:
                 else:
                     self.console.print("\n[green]Run completed[/green]")
 
-            # CI artifacts bundle if requested
-            try:
-                if getattr(args, "ci_artifacts", None):
-                    await self._create_ci_artifacts(args, run_id)
-            except Exception as e:
-                self.console.print(
-                    f"[yellow]CI artifacts creation failed: {e}[/yellow]"
-                )
+            # CI artifacts bundle removed
 
             # Decide exit code based on failures (spec: 3 = completed with failures)
             exit_code = 0
@@ -1956,91 +1944,6 @@ class OrchestratorCLI:
             # Shutdown orchestrator
             await self.orchestrator.shutdown()
             return 1
-
-    async def _create_ci_artifacts(self, args: argparse.Namespace, run_id: str) -> None:
-        """Create minimal CI artifact zip per plan.
-
-        Contents:
-          - results/summary.json
-          - results/branches.txt
-          - results/tasks/<k8>.json (one per task, from canonical events)
-        """
-        from pathlib import Path as _P
-        import zipfile as _zip
-        import hashlib as _hashlib
-
-        out_zip = _P(args.ci_artifacts)
-        out_zip.parent.mkdir(parents=True, exist_ok=True)
-        base_results = _P("./results") / run_id
-        tasks_dir = base_results / "tasks"
-        tasks_dir.mkdir(parents=True, exist_ok=True)
-        events_file = args.logs_dir / run_id / "events.jsonl"
-
-        def _short8(s: str) -> str:
-            return _hashlib.sha256(s.encode("utf-8", errors="ignore")).hexdigest()[:8]
-
-        # Build per-task files from canonical events
-        if events_file.exists():
-            with open(events_file, "r", encoding="utf-8") as f:
-                for line in f:
-                    try:
-                        ev = json.loads(line)
-                    except Exception:
-                        continue
-                    t = ev.get("type")
-                    if t not in ("task.completed", "task.failed"):
-                        continue
-                    sid = ev.get("strategy_execution_id") or ""
-                    key = ev.get("key") or ""
-                    if not key:
-                        continue
-                    k8 = _short8(f"{sid}|{key}")
-                    payload = ev.get("payload") or {}
-
-                    # Redact any secrets by name heuristics
-                    def _redact(obj):
-                        if isinstance(obj, dict):
-                            out = {}
-                            for k, v in obj.items():
-                                kl = str(k).lower()
-                                if any(
-                                    s in kl
-                                    for s in (
-                                        "token",
-                                        "key",
-                                        "secret",
-                                        "password",
-                                        "authorization",
-                                        "cookie",
-                                    )
-                                ):
-                                    out[k] = "[REDACTED]"
-                                else:
-                                    out[k] = _redact(v)
-                            return out
-                        if isinstance(obj, list):
-                            return [_redact(v) for v in obj]
-                        return obj
-
-                    data = {
-                        "type": t,
-                        "run_id": ev.get("run_id"),
-                        "strategy_execution_id": sid,
-                        "key": key,
-                        "payload": _redact(payload),
-                    }
-                    with open(tasks_dir / f"{k8}.json", "w", encoding="utf-8") as tf:
-                        json.dump(data, tf, indent=2)
-        # Write zip
-        with _zip.ZipFile(out_zip, "w", compression=_zip.ZIP_DEFLATED) as zf:
-            for rel in ("summary.json", "branches.txt"):
-                p = base_results / rel
-                if p.exists():
-                    zf.write(p, arcname=f"results/{rel}")
-            # tasks
-            if tasks_dir.exists():
-                for p in sorted(tasks_dir.glob("*.json")):
-                    zf.write(p, arcname=f"results/tasks/{p.name}")
 
     async def _run_with_tui(
         self, args: argparse.Namespace, run_id: str, full_config: Dict[str, Any]
