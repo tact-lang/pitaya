@@ -62,26 +62,36 @@ class OrchestratorCLI:
         parser = argparse.ArgumentParser(
             prog="pitaya",
             description=(
-                "Pitaya: Orchestrate AI coding agents (e.g., Claude Code, Codex CLI) with pluggable and custom strategies,\n"
-                "plus a rich TUI. Use -S key=value to pass strategy params."
+                "Orchestrate AI coding agents with pluggable strategies and a clean TUI.\n"
+                "Quote your prompt; pass strategy params with -S key=value."
             ),
             formatter_class=argparse.RawDescriptionHelpFormatter,
             epilog=(
-                "Examples:\n"
-                "  # Simple strategy\n"
+                "Quick examples:\n"
+                "  # One-shot\n"
                 '  pitaya "implement auth" --strategy simple\n\n'
-                "  # Best-of-N with params\n"
-                '  pitaya "fix bug in user.py" --strategy best-of-n -S n=5\n\n'
-                "  # Doc review (pages file, 2 reviewers)\n"
-                '  pitaya "Review docs" --strategy doc-review -S pages_file=pages.yml -S reviewers_per_page=2\n\n'
-                "  # Custom model and multiple runs\n"
-                '  pitaya "add tests" --model opus --runs 3\n\n'
-                "  # Override Docker image\n"
-                '  pitaya "task" --plugin codex --docker-image ghcr.io/me/codex-cli:mytag\n\n'
-                "  # Resume a run\n"
+                "  # Best-of-N with scoring\n"
+                '  pitaya "fix bug in user.py" --strategy best-of-n -S n=5 -S scorer_model=opus\n\n'
+                "  # Iterative refine (3 rounds)\n"
+                '  pitaya "refactor module" --strategy iterative -S iterations=3\n\n'
+                "  # Bug finding (target area)\n"
+                '  pitaya "find a bug" --strategy bug-finding -S target_area=src/parser\n\n'
+                "  # Custom strategy (module or file)\n"
+                '  pitaya "task" --strategy examples.fanout_two:FanOutTwoStrategy\n'
+                '  pitaya "task" --strategy ./examples/propose_refine.py\n\n'
+                "  # Headless modes\n"
+                '  pitaya "task" --no-tui --output streaming --verbose\n'
+                '  pitaya "task" --json\n\n'
+                "  # Run management\n"
+                "  pitaya --list-runs\n"
+                "  pitaya --show-run run_20250114_123456\n"
                 "  pitaya --resume run_20250114_123456\n\n"
-                "  # Headless JSON output\n"
-                '  pitaya "implement feature" --no-tui --output json\n'
+                "Tips:\n"
+                "  • Built-ins: "
+                + ", ".join(sorted(list(AVAILABLE_STRATEGIES.keys())))
+                + "\n"
+                "  • Strategies accept -S key=value (numbers/bools auto-parsed).\n"
+                "  • --model picks the agent model; --plugin chooses the runner.\n"
             ),
         )
 
@@ -208,12 +218,6 @@ class OrchestratorCLI:
             help="TUI density (default: auto)",
         )
         g_display.add_argument(
-            "--display-details",
-            choices=["none", "right"],
-            default="none",
-            help="Show details pane (default: none)",
-        )
-        g_display.add_argument(
             "--output",
             choices=["streaming", "json", "quiet"],
             default="streaming",
@@ -278,11 +282,6 @@ class OrchestratorCLI:
         )
         # Legacy parallel presets removed; use --max-parallel or auto
         g_limits.add_argument(
-            "--allow-global-session-volume",
-            action="store_true",
-            help="Share agent session across runs (advanced)",
-        )
-        g_limits.add_argument(
             "--force-commit",
             action="store_true",
             help="Force a git commit in the workspace after agent finishes (if there are changes)",
@@ -315,11 +314,6 @@ class OrchestratorCLI:
             choices=["true", "false"],
             default="true",
             help="For 'config print': redact secrets (default: true)",
-        )
-        g_state.add_argument(
-            "--ci-artifacts",
-            metavar="OUT_ZIP",
-            help="Create minimal CI artifact zip (summary, branches, JSON)",
         )
 
         # Maintenance group
@@ -952,7 +946,9 @@ class OrchestratorCLI:
                 tree = Tree("[bold]Strategies[/bold]")
 
                 for strat_id, strat_data in data["strategies"].items():
-                    strat_node = tree.add(f"{strat_data['name']} ({strat_id})")
+                    strat_node = tree.add(
+                        f"{strat_data.get('strategy_name','unknown')} ({strat_id})"
+                    )
                     strat_node.add(f"State: {strat_data['state']}")
                     strat_node.add(f"Started: {strat_data['started_at']}")
 
@@ -1601,8 +1597,7 @@ class OrchestratorCLI:
             self.console.print(f"  - Config file: {args.config or 'pitaya.yaml'}")
         self.console.print("  - Built-in defaults")
 
-        # Respect global session volume consent by setting env for runner
-        allow_global_session = bool(getattr(args, "allow_global_session_volume", False))
+        # Global session volume support removed
 
         # Resolve parallelism
         import os as _os
@@ -1680,7 +1675,6 @@ class OrchestratorCLI:
                 )
             ),
             allow_overwrite_protected_refs=allow_overwrite,
-            allow_global_session_volume=allow_global_session,
             default_plugin_name=str(
                 full_config.get("plugin_name", getattr(args, "plugin", "claude-code"))
             ),
@@ -1915,14 +1909,7 @@ class OrchestratorCLI:
                 else:
                     self.console.print("\n[green]Run completed[/green]")
 
-            # CI artifacts bundle if requested
-            try:
-                if getattr(args, "ci_artifacts", None):
-                    await self._create_ci_artifacts(args, run_id)
-            except Exception as e:
-                self.console.print(
-                    f"[yellow]CI artifacts creation failed: {e}[/yellow]"
-                )
+            # CI artifacts bundle removed
 
             # Decide exit code based on failures (spec: 3 = completed with failures)
             exit_code = 0
@@ -1970,91 +1957,6 @@ class OrchestratorCLI:
             await self.orchestrator.shutdown()
             return 1
 
-    async def _create_ci_artifacts(self, args: argparse.Namespace, run_id: str) -> None:
-        """Create minimal CI artifact zip per plan.
-
-        Contents:
-          - results/summary.json
-          - results/branches.txt
-          - results/tasks/<k8>.json (one per task, from canonical events)
-        """
-        from pathlib import Path as _P
-        import zipfile as _zip
-        import hashlib as _hashlib
-
-        out_zip = _P(args.ci_artifacts)
-        out_zip.parent.mkdir(parents=True, exist_ok=True)
-        base_results = _P("./results") / run_id
-        tasks_dir = base_results / "tasks"
-        tasks_dir.mkdir(parents=True, exist_ok=True)
-        events_file = args.logs_dir / run_id / "events.jsonl"
-
-        def _short8(s: str) -> str:
-            return _hashlib.sha256(s.encode("utf-8", errors="ignore")).hexdigest()[:8]
-
-        # Build per-task files from canonical events
-        if events_file.exists():
-            with open(events_file, "r", encoding="utf-8") as f:
-                for line in f:
-                    try:
-                        ev = json.loads(line)
-                    except Exception:
-                        continue
-                    t = ev.get("type")
-                    if t not in ("task.completed", "task.failed"):
-                        continue
-                    sid = ev.get("strategy_execution_id") or ""
-                    key = ev.get("key") or ""
-                    if not key:
-                        continue
-                    k8 = _short8(f"{sid}|{key}")
-                    payload = ev.get("payload") or {}
-
-                    # Redact any secrets by name heuristics
-                    def _redact(obj):
-                        if isinstance(obj, dict):
-                            out = {}
-                            for k, v in obj.items():
-                                kl = str(k).lower()
-                                if any(
-                                    s in kl
-                                    for s in (
-                                        "token",
-                                        "key",
-                                        "secret",
-                                        "password",
-                                        "authorization",
-                                        "cookie",
-                                    )
-                                ):
-                                    out[k] = "[REDACTED]"
-                                else:
-                                    out[k] = _redact(v)
-                            return out
-                        if isinstance(obj, list):
-                            return [_redact(v) for v in obj]
-                        return obj
-
-                    data = {
-                        "type": t,
-                        "run_id": ev.get("run_id"),
-                        "strategy_execution_id": sid,
-                        "key": key,
-                        "payload": _redact(payload),
-                    }
-                    with open(tasks_dir / f"{k8}.json", "w", encoding="utf-8") as tf:
-                        json.dump(data, tf, indent=2)
-        # Write zip
-        with _zip.ZipFile(out_zip, "w", compression=_zip.ZIP_DEFLATED) as zf:
-            for rel in ("summary.json", "branches.txt"):
-                p = base_results / rel
-                if p.exists():
-                    zf.write(p, arcname=f"results/{rel}")
-            # tasks
-            if tasks_dir.exists():
-                for p in sorted(tasks_dir.glob("*.json")):
-                    zf.write(p, arcname=f"results/tasks/{p.name}")
-
     async def _run_with_tui(
         self, args: argparse.Namespace, run_id: str, full_config: Dict[str, Any]
     ) -> int:
@@ -2074,11 +1976,7 @@ class OrchestratorCLI:
                 self.tui_display.set_forced_display_mode(args.display)
             except Exception:
                 pass
-        # Apply details pane mode
-        try:
-            self.tui_display.set_details_mode(getattr(args, "display_details", "none"))
-        except Exception:
-            pass
+        # Details pane mode removed from CLI; TUI defaults apply
         # IDs verbosity note in TUI header
         try:
             self.tui_display.set_ids_full(getattr(args, "show_ids", "short") == "full")
