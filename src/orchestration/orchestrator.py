@@ -27,6 +27,7 @@ from .event_bus import EventBus
 from .state import InstanceInfo, RunState, StateManager
 from ..shared import InstanceStatus
 from .strategies import AVAILABLE_STRATEGIES
+from .strategies.loader import load_strategy
 from .strategy_context import StrategyContext
 from ..exceptions import (
     OrchestratorError,
@@ -523,12 +524,19 @@ class Orchestrator:
         )
 
         try:
-            # Get strategy class
-            if strategy_name not in AVAILABLE_STRATEGIES:
-                raise ValueError(f"Unknown strategy: {strategy_name}")
+            # Resolve strategy class: built-in name or file.py[:Class]
+            effective_strategy_name = strategy_name
+            if strategy_name in AVAILABLE_STRATEGIES:
+                strategy_class = AVAILABLE_STRATEGIES[strategy_name]
+            else:
+                # Support file.py[:Class] and module.path[:Class] forms
+                strategy_class = load_strategy(strategy_name)
+                try:
+                    effective_strategy_name = strategy_class().name
+                except Exception:
+                    effective_strategy_name = strategy_name
 
-            logger.info(f"Found strategy class for {strategy_name}")
-            strategy_class = AVAILABLE_STRATEGIES[strategy_name]
+            logger.info(f"Resolved strategy class for {effective_strategy_name}")
 
             # Removed hardcoded capability gating by strategy name; selection is plugin-agnostic
 
@@ -547,7 +555,9 @@ class Orchestrator:
                     strategy_id = str(uuid.uuid4())
                     self.state_manager.register_strategy(
                         strategy_id=strategy_id,
-                        strategy_name=strategy_name,
+                        strategy_name=getattr(
+                            strategy, "name", effective_strategy_name
+                        ),
                         config=strategy_config or {},
                     )
 
@@ -556,7 +566,9 @@ class Orchestrator:
                         "strategy.started",
                         {
                             "strategy_id": strategy_id,
-                            "strategy_name": strategy_name,
+                            "strategy_name": getattr(
+                                strategy, "name", effective_strategy_name
+                            ),
                             "config": strategy_config,
                             "run_index": run_idx + 1,
                             "total_runs": runs,
@@ -568,7 +580,7 @@ class Orchestrator:
                         run_id=run_id,
                         strategy_execution_id=strategy_id,
                         payload={
-                            "name": strategy_name,
+                            "name": getattr(strategy, "name", effective_strategy_name),
                             "params": strategy_config or {},
                         },
                     )
@@ -673,7 +685,7 @@ class Orchestrator:
                 return final_results
 
             else:
-                # Single strategy execution (original code)
+                # Single strategy execution
                 logger.info("Executing single strategy run")
                 strategy = strategy_class()
                 strategy.set_config_overrides(strategy_config or {})
@@ -683,7 +695,7 @@ class Orchestrator:
                 strategy_id = str(uuid.uuid4())
                 self.state_manager.register_strategy(
                     strategy_id=strategy_id,
-                    strategy_name=strategy_name,
+                    strategy_name=getattr(strategy, "name", effective_strategy_name),
                     config=strategy_config or {},
                 )
 
@@ -693,7 +705,9 @@ class Orchestrator:
                     "strategy.started",
                     {
                         "strategy_id": strategy_id,
-                        "strategy_name": strategy_name,
+                        "strategy_name": getattr(
+                            strategy, "name", effective_strategy_name
+                        ),
                         "config": strategy_config,
                     },
                 )
@@ -701,10 +715,15 @@ class Orchestrator:
                     type="strategy.started",
                     run_id=run_id,
                     strategy_execution_id=strategy_id,
-                    payload={"name": strategy_name, "params": strategy_config or {}},
+                    payload={
+                        "name": getattr(strategy, "name", effective_strategy_name),
+                        "params": strategy_config or {},
+                    },
                 )
 
-                logger.info(f"Calling strategy.execute for {strategy_name}")
+                logger.info(
+                    f"Calling strategy.execute for {getattr(strategy, 'name', effective_strategy_name)}"
+                )
                 # Create strategy context
                 ctx = StrategyContext(
                     orchestrator=self,

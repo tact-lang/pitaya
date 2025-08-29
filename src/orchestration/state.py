@@ -1017,7 +1017,7 @@ class StateManager:
                     # Prefer base_branch from canonical payload when present to
                     # make resume robust even if snapshots lagged.
                     base_branch=(data.get("base_branch") or ""),
-                    branch_name="",
+                    branch_name=(data.get("branch_name") or ""),
                     container_name=data.get("container_name", ""),
                     state=InstanceStatus.QUEUED,
                     metadata={"model": data.get("model", "")},

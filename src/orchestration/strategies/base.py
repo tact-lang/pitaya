@@ -1,11 +1,18 @@
 """
 Base strategy interface for orchestrating multiple AI coding instances.
 
-All strategies must inherit from this base class and implement the execute method.
+All strategies inherit from this base class and implement ``execute``.
+This base provides sensible defaults so custom strategies remain minimal:
+
+- No need to import ``logging``; use ``self.logger`` for logs
+- Optional strategy name via class attribute ``NAME``
+- Default config class is ``StrategyConfig``; override only if needed
 """
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+import logging
+import re as _re
 from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
 from ...shared import InstanceResult
@@ -37,20 +44,38 @@ class Strategy(ABC):
     process the results.
     """
 
+    # Optional class attribute to set a stable name without overriding the property
+    NAME: Optional[str] = None
+
     def __init__(self):
-        """Initialize strategy with empty config."""
+        """Initialize strategy with empty config and a namespaced logger."""
         self._config_overrides: Dict[str, Any] = {}
+        # Provide a per-strategy logger so authors don't need to import logging
+        try:
+            self.logger = logging.getLogger(f"pitaya.strategy.{self.name}")
+        except Exception:  # pragma: no cover - defensive
+            self.logger = logging.getLogger("pitaya.strategy")
 
     @property
-    @abstractmethod
     def name(self) -> str:
-        """Return the strategy name for identification."""
-        pass
+        """Return the strategy name for identification.
 
-    @abstractmethod
+        Resolved in order: class attribute ``NAME`` -> derived from class name.
+        Example: ``BestOfNStrategy`` -> ``best-of-n``.
+        """
+        if getattr(self, "NAME", None):
+            return str(self.NAME)
+        # Derive from class name by removing 'Strategy' and converting CamelCase to kebab-case
+        cname = self.__class__.__name__
+        if cname.endswith("Strategy"):
+            cname = cname[: -len("Strategy")]
+        parts = _re.findall(r"[A-Z]+(?=[A-Z][a-z]|\b)|[A-Z]?[a-z]+|\d+", cname)
+        derived = "-".join(p.lower() for p in parts if p)
+        return derived or "custom"
+
     def get_config_class(self) -> type[StrategyConfig]:
-        """Return the configuration class for this strategy."""
-        pass
+        """Return the configuration class for this strategy (default: StrategyConfig)."""
+        return StrategyConfig
 
     @abstractmethod
     async def execute(

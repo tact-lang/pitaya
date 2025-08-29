@@ -225,6 +225,25 @@ Plugins accept model identifiers as provided. Claude Code commonly uses `sonnet`
 - Use `--oauth-token` (subscription) or `--api-key` (API mode). Optional `--base-url` is respected as `ANTHROPIC_BASE_URL`.
 - Env alternatives: `CLAUDE_CODE_OAUTH_TOKEN`, `ANTHROPIC_API_KEY`, and `ANTHROPIC_BASE_URL`.
 
+## Custom Strategies
+
+- Use built-ins (e.g., `simple`, `best-of-n`, `iterative`) or point to custom ones via:
+  - File path: `pitaya "task" --strategy ./examples/custom_simple.py -S model=sonnet`
+  - File + class: `pitaya "task" --strategy ./examples/propose_refine.py:ProposeRefineStrategy`
+  - Module + class: `pitaya "task" --strategy examples.fanout_two:FanOutTwoStrategy`
+  - Module (single strategy exported): `pitaya "task" --strategy examples.custom_simple`
+- Define a class subclassing `Strategy` (see `src/orchestration/strategies/base.py`).
+  - Minimal boilerplate: set `NAME = "your-name"`, implement `execute(self, prompt, base_branch, ctx)`.
+  - Use `self.logger` for logging, no logging imports needed.
+
+Examples
+
+- `examples/custom_simple.py` — one durable task with a friendly greeting.
+- `examples/fanout_two.py` — runs N tasks in parallel (default 2).
+- `examples/propose_refine.py` — two-stage propose → refine flow (stage 2 bases on stage 1 branch).
+
+Security note: loading strategies from modules/files executes Python code. Only load trusted code.
+
 ## Logs & Artifacts
 
 - Logs: `logs/<run_id>/events.jsonl` and structured component logs

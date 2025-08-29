@@ -107,9 +107,12 @@ class OrchestratorCLI:
         g_strategy = parser.add_argument_group("Strategy")
         g_strategy.add_argument(
             "--strategy",
-            choices=list(AVAILABLE_STRATEGIES.keys()),
             default="simple",
-            help="Execution strategy (default: simple)",
+            help=(
+                "Execution strategy. Built-ins: "
+                + ", ".join(sorted(list(AVAILABLE_STRATEGIES.keys())))
+                + ". Or pass a file/module: path/to/strategy.py[:Class] or package.module[:Class]"
+            ),
         )
         g_strategy.add_argument(
             "-S",
@@ -756,13 +759,39 @@ class OrchestratorCLI:
                 "must be integer or 'auto'",
                 "auto",
             )
-        # Strategy exists
+        # Strategy exists (built-in name or file.py[:Class] or module.path[:Class])
         try:
             strategy = full_config.get("strategy", args.strategy)
-            if strategy not in AVAILABLE_STRATEGIES:
+            ok = False
+            if isinstance(strategy, str):
+                if strategy in AVAILABLE_STRATEGIES:
+                    ok = True
+                else:
+                    spec = str(strategy)
+                    if ":" in spec:
+                        spec_path = spec.split(":", 1)[0]
+                    else:
+                        spec_path = spec
+                    from pathlib import Path as _P
+
+                    if spec_path.endswith(".py") and _P(spec_path).exists():
+                        ok = True
+                    else:
+                        # Accept dotted module paths without importing (avoid executing user code during validation)
+                        try:
+                            import re as _re
+
+                            mod_re = _re.compile(
+                                r"^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)*$"
+                            )
+                            if mod_re.match(spec_path):
+                                ok = True
+                        except Exception:
+                            pass
+            if not ok:
                 _add(
                     "strategy",
-                    "unknown strategy",
+                    "unknown strategy (use built-in, file.py[:Class], or module.path[:Class])",
                     ",".join(AVAILABLE_STRATEGIES.keys()),
                 )
         except Exception:
