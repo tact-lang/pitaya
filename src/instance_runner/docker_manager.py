@@ -9,6 +9,7 @@ import time
 import json
 import logging
 import warnings
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, TYPE_CHECKING
@@ -1371,16 +1372,51 @@ class DockerManager:
                 f"Required tools missing in container: {', '.join(missing)}"
             )
 
-    async def cleanup_container(self, container: Container, force: bool = True) -> None:
+    async def cleanup_container(
+        self,
+        container: Container,
+        force: bool = True,
+        *,
+        remove_home_volume: bool = False,
+    ) -> None:
         """
         Remove a container after stopping it.
 
         Args:
             container: Container to remove
             force: Force removal even if running
+            remove_home_volume: Also remove the named session volume mounted at /home/node
         """
         try:
             loop = asyncio.get_event_loop()
+
+            # Capture the mounted /home volume name before removal (if requested)
+            home_volume_name: Optional[str] = None
+            try:
+                await loop.run_in_executor(None, container.reload)
+                mounts = (container.attrs or {}).get("Mounts", []) or []
+                for m in mounts:
+                    try:
+                        mtype = str(m.get("Type") or m.get("type") or "").lower()
+                        if mtype != "volume":
+                            continue
+                        dest = (
+                            m.get("Destination")
+                            or m.get("Target")
+                            or m.get("Mountpoint")
+                            or ""
+                        )
+                        if str(dest) == "/home/node":
+                            # Prefer Name (for named volumes) and fall back to Source
+                            name = m.get("Name") or m.get("name") or m.get("Source")
+                            if name:
+                                home_volume_name = str(name)
+                                break
+                    except Exception:
+                        continue
+            except Exception:
+                # Best effort: continue even if we cannot inspect mounts
+                pass
 
             # Stop container gracefully first if it's running
             await loop.run_in_executor(None, container.reload)
@@ -1390,6 +1426,29 @@ class DockerManager:
             # Now remove the container
             await loop.run_in_executor(None, lambda: container.remove(force=force))
             logger.info(f"Removed container {container.name}")
+
+            # Optionally remove the run-scoped session volume
+            if remove_home_volume and home_volume_name:
+                try:
+                    name = home_volume_name
+                    # Only remove Pitaya run-scoped volumes. Keep global session volumes.
+                    if name.startswith("pitaya_home_") and not re.fullmatch(
+                        r"pitaya_home_g[0-9a-f]{8}", name
+                    ):
+                        # Resolve volume and remove
+                        vol = await loop.run_in_executor(
+                            None, lambda: self.client.volumes.get(name)
+                        )
+                        await loop.run_in_executor(None, lambda: vol.remove(force=True))
+                        logger.info(f"Removed session volume {name}")
+                    else:
+                        logger.debug(
+                            f"Skipping volume removal for {name} (not run-scoped or not Pitaya)"
+                        )
+                except Exception as ve:
+                    logger.warning(
+                        f"Failed to remove session volume {home_volume_name}: {ve}"
+                    )
         except NotFound:
             logger.debug(f"Container {container.name} already removed")
         except (docker.errors.APIError, docker.errors.DockerException) as e:

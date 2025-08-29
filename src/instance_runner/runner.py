@@ -789,7 +789,9 @@ async def _run_instance_attempt(
                             )
                         except Exception:
                             pass
-                        await docker_manager.cleanup_container(container)
+                        await docker_manager.cleanup_container(
+                            container, remove_home_volume=True
+                        )
                     except Exception as e:
                         logger.warning(
                             f"Failed to cleanup container {container_name}: {e}"
@@ -889,7 +891,9 @@ async def _run_instance_attempt(
                         await docker_manager.stop_heartbeat(container)
                     except Exception:
                         pass
-                    await docker_manager.cleanup_container(container)
+                    await docker_manager.cleanup_container(
+                        container, remove_home_volume=True
+                    )
                 except Exception:
                     pass
             return InstanceResult(
@@ -936,7 +940,9 @@ async def _run_instance_attempt(
                         await docker_manager.stop_heartbeat(container)
                     except Exception:
                         pass
-                    await docker_manager.cleanup_container(container)
+                    await docker_manager.cleanup_container(
+                        container, remove_home_volume=True
+                    )
                 except Exception:
                     pass
 
@@ -970,7 +976,26 @@ async def _run_instance_attempt(
                 },
             )
 
-            # Nothing to do with container status on cancel
+            # Stop and remove the container immediately on cancel to avoid leaks
+            # Preserve run-scoped session volume for resume
+            if container:
+                try:
+                    try:
+                        await docker_manager.stop_heartbeat(container)
+                    except Exception:
+                        pass
+                    try:
+                        emit_event(
+                            "instance.container_stopped",
+                            {"container_name": container_name},
+                        )
+                    except Exception:
+                        pass
+                    await docker_manager.cleanup_container(
+                        container, remove_home_volume=False
+                    )
+                except Exception:
+                    pass
 
             completed_at = datetime.now(timezone.utc).isoformat()
             return InstanceResult(
@@ -1007,7 +1032,9 @@ async def _run_instance_attempt(
                         await docker_manager.stop_heartbeat(container)
                     except Exception:
                         pass
-                    await docker_manager.cleanup_container(container)
+                    await docker_manager.cleanup_container(
+                        container, remove_home_volume=True
+                    )
                 except Exception:
                     pass
 
