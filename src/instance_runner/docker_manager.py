@@ -32,8 +32,7 @@ else:
 
 from . import DockerError, TimeoutError
 from .types import AuthConfig
-from ..utils.platform_utils import normalize_path_for_docker, get_temp_dir
-import shutil
+from ..utils.platform_utils import normalize_path_for_docker
 
 # Suppress the urllib3 exception on close that happens with docker-py
 warnings.filterwarnings("ignore", message=".*I/O operation on closed file.*")
@@ -74,9 +73,6 @@ class DockerManager:
             self.client = docker.from_env(timeout=int(api_timeout))
         except DockerException as e:
             raise DockerError(f"Failed to connect to Docker daemon: {e}")
-
-        # Flag to track if cleanup has been performed
-        self._cleanup_performed = False
 
     def close(self) -> None:
         """Close the Docker client connection."""
@@ -217,9 +213,8 @@ class DockerManager:
         """
         Initialize Docker manager with startup tasks.
 
-        Per spec, orphan cleanup is owned by orchestration. Runner does not perform global cleanup.
+        Per spec, no global orphan cleanup is performed.
         """
-        self._cleanup_performed = True
 
     async def validate_environment(self) -> bool:
         """Validate Docker daemon is accessible and working."""
@@ -576,7 +571,7 @@ class DockerManager:
                 # Resource limits will be applied via supported keys below
                 "mem_limit": f"{memory_gb}g",
                 "memswap_limit": f"{memory_swap_gb}g",
-                "auto_remove": False,  # Keep containers for debugging/resume
+                "auto_remove": False,
             }
             # Apply workspace volumes mapping when needed (SELinux)
             if volumes:
@@ -1454,162 +1449,7 @@ class DockerManager:
         except (docker.errors.APIError, docker.errors.DockerException) as e:
             logger.error(f"Failed to remove container {container.name}: {e}")
 
-    async def cleanup_orphaned_containers(
-        self, failed_retention_hours: int = 24, success_retention_hours: int = 2
-    ) -> int:
-        """
-        Clean up old Pitaya containers.
-
-        Per specification:
-        - Failed instances retained for 24 hours
-        - Successful instances retained for 2 hours
-
-        Args:
-            failed_retention_hours: Keep failed containers for this long
-            success_retention_hours: Keep successful containers for this long
-
-        Returns:
-            Number of containers removed
-        """
-        try:
-            loop = asyncio.get_event_loop()
-            containers = await loop.run_in_executor(
-                None,
-                lambda: self.client.containers.list(
-                    all=True,  # Include stopped containers
-                    filters={"label": "pitaya=true"},
-                ),
-            )
-
-            removed_count = 0
-            current_time = datetime.now(timezone.utc)
-
-            for container in containers:
-                # Parse creation time from label
-                try:
-                    created_str = container.labels.get("created_at", "")
-                    if not created_str:
-                        continue
-
-                    created_time = datetime.fromisoformat(created_str)
-                    age_hours = (current_time - created_time).total_seconds() / 3600
-
-                    # Check container status to determine retention period
-                    # Read status from host file
-                    status = "unknown"
-                    # Host status files removed; default classification by label only
-
-                    if status == "failed":
-                        max_age = failed_retention_hours
-                    elif status == "success":
-                        max_age = success_retention_hours
-                    else:
-                        # Default to failed retention for unknown status (safer)
-                        max_age = failed_retention_hours
-                    # Prefer last-active file mtime if present
-                    # No host last-active file; rely on created_at age
-                    if age_hours > max_age:
-                        # Before removal, compute associated resources
-                        try:
-                            run_id = container.labels.get("run_id", "norun")
-                            sidx = container.labels.get("strategy_index") or "0"
-                            # Compute volume name using session_group_key/task_key GHASH
-                            group = (
-                                container.labels.get("session_group_key")
-                                or container.labels.get("task_key")
-                                or ""
-                            )
-                            import hashlib
-
-                            ghash = (
-                                hashlib.sha256(group.encode("utf-8")).hexdigest()[:8]
-                                if group
-                                else "unknown"
-                            )
-                            volume_name = f"pitaya_home_{run_id}_s{sidx}_g{ghash}"
-                            # Attempt to remove container
-                            await self.cleanup_container(container)
-                            removed_count += 1
-                            logger.debug(
-                                f"Removed {status} container {container.name} (age: {age_hours:.1f}h)"
-                            )
-                            # Remove named volume (run in executor to avoid blocking event loop)
-                            try:
-                                get_vol = loop.run_in_executor(
-                                    None, lambda: self.client.volumes.get(volume_name)
-                                )
-                                try:
-                                    vol = await asyncio.wait_for(get_vol, timeout=10)
-                                    rm_vol = loop.run_in_executor(
-                                        None, lambda: vol.remove(force=True)
-                                    )
-                                    await asyncio.wait_for(rm_vol, timeout=15)
-                                    logger.debug(f"Removed volume {volume_name}")
-                                except asyncio.TimeoutError:
-                                    logger.debug(
-                                        f"Timed out removing volume {volume_name}; skipping"
-                                    )
-                            except Exception:
-                                pass
-                            # Remove workspace directory (best-effort)
-                            try:
-                                temp_base = get_temp_dir()
-                                # Derive KHASH from container name
-                                khash = ""
-                                try:
-                                    parts = (container.name or "").split("_")
-                                    for p in parts:
-                                        if p.startswith("k") and len(p) > 1:
-                                            khash = p[1:]
-                                            break
-                                except Exception:
-                                    khash = ""
-                                candidates = []
-                                if khash:
-                                    candidates.append(
-                                        temp_base / f"pitaya/{run_id}/i_{sidx}_{khash}"
-                                    )
-                                # macOS default under $HOME
-                                try:
-                                    from pathlib import Path as _P
-
-                                    if khash:
-                                        candidates.append(
-                                            _P.home()
-                                            / ".pitaya"
-                                            / "workspaces"
-                                            / f"pitaya/{run_id}/i_{sidx}_{khash}"
-                                        )
-                                except Exception:
-                                    pass
-                                for workspace_path in candidates:
-                                    if workspace_path.exists():
-                                        shutil.rmtree(
-                                            workspace_path, ignore_errors=True
-                                        )
-                                        logger.debug(
-                                            f"Removed workspace {workspace_path}"
-                                        )
-                            except Exception:
-                                pass
-                        except Exception as e:
-                            logger.warning(f"Cleanup side effects failed: {e}")
-
-                except (
-                    docker.errors.APIError,
-                    docker.errors.DockerException,
-                    OSError,
-                ) as e:
-                    logger.error(f"Error checking container {container.name}: {e}")
-
-            if removed_count > 0:
-                logger.info(f"Cleaned up {removed_count} orphaned containers")
-
-            return removed_count
-
-        except (docker.errors.APIError, docker.errors.DockerException) as e:
-            logger.error(f"Failed to cleanup orphaned containers: {e}")
-            return 0
+    # Orphan container cleanup removed — containers are removed immediately on completion
 
     def get_container(self, name: str) -> Optional[Container]:
         """Return container by name or None if missing."""
@@ -1618,86 +1458,4 @@ class DockerManager:
         except Exception:
             return None
 
-    async def cleanup_unused_volumes(
-        self,
-        *,
-        older_than_hours: float = 24.0,
-        dry_run: bool = False,
-    ) -> dict:
-        """
-        Remove unreferenced session volumes matching Pitaya patterns.
-
-        - Candidates: volumes with names starting with 'pitaya_home_'
-        - Skip volumes referenced by any container
-        - Respect age threshold via volume CreatedAt
-
-        Returns a dict with keys: {candidates, in_use, too_young, removed, errors}
-        """
-        out = {
-            "candidates": [],
-            "in_use": [],
-            "too_young": [],
-            "removed": [],
-            "errors": [],
-        }
-        try:
-            loop = asyncio.get_event_loop()
-            # List all volumes
-            vols = await loop.run_in_executor(None, lambda: self.client.volumes.list())
-            # Build set of referenced volume names
-            try:
-                containers = await loop.run_in_executor(
-                    None, lambda: self.client.containers.list(all=True)
-                )
-                referenced: set[str] = set()
-                for c in containers:
-                    try:
-                        for m in (c.attrs or {}).get("Mounts", []) or []:
-                            if (m.get("Type") == "volume") and m.get("Name"):
-                                referenced.add(str(m.get("Name")))
-                    except Exception:
-                        continue
-            except Exception:
-                referenced = set()
-
-            from datetime import datetime, timezone
-
-            def _parse_created_at(v) -> datetime:
-                try:
-                    ca = (v.attrs or {}).get("CreatedAt") or (v.attrs or {}).get(
-                        "Created"
-                    )
-                    if not ca:
-                        return datetime.fromtimestamp(0, tz=timezone.utc)
-                    s = str(ca).replace("Z", "+00:00")
-                    return datetime.fromisoformat(s)
-                except Exception:
-                    return datetime.fromtimestamp(0, tz=timezone.utc)
-
-            now = datetime.now(timezone.utc)
-            for vol in vols:
-                name = getattr(vol, "name", "") or getattr(vol, "Name", "")
-                if not name or not name.startswith("pitaya_home_"):
-                    continue
-                out["candidates"].append(name)
-                if name in referenced:
-                    out["in_use"].append(name)
-                    continue
-                created = _parse_created_at(vol)
-                age_h = (now - created).total_seconds() / 3600.0
-                if age_h < float(older_than_hours):
-                    out["too_young"].append(name)
-                    continue
-                if dry_run:
-                    # Do not remove; report as would-remove
-                    out["removed"].append(name)
-                    continue
-                try:
-                    await loop.run_in_executor(None, lambda: vol.remove(force=True))
-                    out["removed"].append(name)
-                except Exception as e:
-                    out["errors"].append({"name": name, "error": str(e)})
-            return out
-        except Exception as e:
-            out["errors"].append({"name": "<list>", "error": str(e)})
-            return out
+    # Unused volume cleanup helpers removed

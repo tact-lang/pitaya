@@ -279,11 +279,6 @@ def get_default_config() -> Dict[str, Any]:
             "threshold": 0.8,
             "max_iterations": 3,
         },
-        # Events retention (terminal runs only after grace)
-        "events": {
-            "retention_days": 30,
-            "retention_grace_days": 7,
-        },
         "tui": {
             # preferred configuration is ms; keep Hz fallback for compatibility
             "refresh_rate": 10,  # Hz (fallback)

@@ -199,10 +199,6 @@ class Orchestrator:
         self._mem_guard_pct = 0.8
         self._disk_min_free_gb = 10
         self._pack_max_slope_mib_per_min = 256
-        self._retention_max_failed_gb = 0
-        from collections import deque as _deque
-
-        self._pack_series = _deque(maxlen=64)  # (ts, size_bytes)
 
         # Background tasks
         self._executor_tasks: List[asyncio.Task] = []
@@ -1319,99 +1315,7 @@ class Orchestrator:
     async def _admission_release(self, cpu: int, mem_gb: int) -> None:
         return
 
-    async def _attempt_on_run_gc(self) -> None:
-        """Best-effort GC to free disk by removing oldest failed workspaces for this run.
-
-        Removes workspace directories recorded in InstanceResult.workspace_path for FAILED or TIMEOUT results.
-        """
-        try:
-            import shutil
-            import os
-
-            if not self.state_manager or not self.state_manager.current_state:
-                return
-            items = []
-            for iid, info in self.state_manager.current_state.instances.items():
-                try:
-                    if info.state.value in ("failed", "interrupted"):
-                        wp = getattr(
-                            getattr(info, "result", None), "workspace_path", None
-                        )
-                        if wp and os.path.isdir(wp):
-                            ts = (
-                                info.completed_at
-                                or info.interrupted_at
-                                or info.created_at
-                            )
-                            try:
-                                size = sum(
-                                    (
-                                        os.path.getsize(os.path.join(root, f))
-                                        for root, _, files in os.walk(wp)
-                                        for f in files
-                                    )
-                                )
-                            except Exception:
-                                size = 0
-                            items.append((ts, wp, iid, size))
-                except Exception:
-                    continue
-            if not items:
-                return
-            # Oldest first
-            items.sort(key=lambda t: t[0])
-            # Enforce size-aware cap if configured (>0)
-            try:
-                cap_bytes = int(self._retention_max_failed_gb) * (1024**3)
-            except Exception:
-                cap_bytes = 0
-            if cap_bytes > 0:
-                total = sum(sz for _, __, ___, sz in items)
-                if total > cap_bytes:
-                    # Purge oldest until under cap
-                    for idx, (_, wp, iid, sz) in enumerate(list(items)):
-                        try:
-                            shutil.rmtree(wp, ignore_errors=True)
-                            total -= sz
-                            if (
-                                iid in self.state_manager.current_state.instances
-                                and self.state_manager.current_state.instances[
-                                    iid
-                                ].result
-                            ):
-                                self.state_manager.current_state.instances[
-                                    iid
-                                ].result.workspace_path = None
-                            logger.info(
-                                f"on-run GC (cap): removed failed workspace {wp}"
-                            )
-                        except Exception as e:
-                            logger.debug(f"on-run GC (cap): failed to remove {wp}: {e}")
-                        if total <= cap_bytes:
-                            break
-            removed = 0
-            for _, wp, iid, _ in items:
-                if not os.path.isdir(wp):
-                    continue
-                try:
-                    shutil.rmtree(wp, ignore_errors=True)
-                    # Clear reference to avoid re-deleting
-                    if (
-                        iid in self.state_manager.current_state.instances
-                        and self.state_manager.current_state.instances[iid].result
-                    ):
-                        self.state_manager.current_state.instances[
-                            iid
-                        ].result.workspace_path = None
-                    removed += 1
-                    logger.info(f"on-run GC: removed failed workspace {wp}")
-                except Exception as e:
-                    logger.debug(f"on-run GC: failed to remove {wp}: {e}")
-                # Stop early if we've removed a handful in one pass
-                if removed >= 5:
-                    break
-        except Exception:
-            pass
+    # Legacy GC removed: workspaces are cleaned immediately per instance
 
     async def _execute_instance(self, instance_id: str) -> None:
         """Execute a single instance."""
@@ -1598,11 +1502,10 @@ class Orchestrator:
                     )
                 ),
             )
-            # When resuming, pass a simple continuation prompt to the agent
-            op_resume = bool((info.metadata or {}).get("operator_resume", False))
-            effective_prompt = "Continue" if op_resume else info.prompt
             result = await run_instance(
-                prompt=effective_prompt,
+                # Always pass the original task prompt; runner decides per-attempt
+                # whether to use a continuation prompt when resuming a session.
+                prompt=info.prompt,
                 repo_path=self.state_manager.current_state.repo_path,
                 base_branch=info.base_branch,
                 branch_name=info.branch_name,
@@ -1615,7 +1518,9 @@ class Orchestrator:
                 session_id=(
                     info.session_id or (info.metadata or {}).get("resume_session_id")
                 ),
-                operator_resume=op_resume,
+                operator_resume=bool(
+                    (info.metadata or {}).get("operator_resume", False)
+                ),
                 event_callback=event_callback,
                 startup_semaphore=self._startup_pool,
                 timeout_seconds=self.runner_timeout_seconds,
@@ -1995,9 +1900,7 @@ class Orchestrator:
     # Removed: Orchestrator-level orphan cleanup. Containers are removed immediately
     # on success/failure/timeout at the runner level.
 
-    async def resume_run(
-        self, run_id: str, force_fresh: bool = False
-    ) -> List[InstanceResult]:
+    async def resume_run(self, run_id: str) -> List[InstanceResult]:
         """
         Resume an interrupted run by recovering state and continuing execution.
 
@@ -2010,7 +1913,6 @@ class Orchestrator:
 
         Args:
             run_id: The run ID to resume
-            force_fresh: If True, re-run incomplete instances with fresh containers
 
         Returns:
             List of instance results from resumed execution
@@ -2242,9 +2144,8 @@ class Orchestrator:
         # Respect resource gating by using the executor queue
         from ..shared import InstanceStatus as _IS
         from ..instance_runner.plugins import AVAILABLE_PLUGINS
-        from ..instance_runner.docker_manager import DockerManager
 
-        docker_manager = DockerManager()
+        # DockerManager import removed; containers are adopted at runner level when preserved
 
         scheduled_ids: list[str] = []
         cannot_resume_count = 0
@@ -2259,32 +2160,9 @@ class Orchestrator:
             try:
                 # Resume or re-run only RUNNING/INTERRUPTED; start queued normally
                 if info.state in (_IS.RUNNING, _IS.INTERRUPTED):
-                    if force_fresh:
-                        # Use fresh container: clear session, forbid reuse, new container name
-                        self.state_manager.update_instance_session_id(iid, None)
-                        # mark reuse flag off and drop provided resume_session_id
-                        meta_patch = {
-                            "reuse_container": False,
-                            "resume_session_id": None,
-                        }
-                        # generate a new container name suffix
-                        try:
-                            new_name = f"{info.container_name}_r{uuid.uuid4().hex[:4]}"
-                            # Update container name in state and emit an update
-                            self.state_manager.update_instance_container_name(
-                                iid, new_name
-                            )
-                            meta_patch["container_name_override"] = new_name
-                        except Exception:
-                            pass
-                        self.state_manager.update_instance_metadata(iid, meta_patch)
-                        # Move to queued for visibility
-                        self.state_manager.update_instance_state(iid, _IS.QUEUED)
-                        await _enqueue(iid)
-                        scheduled_ids.append(iid)
-                        logger.info(
-                            f"resume_run: scheduled fresh iid={iid} (new container) for execution"
-                        )
+                    if False:
+                        # resume-fresh removed
+                        pass
                     else:
                         # Resume only if container exists and plugin supports resume
                         can_resume = False
@@ -2298,17 +2176,11 @@ class Orchestrator:
                             _plugin = _pclass()  # type: ignore[call-arg]
                         except Exception:
                             _plugin = AVAILABLE_PLUGINS["claude-code"]()
+                        # Resume session across containers when session_id exists
                         if info.session_id and _plugin.capabilities.supports_resume:
-                            try:
-                                await asyncio.get_event_loop().run_in_executor(
-                                    None,
-                                    lambda: docker_manager.client.containers.get(
-                                        info.container_name
-                                    ),
-                                )
-                                can_resume = True
-                            except Exception:
-                                can_resume = False
+                            can_resume = True
+                        else:
+                            can_resume = False
                         if can_resume:
                             # Ensure reuse flag remains True
                             self.state_manager.update_instance_metadata(

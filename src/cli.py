@@ -325,20 +325,10 @@ class OrchestratorCLI:
             "--resume", metavar="RUN_ID", help="Resume an interrupted run"
         )
         g_maint.add_argument(
-            "--resume-fresh",
-            metavar="RUN_ID",
-            help="Resume with fresh containers (re-run incomplete)",
-        )
-        g_maint.add_argument(
             "--list-runs", action="store_true", help="List previous runs"
         )
         g_maint.add_argument("--show-run", metavar="RUN_ID", help="Show run details")
-        g_maint.add_argument(
-            "--prune", action="store_true", help="Prune old logs/results"
-        )
-        g_maint.add_argument(
-            "--prune-dry-run", action="store_true", help="Show what would be pruned"
-        )
+        # Prune commands removed; cleanup is automatic
         # Cleanup commands removed for simpler UX
 
         # Diagnostics group
@@ -983,102 +973,7 @@ class OrchestratorCLI:
             self.console.print_exception()
             return 1
 
-    async def run_prune(self, args: argparse.Namespace) -> int:
-        """Prune old runs from logs/results according to retention settings."""
-        try:
-            # Load settings
-            env_config = load_env_config()
-            dotenv_config = load_dotenv_config()
-            defaults = get_default_config()
-            full_config = merge_config({}, env_config, dotenv_config, {}, defaults)
-            logs_dir = full_config.get("logs_dir", Path("./logs"))
-            results_dir = Path("./results")
-            events_ret_days = int(
-                full_config.get("events", {}).get("retention_days", 30)
-            )
-            events_grace_days = int(
-                full_config.get("events", {}).get("retention_grace_days", 7)
-            )
-            res_ret_days = full_config.get("results", {}).get("retention_days", None)
-            dry = bool(getattr(args, "prune_dry_run", False))
-            import shutil
-            from datetime import datetime, timedelta
-
-            now = datetime.utcnow()
-            cutoff_events = now - timedelta(days=(events_ret_days + events_grace_days))
-
-            # Prune logs/run_* by completed_at cutoff
-            removed_logs = 0
-            logs_dir_path = Path(logs_dir)
-            if logs_dir_path.exists():
-                for run_dir in logs_dir_path.iterdir():
-                    if not run_dir.is_dir() or not run_dir.name.startswith("run_"):
-                        continue
-                    # Determine completed_at
-                    completed = None
-                    state_file = run_dir / "state.json"
-                    if state_file.exists():
-                        try:
-                            data = json.loads(state_file.read_text())
-                            ca = data.get("completed_at")
-                            if ca:
-                                completed = datetime.fromisoformat(
-                                    ca.replace("Z", "+00:00")
-                                )
-                        except Exception:
-                            pass
-                    if not completed:
-                        # Fallback to directory mtime
-                        try:
-                            completed = datetime.utcfromtimestamp(
-                                run_dir.stat().st_mtime
-                            )
-                        except Exception:
-                            continue
-                    if completed < cutoff_events:
-                        if dry:
-                            self.console.print(
-                                f"[dry-run] Would remove logs: {run_dir}"
-                            )
-                        else:
-                            shutil.rmtree(run_dir, ignore_errors=True)
-                            removed_logs += 1
-
-            # Prune results if retention configured
-            removed_results = 0
-            if res_ret_days is not None:
-                try:
-                    cutoff_results = now - timedelta(days=int(res_ret_days))
-                except Exception:
-                    cutoff_results = None
-                if cutoff_results is not None and results_dir.exists():
-                    for run_dir in results_dir.iterdir():
-                        if not run_dir.is_dir() or not run_dir.name.startswith("run_"):
-                            continue
-                        try:
-                            ts = datetime.utcfromtimestamp(run_dir.stat().st_mtime)
-                        except Exception:
-                            continue
-                        if ts < cutoff_results:
-                            if dry:
-                                self.console.print(
-                                    f"[dry-run] Would remove results: {run_dir}"
-                                )
-                            else:
-                                shutil.rmtree(run_dir, ignore_errors=True)
-                                removed_results += 1
-
-            if not dry:
-                self.console.print(
-                    f"Pruned {removed_logs} log run(s) and {removed_results} result run(s)."
-                )
-            else:
-                self.console.print("Dry-run complete.")
-            return 0
-        except Exception as e:
-            self.console.print(f"[red]Prune failed: {e}[/red]")
-            self.console.print_exception()
-            return 1
+    # Explicit prune command removed — cleanup is automatic
 
     def _display_detailed_results(
         self, results: List["InstanceResult"], run_id: str, state: Optional[Any] = None
@@ -1304,8 +1199,6 @@ class OrchestratorCLI:
         # Determine run_id for logging (spec: run_YYYYMMDD_HHMMSS_<short8>)
         if args.resume:
             run_id = args.resume
-        elif args.resume_fresh:
-            run_id = args.resume_fresh
         else:
             timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
             import uuid as _uuid
@@ -1395,20 +1288,18 @@ class OrchestratorCLI:
         if args.list_runs:
             return await self.run_list_runs(args)
 
-        # Handle prune mode
-        if args.prune:
-            return await self.run_prune(args)
+        # No explicit prune mode; handled automatically
 
         # Handle show-run mode
         if args.show_run:
             return await self.run_show_run(args)
 
         # Normalize missing prompt to empty string and let strategies validate if needed
-        if not args.resume and not args.resume_fresh:
+        if not args.resume:
             args.prompt = getattr(args, "prompt", "") or ""
 
         # Perform pre-flight checks for new runs
-        if not args.resume and not args.resume_fresh:
+        if not args.resume:
             if getattr(args, "require_clean_wt", False):
                 # enforce clean working tree before preflight
                 try:
@@ -1955,15 +1846,6 @@ class OrchestratorCLI:
 
                 # Resume the run
                 result = await self.orchestrator.resume_run(run_id)
-            elif args.resume_fresh:
-                # Resume with fresh containers
-                run_id = args.resume_fresh
-                self.console.print(
-                    f"[blue]Resuming run {run_id} with fresh containers...[/blue]"
-                )
-
-                # Resume with fresh containers (force_fresh=True)
-                result = await self.orchestrator.resume_run(run_id, force_fresh=True)
             else:
                 # Start new run
                 self.console.print(f"[blue]Starting strategy: {args.strategy}[/blue]")
@@ -2042,16 +1924,13 @@ class OrchestratorCLI:
         except KeyboardInterrupt:
             self.console.print("\n[yellow]Interrupted by user[/yellow]")
             # Show resume command if not in resume mode
-            if not args.resume and not args.resume_fresh:
+            if not args.resume:
                 # Use the run_id from orchestrator's current state
                 if self.orchestrator and self.orchestrator.state_manager:
                     state = self.orchestrator.state_manager.current_state
                     if state and state.run_id:
                         self.console.print("\n[blue]To resume this run:[/blue]")
                         self.console.print(f"  pitaya --resume {state.run_id}")
-                        self.console.print(
-                            f"  pitaya --resume-fresh {state.run_id}  # With fresh containers\n"
-                        )
             # Shutdown orchestrator
             await self.orchestrator.shutdown()
             return 2
@@ -2211,11 +2090,6 @@ class OrchestratorCLI:
                 orchestrator_task = asyncio.create_task(
                     self.orchestrator.resume_run(run_id)
                 )
-            elif args.resume_fresh:
-                # Resume with fresh containers
-                orchestrator_task = asyncio.create_task(
-                    self.orchestrator.resume_run(run_id, force_fresh=True)
-                )
             else:
                 # Start new run
                 strategy_config = self._get_strategy_config(args, full_config)
@@ -2309,9 +2183,6 @@ class OrchestratorCLI:
             if shutdown_requested:
                 self.console.print("\n[blue]To resume this run:[/blue]")
                 self.console.print(f"  pitaya --resume {run_id}")
-                self.console.print(
-                    f"  pitaya --resume-fresh {run_id}  # With fresh containers\n"
-                )
                 # Standardized interrupted exit code per spec
                 return 2
 
@@ -2476,15 +2347,12 @@ class OrchestratorCLI:
                     await self.orchestrator.shutdown()
                 except Exception:
                     pass
-            if not args.resume and not args.resume_fresh:
+            if not args.resume:
                 # Show resume command if we have a run id
                 rid = run_id
                 if rid:
                     self.console.print("\n[blue]To resume this run:[/blue]")
                     self.console.print(f"  pitaya --resume {rid}")
-                    self.console.print(
-                        f"  pitaya --resume-fresh {rid}  # With fresh containers\n"
-                    )
             return 2
         except (OrchestratorError, DockerError, ValidationError) as e:
             self.console.print(f"[red]Error: {e}[/red]")
