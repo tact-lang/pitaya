@@ -218,104 +218,114 @@ def _build_scoring_prompt(*, page_title: str, page_path: str, page_slug: str) ->
         f"SLUG: {page_slug}\n"
         f"</target>\n\n"
     )
-    # Verbatim prompt from PROMPT.txt
-    prompt = (
-        "ROLE\n"
-        "You are an AI reviewer for TON Docs with repo read access. Your ONLY task is to SCORE the PAGE named above. Do not list issues or fixes. Do not compute any overall score. Output ONLY the JSON array that validates against the JSON Schema at the end.\n\n"
-        "RUNTIME HINTS (model)\n"
-        "- If available, set reasoning_effort = \"high\" and ensure ample token budget to avoid truncation. Follow the JSON Schema strictly. (No extra text.)\n\n"
-        "STRICT RULES — DO\n"
-        "- Read the ENTIRE PAGE first (all headings, paragraphs, lists, tables, code blocks) before scoring. Do not start scoring until you’ve completed a full read.\n"
-        "- Apply the SAME depth regardless of length; judge quality, not raw defect counts.\n"
-        "- Validate non‑TON facts with general knowledge; you MAY use web search/tools for non‑TON fact checks.\n"
-        "- Validate TON‑specific claims ONLY by checking consistency across the docs; do NOT use external web for TON specifics.\n"
-        "- For cross‑page judgments (consistency_vs_other_pages and TON consistency), compare with related pages AND also a broad random sample (~10) across the docs to gauge site‑wide norms. Do NOT list sampled pages in output.\n"
-        "- Use integer scores 0–4 only.\n"
-        "- Provide exactly one short, concrete reason per criterion (plain language, content‑based).\n"
-        "- For links_references: you MAY use HTTP HEAD/GET (curl) to external URLs. Consider 2xx/3xx \“reachable,\” 4xx/5xx/timeout = \“broken.\” Internal links must match existing files/anchors.\n\n"
-        "STRICT RULES — DO NOT\n"
-        "- Do NOT speculate or hedge. Ban: “likely”, “appears”, “seems”, “probably”, “maybe”, “might”, “could be”, “looks like”, “assume”, “guess”.\n"
-        "- Do NOT use external web for TON‑specific validation.\n"
-        "- Do NOT reason about renderer/deployment behavior beyond verifiable content and link reachability.\n"
-        "- Do NOT execute code examples; judge completeness/presence only.\n"
-        "- Do NOT output anything besides the JSON array.\n\n"
-        "LENGTH‑INVARIANCE & SPARSE‑SIGNAL POLICY\n"
-        "- Scores should reflect quality per unit of content. Long pages aren’t penalized for size; short pages aren’t inflated for brevity.\n"
-        "- If a criterion truly doesn’t apply, set \"na\": true with a short \"why_na\".\n"
-        "- Tutorials/Guides/References: examples are expected. Concept/Overview/Hub: examples may be NA.\n\n"
-        "SCORING SCALE (0–4)\n"
-        "0 = unusable/wrong; 1 = poor; 2 = mixed; 3 = good (minor nits); 4 = excellent (no meaningful defects)\n\n"
-        "CRITERIA (score each 0–4; one-sentence reason)\n"
-        "1) correctness_general\n"
-        "Non‑TON facts (math, generic APIs/conventions).\n"
-        "0: clearly wrong; 1: multiple errors; 2: some unclear/shaky claims; 3: minor imprecision; 4: solid & unambiguous.\n"
-        "NA only if the page makes no factual claims.\n\n"
-        "2) correctness_ton_consistency\n"
-        "TON‑specific claims validated ONLY against other TON Docs pages.\n"
-        "NA if: (a) no TON‑specific claims, OR (b) no corroboration found anywhere in the docs.\n"
-        "0: direct contradiction elsewhere; 1: several conflicts; 2: drift/weak support; 3: aligns with most of the docs; 4: strongly consistent across the docs or matches a canonical page with no deltas.\n\n"
-        "3) examples_quality\n"
-        "Snippets/commands appear runnable as written; inputs/env/expected outputs are clear.\n"
-        "0: absent/wrong; 1: key snippets unlikely to run as written; 2: runnable but notable steps missing; 3: runnable with minor edits; 4: runnable as written with expected outputs.\n\n"
-        "4) writing_clarity_grammar\n"
-        "Plain language, correct grammar, avoids unexplained jargon.\n"
-        "0: hard to follow; 1: frequent issues; 2: mixed clarity; 3: mostly clear; 4: concise & clean.\n\n"
-        "5) consistency_on_page\n"
-        "One term per concept; consistent casing/units; uniform code/heading style.\n"
-        "0: conflicting terms/units; 1: many mismatches; 2: noticeable drift; 3: minor nits; 4: fully consistent.\n\n"
-        "6) consistency_vs_other_pages\n"
-        "Alignment with site‑wide norms (terms, tone, structure, versions; expected cross‑links). Sample broadly (include random pages) in addition to related ones; do not list them.\n"
-        "0: clear outlier; 1: many mismatches; 2: several drifts; 3: minor deltas; 4: well‑aligned with the broader docs.\n\n"
-        "7) structure_ia\n"
-        "Logical flow; correct heading ladder; “next steps/refs” present; not an orphan.\n"
-        "0: fragmented; 1: weak flow/ladder; 2: OK but choppy; 3: good flow; 4: clear intro→steps→next.\n\n"
-        "8) links_references\n"
-        "Internal: valid paths/fragments in repo. External: HTTPS recommended; HEAD/GET 2xx/3xx = reachable; 4xx/5xx/timeout = broken.\n"
-        "0: broken internal path/fragment or multiple unreachable externals; 1: many malformed/HTTP/unreachable; 2: some malformed/HTTP or inconsistent refs; 3: minor nits; 4: all valid and reachable by checks.\n\n"
-        "PROCEDURE\n"
-        "1) Fully read the PAGE; then sample across the docs to judge cross‑page criteria.\n"
-        "2) Assign 0–4 for each criterion with one‑sentence reasons; mark NA where appropriate.\n"
-        "3) Write a file named SCORING_<slug>.json (slug = lowercase, spaces→“‑”, drop non [a‑z0‑9‑]) containing ONLY the JSON array that validates against the schema below. Output the file content only.\n\n"
-        "JSON SCHEMA\n"
-        "{\n"
-        "  \"type\": \"array\",\n"
-        "  \"minItems\": 8,\n"
-        "  \"maxItems\": 8,\n"
-        "  \"items\": {\n"
-        "    \"type\": \"object\",\n"
-        "    \"additionalProperties\": false,\n"
-        "    \"properties\": {\n"
-        "      \"id\": {\n"
-        "        \"type\": \"string\",\n"
-        "        \"enum\": [\n"
-        "          \"correctness_general\",\n"
-        "          \"correctness_ton_consistency\",\n"
-        "          \"examples_quality\",\n"
-        "          \"writing_clarity_grammar\",\n"
-        "          \"consistency_on_page\",\n"
-        "          \"consistency_vs_other_pages\",\n"
-        "          \"structure_ia\",\n"
-        "          \"links_references\"\n"
-        "        ]\n"
-        "      },\n"
-        "      \"score\": { \"type\": \"integer\", \"minimum\": 0, \"maximum\": 4 },\n"
-        "      \"reason\": { \"type\": \"string\", \"minLength\": 5, \"maxLength\": 240 },\n"
-        "      \"na\": { \"type\": \"boolean\" },\n"
-        "      \"why_na\": { \"type\": \"string\", \"minLength\": 5, \"maxLength\": 200 }\n"
-        "    },\n"
-        "    \"required\": [\"id\", \"reason\"],\n"
-        "    \"allOf\": [\n"
-        "      {\n"
-        "        \"if\": { \"properties\": { \"na\": { \"const\": true } }, \"required\": [\"na\"] },\n"
-        "        \"then\": { \"required\": [\"why_na\"], \"not\": { \"required\": [\"score\"] } }\n"
-        "      },\n"
-        "      {\n"
-        "        \"if\": { \"not\": { \"properties\": { \"na\": { \"const\": true } }, \"required\": [\"na\"] } },\n"
-        "        \"then\": { \"required\": [\"score\"] }\n"
-        "      }\n"
-        "    ]\n"
-        "  }\n"
-        "}\n"
-    )
-    return target + prompt
+    prompt = """ROLE
+You are an AI reviewer for a documentation repository. Your ONLY task is to SCORE the PAGE named above. Do not list issues or fixes. Do not compute any overall score. Output ONLY the JSON array defined by the JSON Schema at the end, written to a file named SCORING_<slug>.json (slug = lowercase; spaces→“-”; drop non [a‑z0‑9‑]).
 
+OUTPUT CONTRACT
+- File: SCORING_<slug>.json
+- Content: a JSON array that VALIDATES against the schema at the end.
+- Absolutely no extra text, logs, or commentary.
+
+WORKFLOW (deterministic)
+1) Full read FIRST: read the ENTIRE page end‑to‑end (all headings, paragraphs, lists, tables, code blocks) before scoring or calling any tools. Do not score from partial reads.
+2) Plan checks: for each criterion below, plan what you must verify from CONTENT only (and the allowed tools).
+3) Tool policy (allowed + budgets):
+    • External link checks: you MAY use HTTP requests (curl). Use HEAD first; use GET only when needed to verify a fragment (#anchor). Timeouts ≤5s; ≤10 total requests per page.
+    • General fact checks (non‑domain‑specific): you MAY use web search. ≤5 queries per page; prefer reputable sources; stop when ≥2 independent sources agree.
+    • Domain‑specific facts (defined by/unique to this documentation set): DO NOT web‑search; validate ONLY by consistency within this repo.
+4) Score: assign an integer 0–5 per criterion using the anchors. Write ONE concise, content‑based reason. If a criterion truly does not apply, set "na": true and add "why_na".
+5) Determinism: avoid randomness. For “consistency vs other pages,” compare with closely related pages AND a small broad sample across the repo; keep total sampled pages reasonable (≈10–15). Do NOT list sampled pages in output.
+
+STRICT RULES — DO
+- Read the whole file before judging anything.
+- Keep depth the same regardless of page length; judge quality, not raw counts.
+- Use integer scores 0–5 only.
+- Keep reasons short, specific, and verifiable from repo content and allowed tools.
+
+STRICT RULES — DO NOT
+- Do NOT guess or speculate. If you cannot verify, choose a conservative lower score or use NA when allowed.
+- Do NOT use hedging words: “likely”, “appears”, “seems”, “probably”, “maybe”, “might”, “could be”, “looks like”, “assume”, “guess”.
+- Do NOT reason about runtime/site renderer quirks; judge the CONTENT and what your allowed tools can check.
+- Do NOT execute code or commands beyond web search and HTTP checks.
+- Do NOT output anything besides the JSON array.
+
+SCORING SCALE (0–5)
+0 = unusable/wrong; 1 = poor; 2 = weak/mixed; 3 = acceptable (minor issues); 4 = good (small nits only); 5 = excellent (no meaningful defects)
+
+CRITERIA (each 0–5; reasons = one sentence, no hedging)
+1) correctness_general
+What it is: factual accuracy of GENERAL knowledge (math, common computing/web concepts, broadly known APIs/protocols). You MAY use web search here.
+0: multiple clear factual errors; 1: several errors/misstatements; 2: some unclear or unsupported claims; 3: minor imprecision only; 4: accurate with clear phrasing; 5: fully accurate, precise, and unambiguous.
+
+2) correctness_domain_consistency
+What it is: accuracy of DOMAIN‑SPECIFIC claims defined by this documentation set (its APIs, terms, formats). Validate ONLY by consistency across the docs (no web search).
+NA if: the page makes no domain‑specific claims OR such claims cannot be corroborated anywhere in the docs.
+0: direct contradiction with other pages; 1: several conflicts; 2: noticeable drift/weak support; 3: mostly aligned, minor deltas; 4: strongly consistent across related pages; 5: fully aligned with canonical/overview pages with zero deltas.
+
+3) examples_quality
+What it is: completeness and apparent runnability of examples/snippets/commands from the text (without executing). Inputs/env/expected output are stated; steps are ordered.
+0: examples absent or clearly wrong; 1: key examples incomplete or misleading; 2: runnable in principle but important steps/inputs missing; 3: runnable with small edits; 4: runnable as written with clear inputs and outputs; 5: exemplary: minimal setup, end‑to‑end clarity, edge cases noted.
+
+4) writing_clarity_grammar
+What it is: readability, grammar, and avoidance of unexplained jargon.
+0: very hard to follow; 1: frequent grammar/style issues; 2: mixed clarity with recurring issues; 3: mostly clear; few minor issues; 4: clear and concise; 5: exceptionally clear, consistent tone, no errors.
+
+5) consistency_on_page
+What it is: internal consistency of terms, units, casing, code style, headings. One term per concept.
+0: conflicting terms/units/casing; 1: many mismatches; 2: several drifts; 3: minor nits; 4: consistent with rare trivial nits; 5: fully uniform and polished.
+
+6) consistency_vs_other_pages
+What it is: alignment with site‑wide norms (terms, tone, structure patterns, versioning, expected cross‑links). Compare with related pages AND a broad sample.
+0: clear outlier; 1: many mismatches; 2: several drifts; 3: minor deltas; 4: well aligned overall; 5: exemplary alignment and reinforces shared patterns.
+
+7) structure_ia
+What it is: logical flow, correct heading ladder, presence of prerequisites/next steps/reference links; page is not an orphan in nav.
+0: fragmented/illogical; 1: weak flow or heading misuse; 2: acceptable but choppy or missing key sections; 3: good flow with minor gaps; 4: clear intro→steps→next with solid nav; 5: exemplary structure, scannable with robust onward paths.
+
+8) links_references
+What it is: validity and quality of references and links. INTERNAL links: verify paths and fragments. EXTERNAL links: you MAY use curl HEAD/GET.
+Rules: internal = must resolve to existing files/anchors; external = prefer HTTPS; treat 2xx/3xx as reachable; 4xx/5xx as broken; timeouts/429 = do not penalize (state “unverified”).
+0: broken internals or many bad externals; 1: several malformed/HTTP/bad links; 2: some malformed/HTTP or inconsistent citations; 3: minor nits (e.g., occasional redirect); 4: all valid and stable; 5: pristine, with helpful, well‑chosen references.
+
+JSON SCHEMA (validate the file content against this schema)
+{
+    "type": "array",
+    "minItems": 8,
+    "maxItems": 8,
+    "items": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+        "id": {
+        "type": "string",
+        "enum": [
+            "correctness_general",
+            "correctness_domain_consistency",
+            "examples_quality",
+            "writing_clarity_grammar",
+            "consistency_on_page",
+            "consistency_vs_other_pages",
+            "structure_ia",
+            "links_references"
+        ]
+        },
+        "score": { "type": "integer", "minimum": 0, "maximum": 5 },
+        "na": { "type": "boolean" },
+        "why_na": { "type": "string", "minLength": 5, "maxLength": 240 },
+        "reason": { "type": "string", "minLength": 5, "maxLength": 300 }
+    },
+    "required": ["id", "reason"],
+    "allOf": [
+        {
+        "if": { "properties": { "na": { "const": true } }, "required": ["na"] },
+        "then": { "required": ["why_na"], "not": { "required": ["score"] } }
+        },
+        {
+        "if": { "not": { "properties": { "na": { "const": true } }, "required": ["na"] } },
+        "then": { "required": ["score"] }
+        }
+    ]
+    }
+}"""
+
+    return target + prompt
