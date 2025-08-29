@@ -1353,14 +1353,18 @@ class OrchestratorCLI:
         env_config = load_env_config()
         dotenv_config = load_dotenv_config()  # Load .env file separately
         if dotenv_config:
+            # Headless: show a small hint; TUI: log only
+            if getattr(args, "no_tui", False):
+                try:
+                    self.console.print(
+                        "[yellow]Loaded secrets from .env (development convenience). Consider using env vars in CI.[/yellow]"
+                    )
+                except Exception:
+                    pass
             try:
-                self.console.print(
-                    "[yellow]Loaded secrets from .env (development convenience). Consider using environment variables in CI.[/yellow]"
-                )
+                logger.info("dotenv: loaded .env values (dev convenience)")
             except Exception:
-                print(
-                    "Loaded secrets from .env (development convenience). Consider using environment variables in CI."
-                )
+                pass
         defaults = get_default_config()
 
         # Build CLI config dict from args
@@ -1421,9 +1425,16 @@ class OrchestratorCLI:
             preferred = home / ".pitaya" / "config.yaml"
             fallback = home / ".config" / "pitaya" / "config.yaml"
             if preferred.exists() and fallback.exists():
-                self.console.print(
-                    "[dim]Using ~/.pitaya/config.yaml (XDG fallback ignored).[/dim]"
-                )
+                if getattr(args, "no_tui", False):
+                    self.console.print(
+                        "[dim]Using ~/.pitaya/config.yaml (XDG fallback ignored).[/dim]"
+                    )
+                try:
+                    logger.info(
+                        "config: preferred ~/.pitaya/config.yaml; XDG fallback ignored"
+                    )
+                except Exception:
+                    pass
         except Exception:
             pass
 
@@ -1504,7 +1515,11 @@ class OrchestratorCLI:
                 # Console: plain text, no color for CI friendliness
                 print(hdr)
             else:
-                self.console.print(hdr)
+                # TUI: do not print to console; log instead
+                try:
+                    logger.info(hdr)
+                except Exception:
+                    pass
         except Exception:
             pass
 
@@ -1587,15 +1602,28 @@ class OrchestratorCLI:
             "logs_dir"
         ) or full_config.get("logs_dir", Path("./logs"))
 
-        # Log configuration sources unconditionally
-        self.console.print("[dim]Configuration loaded from:[/dim]")
+        # Configuration sources: print only in headless; log in all modes
+        src_parts = []
         if cli_config:
-            self.console.print("  - Command line arguments")
+            src_parts.append("cli")
         if dotenv_config:
-            self.console.print("  - .env file")
+            src_parts.append("dotenv")
         if config:
-            self.console.print(f"  - Config file: {args.config or 'pitaya.yaml'}")
-        self.console.print("  - Built-in defaults")
+            src_parts.append(f"file={args.config or 'pitaya.yaml'}")
+        src_parts.append("defaults")
+        try:
+            logger.info("config sources: %s", ", ".join(src_parts))
+        except Exception:
+            pass
+        if getattr(args, "no_tui", False):
+            self.console.print("[dim]Configuration loaded from:[/dim]")
+            if cli_config:
+                self.console.print("  - Command line arguments")
+            if dotenv_config:
+                self.console.print("  - .env file")
+            if config:
+                self.console.print(f"  - Config file: {args.config or 'pitaya.yaml'}")
+            self.console.print("  - Built-in defaults")
 
         # Global session volume support removed
 
@@ -2073,6 +2101,25 @@ class OrchestratorCLI:
                 tasks, return_when=asyncio.FIRST_COMPLETED
             )
 
+            # Detect task errors early so users see failures in TUI mode
+            tui_error = None
+            orch_error = None
+            try:
+                for task in done:
+                    if task == tui_task:
+                        try:
+                            _ = task.result()
+                        except Exception as e:  # capture but continue graceful shutdown
+                            tui_error = e
+                    elif task == orchestrator_task:
+                        # Retrieve result below; capture exception here if present
+                        try:
+                            _ = task.result()
+                        except Exception as e:
+                            orch_error = e
+            except Exception:
+                pass
+
             # Check if shutdown was requested
             shutdown_requested = False
             for task in done:
@@ -2080,13 +2127,17 @@ class OrchestratorCLI:
                     shutdown_requested = True
                     break
 
-            # Get the result from Pitaya
+            # Get the result from Pitaya when available (ignore if it errored)
             result = None
-            if not shutdown_requested:
-                for task in done:
-                    if task == orchestrator_task:
-                        result = task.result()
-                        break
+            if (
+                not shutdown_requested
+                and orchestrator_task in done
+                and orch_error is None
+            ):
+                try:
+                    result = orchestrator_task.result()
+                except Exception:
+                    result = None
 
             # Shutdown orchestrator to stop background tasks
             await self.orchestrator.shutdown()
@@ -2112,6 +2163,24 @@ class OrchestratorCLI:
                 self.console.print(f"  pitaya --resume {run_id}")
                 # Standardized interrupted exit code per spec
                 return 2
+
+            # Surface task errors (TUI or orchestrator) to the user
+            if tui_error or orch_error:
+                if tui_error:
+                    self.console.print(
+                        f"[red]TUI crashed:[/red] {getattr(tui_error, 'args', tui_error)}"
+                    )
+                if orch_error:
+                    self.console.print(
+                        f"[red]Run failed:[/red] {getattr(orch_error, 'args', orch_error)}"
+                    )
+                try:
+                    self.console.print(
+                        f"[dim]See logs for details: {args.logs_dir}/{run_id}/[/dim]"
+                    )
+                except Exception:
+                    pass
+                return 1
 
             # Get actual run statistics from orchestrator state
             state = self.orchestrator.get_current_state()
