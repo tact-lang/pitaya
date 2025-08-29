@@ -33,17 +33,17 @@ Use this checklist to cut a clean release.
   - [ ] `pitaya "Create a HELLO.txt file with 'Hello from Pitaya' text in it and commit it"`
   - [ ] One advanced run (e.g., `--strategy best-of-n -S n=3`)
 
-## Build & Publish
+## Release & Publish
 
-- [ ] Build distribution
-  - [ ] `python -m build` (requires `build`) or `hatch build`
-- [ ] Verify artifacts in `dist/` install cleanly in a fresh venv
-  - [ ] `pip install dist/*.whl` then `pitaya --version`
 - [ ] Tag and push
   - [ ] `git tag vX.Y.Z && git push origin vX.Y.Z`
 - [ ] Create GitHub Release
   - [ ] Use notes from `CHANGELOG.md`
   - [ ] Attach highlights and breaking changes
+- [ ] Build distribution
+  - [ ] `python -m build` (requires `build`) or `hatch build`
+- [ ] Verify artifacts in `dist/` install cleanly in a fresh venv
+  - [ ] `pip install dist/*.whl` then `pitaya --version`
 - [ ] Publish to PyPI (if applicable)
   - [ ] `twine upload dist/*` (or your release automation)
 
@@ -57,4 +57,3 @@ Notes
 
 - Docker images are not published from this repo by default; override images per run with `--docker-image` as needed.
 - Keep `pyproject.toml` repository URLs up to date (we use `https://github.com/tact-lang/pitaya`).
-
