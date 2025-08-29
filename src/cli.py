@@ -111,7 +111,7 @@ class OrchestratorCLI:
             help=(
                 "Execution strategy. Built-ins: "
                 + ", ".join(sorted(list(AVAILABLE_STRATEGIES.keys())))
-                + ". Or pass a file: path/to/strategy.py[:ClassName]"
+                + ". Or pass a file/module: path/to/strategy.py[:Class] or package.module[:Class]"
             ),
         )
         g_strategy.add_argument(

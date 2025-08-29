@@ -501,6 +501,8 @@ class StrategyContext:
 
         # Emit canonical scheduled event
         if getattr(self._orchestrator, "event_bus", None):
+            info_map = self._orchestrator.state_manager.current_state.instances
+            info = info_map.get(instance_id)
             self._orchestrator.event_bus.emit_canonical(
                 type="task.scheduled",
                 run_id=self._orchestrator.state_manager.current_state.run_id,
@@ -509,9 +511,8 @@ class StrategyContext:
                 payload={
                     "key": key,
                     "instance_id": instance_id,
-                    "container_name": self._orchestrator.state_manager.current_state.instances[
-                        instance_id
-                    ].container_name,
+                    "container_name": info.container_name if info else "",
+                    "branch_name": info.branch_name if info else "",
                     "model": model,
                     # Include base_branch so recovery after crashes can reconstruct
                     # a valid workspace target when snapshots lag.

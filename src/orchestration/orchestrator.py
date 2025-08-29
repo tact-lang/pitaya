@@ -27,7 +27,7 @@ from .event_bus import EventBus
 from .state import InstanceInfo, RunState, StateManager
 from ..shared import InstanceStatus
 from .strategies import AVAILABLE_STRATEGIES
-from .strategies.loader import parse_strategy_spec, load_strategy_from_file
+from .strategies.loader import load_strategy
 from .strategy_context import StrategyContext
 from ..exceptions import (
     OrchestratorError,
@@ -529,15 +529,12 @@ class Orchestrator:
             if strategy_name in AVAILABLE_STRATEGIES:
                 strategy_class = AVAILABLE_STRATEGIES[strategy_name]
             else:
-                path, cls = parse_strategy_spec(strategy_name)
-                if path is not None:
-                    strategy_class = load_strategy_from_file(path, cls)
-                    try:
-                        effective_strategy_name = strategy_class().name
-                    except Exception:
-                        effective_strategy_name = strategy_name
-                else:
-                    raise ValueError(f"Unknown strategy: {strategy_name}")
+                # Support file.py[:Class] and module.path[:Class] forms
+                strategy_class = load_strategy(strategy_name)
+                try:
+                    effective_strategy_name = strategy_class().name
+                except Exception:
+                    effective_strategy_name = strategy_name
 
             logger.info(f"Resolved strategy class for {effective_strategy_name}")
 
