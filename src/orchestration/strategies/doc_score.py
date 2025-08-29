@@ -218,76 +218,243 @@ def _build_scoring_prompt(*, page_title: str, page_path: str, page_slug: str) ->
         f"SLUG: {page_slug}\n"
         f"</target>\n\n"
     )
-    prompt = """ROLE
-You are an AI reviewer for a documentation repository. Your ONLY task is to SCORE the PAGE named above. Do not list issues or fixes. Do not compute any overall score. Output ONLY the JSON array defined by the JSON Schema at the end, written to a file named SCORING_<slug>.json (slug = lowercase; spaces→“-”; drop non [a‑z0‑9‑]).
+    prompt = """<role>
+    You are an AI reviewer for a documentation repository. Your ONLY task is to SCORE the PAGE named above.
+    Output ONLY a JSON array that validates against the JSON Schema in &lt;json_schema&gt;, written to a file named:
+    SCORING_&lt;slug&gt;.json  (slug = lowercase; spaces→“-”; drop non [a-z0-9-]).
+</role>
 
-OUTPUT CONTRACT
-- File: SCORING_<slug>.json
-- Content: a JSON array that VALIDATES against the schema at the end.
-- Absolutely no extra text, logs, or commentary.
+<output_contract>
+    - Write: SCORING_&lt;slug&gt;.json
+    - Content: JSON array that VALIDATES against &lt;json_schema&gt;
+    - No extra text, logs, or commentary
+</output_contract>
 
-WORKFLOW (deterministic)
-1) Full read FIRST: read the ENTIRE page end‑to‑end (all headings, paragraphs, lists, tables, code blocks) before scoring or calling any tools. Do not score from partial reads.
-2) Plan checks: for each criterion below, plan what you must verify from CONTENT only (and the allowed tools).
-3) Tool policy (allowed + budgets):
-    • External link checks: you MAY use HTTP requests (curl). Use HEAD first; use GET only when needed to verify a fragment (#anchor). Timeouts ≤5s; ≤10 total requests per page.
-    • General fact checks (non‑domain‑specific): you MAY use web search. ≤5 queries per page; prefer reputable sources; stop when ≥2 independent sources agree.
-    • Domain‑specific facts (defined by/unique to this documentation set): DO NOT web‑search; validate ONLY by consistency within this repo.
-4) Score: assign an integer 0–5 per criterion using the anchors. Write ONE concise, content‑based reason. If a criterion truly does not apply, set "na": true and add "why_na".
-5) Determinism: avoid randomness. For “consistency vs other pages,” compare with closely related pages AND a small broad sample across the repo; keep total sampled pages reasonable (≈10–15). Do NOT list sampled pages in output.
+<context_understanding>
+    - FULL READ FIRST: read the ENTIRE page (headings, paragraphs, lists, tables, code blocks) BEFORE scoring or making any assumptions.
+    - Do not form judgments or start checks until the full read is complete.
+    - After reading, plan what to verify for each criterion, then perform the checks.
+</context_understanding>
 
-STRICT RULES — DO
-- Read the whole file before judging anything.
-- Keep depth the same regardless of page length; judge quality, not raw counts.
-- Use integer scores 0–5 only.
-- Keep reasons short, specific, and verifiable from repo content and allowed tools.
+<evidence_policy>
+    - Judge the CONTENT only.
+    - You MAY check external links via HTTP (HEAD first; GET only to confirm a fragment #anchor or when HEAD is inconclusive).
+    • Treat 2xx/3xx as reachable; 4xx/5xx as broken; timeouts/429 = unverified (do not penalize for unverified).
+    • Limit: ≤10 HTTP requests per page; ≤5s timeout each.
+    - You MAY use web search for GENERAL, non‑domain‑specific facts (e.g., math, common computing/web concepts, broadly known APIs). Limit: ≤5 queries; prefer reputable, independent sources; stop when ≥2 independent sources agree.
+    - Domain‑specific facts (defined/owned by this documentation set): DO NOT web‑search; validate ONLY by consistency within this repo.
+</evidence_policy>
 
-STRICT RULES — DO NOT
-- Do NOT guess or speculate. If you cannot verify, choose a conservative lower score or use NA when allowed.
-- Do NOT use hedging words: “likely”, “appears”, “seems”, “probably”, “maybe”, “might”, “could be”, “looks like”, “assume”, “guess”.
-- Do NOT reason about runtime/site renderer quirks; judge the CONTENT and what your allowed tools can check.
-- Do NOT execute code or commands beyond web search and HTTP checks.
-- Do NOT output anything besides the JSON array.
+<verifiability_and_style>
+    - Reasons must be fully verifiable from repo content or allowed checks.
+    - NO hedging words: do not use “likely”, “appears”, “seems”, “probably”, “maybe”, “might”, “could be”, “looks like”, “assume”, “guess”.
+    - If something cannot be verified, either use NA (when allowed) or choose a conservative lower score and state the concrete uncertainty (e.g., “term undefined in repo”).
+</verifiability_and_style>
 
-SCORING SCALE (0–5)
-0 = unusable/wrong; 1 = poor; 2 = weak/mixed; 3 = acceptable (minor issues); 4 = good (small nits only); 5 = excellent (no meaningful defects)
+<length_invariance>
+    - Score quality per unit of content; long pages are NOT penalized for length.
+    - Apply the same review depth to short and long pages.
+    - When a criterion truly does not apply, set "na": true and provide "why_na".
+</length_invariance>
 
-CRITERIA (each 0–5; reasons = one sentence, no hedging)
-1) correctness_general
-What it is: factual accuracy of GENERAL knowledge (math, common computing/web concepts, broadly known APIs/protocols). You MAY use web search here.
-0: multiple clear factual errors; 1: several errors/misstatements; 2: some unclear or unsupported claims; 3: minor imprecision only; 4: accurate with clear phrasing; 5: fully accurate, precise, and unambiguous.
+<scoring_scale>
+    - Use integers 0–5 only:
+    0 = unusable / wrong
+    1 = poor (material problems)
+    2 = weak / mixed (several issues)
+    3 = acceptable (minor issues)
+    4 = good (small, non‑blocking nits)
+    5 = excellent (no meaningful defects)
+</scoring_scale>
 
-2) correctness_domain_consistency
-What it is: accuracy of DOMAIN‑SPECIFIC claims defined by this documentation set (its APIs, terms, formats). Validate ONLY by consistency across the docs (no web search).
-NA if: the page makes no domain‑specific claims OR such claims cannot be corroborated anywhere in the docs.
-0: direct contradiction with other pages; 1: several conflicts; 2: noticeable drift/weak support; 3: mostly aligned, minor deltas; 4: strongly consistent across related pages; 5: fully aligned with canonical/overview pages with zero deltas.
+<criteria>
+    <criterion id="correctness_general">
+    <what_it_is>
+        Accuracy of GENERAL knowledge statements: mathematics; common computing and web concepts; broadly standardized protocols/APIs; conventional data formats/units.
+        Examples: arithmetic, percentage math, HTTP status class meanings, JSON shape semantics (generic), file path conventions, timestamp formats.
+        Excludes: project‑specific semantics, custom APIs/terms owned by this docs set (covered by correctness_domain_consistency).
+    </what_it_is>
+    <how_to_check>
+        1) Extract explicit factual statements (definitions, formulas, standard behaviors).
+        2) Validate from your general knowledge; when uncertain, use web search within limits until ≥2 independent reputable sources agree.
+        3) Judge severity by whether a reasonable reader would be misled; evaluate density (quality per unit text), not raw counts.
+    </how_to_check>
+    <scoring_anchors>
+        0: Multiple clear factual errors that would mislead usage or understanding.
+        1: One severe or several material mistakes; reader likely to act incorrectly.
+        2: Several unclear/unsupported claims or minor errors; usable with caution.
+        3: Generally accurate; at most minor imprecision/phrasing nits.
+        4: Accurate and precise; terminology and numbers correct; definitions clear.
+        5: Flawless general accuracy; precise wording; nothing to correct.
+    </scoring_anchors>
+    <na_rules>NA only if the page presents no factual claims (e.g., a pure navigation index).</na_rules>
+    </criterion>
 
-3) examples_quality
-What it is: completeness and apparent runnability of examples/snippets/commands from the text (without executing). Inputs/env/expected output are stated; steps are ordered.
-0: examples absent or clearly wrong; 1: key examples incomplete or misleading; 2: runnable in principle but important steps/inputs missing; 3: runnable with small edits; 4: runnable as written with clear inputs and outputs; 5: exemplary: minimal setup, end‑to‑end clarity, edge cases noted.
+    <criterion id="correctness_domain_consistency">
+    <what_it_is>
+        Accuracy of DOMAIN‑SPECIFIC claims defined by this documentation set (its concepts, APIs, parameters, formats, workflows, constraints).
+        Examples: endpoint names/paths, parameter types, domain terms, canonical flows, versioning rules specific to this project.
+        Validation source: the repository itself (canonical guides, references, tutorials). External web search is NOT allowed.
+    </what_it_is>
+    <how_to_check>
+        1) Extract domain‑specific claims (terms/fields/flows unique to this project).
+        2) Cross‑check against canonical/overview/reference pages and thematically related guides; ALSO sample a small broad set across the repo (≈10–15) to establish house norms.
+        3) If the page has no domain‑specific claims OR no corroboration exists anywhere in the repo, set NA (do not guess).
+    </how_to_check>
+    <scoring_anchors>
+        NA: No domain‑specific claims, or no corroboration anywhere in repo.
+        0: Direct contradiction on critical behaviors/definitions.
+        1: Multiple conflicts on key points; reader likely misled.
+        2: Noticeable drift/weak support; some claims conflict or lack confirmations.
+        3: Mostly aligned; minor wording/coverage deltas; no critical contradictions.
+        4: Strong alignment across canonical/related pages; wording and semantics match.
+        5: Fully aligned with canonical statements across the repo; precise, internally referenced.
+    </scoring_anchors>
+    </criterion>
 
-4) writing_clarity_grammar
-What it is: readability, grammar, and avoidance of unexplained jargon.
-0: very hard to follow; 1: frequent grammar/style issues; 2: mixed clarity with recurring issues; 3: mostly clear; few minor issues; 4: clear and concise; 5: exceptionally clear, consistent tone, no errors.
+    <criterion id="examples_quality">
+    <what_it_is>
+        Completeness and apparent runnability of examples/snippets/commands as SPECIFIED BY THE TEXT (without executing).
+        The reader should be able to reproduce steps using stated prerequisites, inputs, and expected outputs.
+        Includes: prerequisites/tools/versions; imports/flags; clear inputs; ordered steps; expected outputs or verification step; explanation of placeholders; code fences with language.
+    </what_it_is>
+    <how_to_check>
+        1) Identify each example or command block and its surrounding instructions.
+        2) Check that all prerequisites and inputs are stated; steps are logically ordered; expected outputs or verification steps are present.
+        3) Judge on completeness and clarity (not on runtime).
+    </how_to_check>
+    <scoring_anchors>
+        0: Examples absent or clearly wrong/misleading (missing core steps or contradictory instructions).
+        1: Key examples incomplete; crucial prerequisites/inputs missing; reproduction unlikely.
+        2: Runnable in principle but important steps/inputs/expected outputs are missing or ambiguous.
+        3: Runnable with small edits (e.g., one env var implied or a minor install step); outputs mostly clear.
+        4: Runnable as written; prerequisites and outputs are explicit; steps minimal and ordered.
+        5: Exemplary: end‑to‑end flow, variants/edge notes, explicit verification; copy‑paste friendly.
+    </scoring_anchors>
+    <na_rules>
+        NA is allowed ONLY when the page genre does not reasonably require examples (e.g., Concept/Overview/Hub).
+        If examples are present OR the page is a Tutorial/Guide/Reference, you MUST score (do not mark NA).
+    </na_rules>
+    </criterion>
 
-5) consistency_on_page
-What it is: internal consistency of terms, units, casing, code style, headings. One term per concept.
-0: conflicting terms/units/casing; 1: many mismatches; 2: several drifts; 3: minor nits; 4: consistent with rare trivial nits; 5: fully uniform and polished.
+    <criterion id="writing_clarity_grammar">
+    <what_it_is>
+        Readability and grammatical correctness: clear sentences; proper punctuation; consistent person/voice; minimal jargon and all jargon defined on first use; coherent paragraph flow; headings reflect content.
+    </what_it_is>
+    <how_to_check>
+        1) Scan for typos, agreement errors, punctuation misuse, run‑ons, and ambiguous pronouns.
+        2) Check sentence length distribution (avoid long multi‑clause chains); prefer active voice where practical; maintain consistent second‑person (“you”) or neutral voice within a page.
+        3) Ensure terms are defined on first use or linked to a definition.
+    </how_to_check>
+    <scoring_anchors>
+        0: Very hard to follow; pervasive grammar/style issues; meaning frequently unclear.
+        1: Frequent errors and awkward phrasing; reader struggles to extract steps/meaning.
+        2: Mixed clarity with recurring issues (run‑ons, unexplained jargon); requires effort.
+        3: Mostly clear; a few minor issues; paragraphs flow acceptably.
+        4: Clear and concise; polished phrasing; definitions provided on first use; minimal nits.
+        5: Exceptional clarity and polish; consistent, professional tone; no detectable errors.
+    </scoring_anchors>
+    <na_rules>Never NA (always applicable).</na_rules>
+    </criterion>
 
-6) consistency_vs_other_pages
-What it is: alignment with site‑wide norms (terms, tone, structure patterns, versioning, expected cross‑links). Compare with related pages AND a broad sample.
-0: clear outlier; 1: many mismatches; 2: several drifts; 3: minor deltas; 4: well aligned overall; 5: exemplary alignment and reinforces shared patterns.
+    <criterion id="consistency_on_page">
+    <what_it_is>
+        Internal consistency WITHIN THIS PAGE: one term per concept; consistent casing (Title vs sentence case); uniform units/date formats; stable code style (fence language tags, indentation, quotes); consistent heading style and admonition format; consistent link text conventions.
+    </what_it_is>
+    <how_to_check>
+        1) List the key terms and verify they are used uniformly.
+        2) Check units (e.g., KB/MB), number formatting (decimal/grouping), and date style across sections.
+        3) Confirm code blocks have language tags and consistent style; headings follow one casing style; the same type of note uses the same callout format.
+    </how_to_check>
+    <scoring_anchors>
+        0: Conflicting terms/units/casing across sections; inconsistent code/heading styles.
+        1: Many mismatches; conventions vary often; reader likely confused.
+        2: Several drifts; noticeable flip‑flops in terms or style.
+        3: Minor nits; overall consistent.
+        4: Fully consistent with only trivial slips.
+        5: Impeccably consistent; reads as one coherent voice/style.
+    </scoring_anchors>
+    <na_rules>Never NA (always applicable).</na_rules>
+    </criterion>
 
-7) structure_ia
-What it is: logical flow, correct heading ladder, presence of prerequisites/next steps/reference links; page is not an orphan in nav.
-0: fragmented/illogical; 1: weak flow or heading misuse; 2: acceptable but choppy or missing key sections; 3: good flow with minor gaps; 4: clear intro→steps→next with solid nav; 5: exemplary structure, scannable with robust onward paths.
+    <criterion id="consistency_vs_other_pages">
+    <what_it_is>
+        Alignment with site‑wide norms across the repository: shared terms, tone, structure patterns, versioning conventions, and expected cross‑links to canonical pages.
+        Comparison set: thematically related pages AND a small random sample across the repo (≈10–15) to avoid local bias. Do NOT list sampled pages in output.
+    </what_it_is>
+    <how_to_check>
+        1) Compare term choices to glossary/overview pages; check tone (instructional second‑person vs narrative), and common structure patterns (Overview → Prereqs → Steps → Verify → Next).
+        2) Check that versions/SDK names aren’t unexplained outliers; verify expected cross‑links to canonical topics are present when the topic is discussed.
+        3) Evaluate alignment at the pattern level (not identical wording).
+    </how_to_check>
+    <scoring_anchors>
+        0: Clear outlier on multiple dimensions; contradicts site norms.
+        1: Many mismatches; tone/terms/structure diverge noticeably.
+        2: Several drifts; partially aligned but uneven.
+        3: Minor deltas; broadly aligned.
+        4: Well aligned; reinforces established patterns.
+        5: Model alignment; could serve as a template for others.
+    </scoring_anchors>
+    <na_rules>
+        NA only if this repository effectively contains no other substantive pages to compare (rare). Otherwise, MUST score.
+    </na_rules>
+    </criterion>
 
-8) links_references
-What it is: validity and quality of references and links. INTERNAL links: verify paths and fragments. EXTERNAL links: you MAY use curl HEAD/GET.
-Rules: internal = must resolve to existing files/anchors; external = prefer HTTPS; treat 2xx/3xx as reachable; 4xx/5xx as broken; timeouts/429 = do not penalize (state “unverified”).
-0: broken internals or many bad externals; 1: several malformed/HTTP/bad links; 2: some malformed/HTTP or inconsistent citations; 3: minor nits (e.g., occasional redirect); 4: all valid and stable; 5: pristine, with helpful, well‑chosen references.
+    <criterion id="structure_ia">
+    <what_it_is>
+        Information architecture and logical flow: correct heading ladder (no level skips), ordered sections, presence of prerequisites (when relevant), verification/expected results (when relevant), and “Next steps/References”; page is not obviously orphaned in available nav/index files.
+    </what_it_is>
+    <how_to_check>
+        1) Verify heading levels are not skipped (e.g., H2 must follow H1 before H3).
+        2) Check that sections follow logical order (Intro → Prereqs → Steps → Verify → Next) when applicable to the genre.
+        3) If nav manifests exist (e.g., SUMMARY.md, mkdocs.yml, sidebars.*), confirm inclusion; otherwise, do not penalize orphan status.
+    </how_to_check>
+    <scoring_anchors>
+        0: Fragmented/illogical; ladder misused; no onward paths.
+        1: Weak flow or repeated ladder problems; missing prereqs/verification where expected.
+        2: Acceptable but choppy or one major section misplaced/missing.
+        3: Good flow; small gaps only; headings mostly correct.
+        4: Clear intro→steps→verify→next; headings correct throughout.
+        5: Exemplary IA; highly scannable; robust onward paths; clearly placed in nav.
+    </scoring_anchors>
+    <na_rules>
+        NA allowed for tiny notices/changelogs where a full ladder is not meaningful.
+    </na_rules>
+    </criterion>
 
-JSON SCHEMA (validate the file content against this schema)
+    <criterion id="links_references">
+    <what_it_is>
+        Validity and quality of internal/external references and links. INTERNAL links must resolve to existing files/anchors. EXTERNAL links may be verified via HTTP.
+        Evaluate link scheme (prefer HTTPS), anchor precision, and reference usefulness.
+    </what_it_is>
+    <how_to_check>
+        1) Internal: confirm target file exists and fragment matches an anchor/heading id; relative paths resolve.
+        2) External: HEAD first; GET only to validate a fragment or when HEAD is inconclusive. 2xx/3xx = reachable; 4xx/5xx = broken; timeouts/429 = unverified (neutral).
+        3) Prefer HTTPS; count plain HTTP as a minor issue unless required by the target.
+    </how_to_check>
+    <scoring_anchors>
+        0: Broken internal paths/anchors; many bad externals.
+        1: Several malformed/HTTP/bad links; weak references.
+        2: Some malformed/HTTP links or inconsistent citations; overall usable.
+        3: Minor nits (e.g., occasional redirect or formatting quirk).
+        4: All links valid/stable; references are helpful and relevant.
+        5: Pristine: anchor‑precise; consistently HTTPS; references elevate comprehension.
+    </scoring_anchors>
+    <na_rules>
+        NA allowed only if the page contains no links/references and its genre does not reasonably require them (e.g., a very short concept definition).
+        If links exist OR genre implies they are expected (tutorial/reference), you MUST score (not NA).
+    </na_rules>
+    </criterion>
+</criteria>
+
+<procedure>
+    1) Perform FULL READ of the page.
+    2) Plan checks per criterion; then perform repo reads, allowed HTTP checks, and (for general facts only) web search within budgets.
+    3) Assign 0–5 for each criterion using anchors; use NA strictly per &lt;na_rules&gt;.
+    4) Produce ONLY the JSON array defined in &lt;json_schema&gt; and write SCORING_&lt;slug&gt;.json. Stop.
+</procedure>
+
+<json_schema>
 {
     "type": "array",
     "minItems": 8,
@@ -311,21 +478,12 @@ JSON SCHEMA (validate the file content against this schema)
         },
         "score": { "type": "integer", "minimum": 0, "maximum": 5 },
         "na": { "type": "boolean" },
-        "why_na": { "type": "string", "minLength": 5, "maxLength": 240 },
-        "reason": { "type": "string", "minLength": 5, "maxLength": 300 }
+        "why_na": { "type": "string", "minLength": 5, "maxLength": 400 },
+        "reason": { "type": "string", "minLength": 8, "maxLength": 400 }
     },
-    "required": ["id", "reason"],
-    "allOf": [
-        {
-        "if": { "properties": { "na": { "const": true } }, "required": ["na"] },
-        "then": { "required": ["why_na"], "not": { "required": ["score"] } }
-        },
-        {
-        "if": { "not": { "properties": { "na": { "const": true } }, "required": ["na"] } },
-        "then": { "required": ["score"] }
-        }
-    ]
+    "required": ["id", "reason"]
     }
-}"""
+}
+</json_schema>"""
 
     return target + prompt
