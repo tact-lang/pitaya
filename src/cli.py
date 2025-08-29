@@ -272,11 +272,6 @@ class OrchestratorCLI:
         )
         # Legacy parallel presets removed; use --max-parallel or auto
         g_limits.add_argument(
-            "--allow-global-session-volume",
-            action="store_true",
-            help="Share agent session across runs (advanced)",
-        )
-        g_limits.add_argument(
             "--force-commit",
             action="store_true",
             help="Force a git commit in the workspace after agent finishes (if there are changes)",
@@ -1595,8 +1590,7 @@ class OrchestratorCLI:
             self.console.print(f"  - Config file: {args.config or 'pitaya.yaml'}")
         self.console.print("  - Built-in defaults")
 
-        # Respect global session volume consent by setting env for runner
-        allow_global_session = bool(getattr(args, "allow_global_session_volume", False))
+        # Global session volume support removed
 
         # Resolve parallelism
         import os as _os
@@ -1674,7 +1668,6 @@ class OrchestratorCLI:
                 )
             ),
             allow_overwrite_protected_refs=allow_overwrite,
-            allow_global_session_volume=allow_global_session,
             default_plugin_name=str(
                 full_config.get("plugin_name", getattr(args, "plugin", "claude-code"))
             ),
