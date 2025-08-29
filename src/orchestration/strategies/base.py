@@ -27,8 +27,6 @@ class StrategyConfig:
 
     # Common configuration all strategies share
     model: str = "sonnet"
-    timeout_seconds: int = 3600
-    container_limits: Optional[Dict[str, Any]] = None
 
     def validate(self) -> None:
         """Validate configuration, raising ValueError if invalid."""
