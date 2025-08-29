@@ -1,8 +1,7 @@
 """
 Simple strategy that runs exactly one instance.
 
-This is the baseline strategy - no parallelism, no complexity.
-Perfect for single tasks where you want precisely one attempt.
+Baseline one-shot execution — no parallelism, no extra phases.
 """
 
 import logging
@@ -31,7 +30,7 @@ class SimpleStrategy(Strategy):
         return "simple"
 
     def get_config_class(self) -> type[StrategyConfig]:
-        # Simple strategy uses base config with no extensions
+        # Use base config; no extensions
         return StrategyConfig
 
     async def execute(
