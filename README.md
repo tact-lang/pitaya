@@ -21,6 +21,12 @@ Note: Pitaya is in public beta. Interfaces and defaults may evolve.
 
 Built‑in strategies: simple, scoring, best‑of‑n, iterative, bug‑finding, doc‑review
 
+## Demo
+
+Watch a short video demo of the TUI and orchestration:
+
+https://github.com/user-attachments/assets/3c426890-4c5a-4765-b594-adfd09d3810b
+
 ## Install
 
 ```bash
