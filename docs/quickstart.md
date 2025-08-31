@@ -19,6 +19,23 @@ pipx install pitaya
 uv tool install pitaya
 ```
 
+## Build the Docker image
+
+Pitaya executes agents inside Docker. You need an image that contains the agent CLI(s) you will run:
+
+- `claude` (for `--plugin claude-code`)
+- `codex` (for `--plugin codex`)
+
+Use this repository’s [Dockerfile](../Dockerfile) to build a ready image:
+
+```bash
+git clone https://github.com/tact-lang/pitaya
+cd pitaya
+docker build -t pitaya-agents:latest .
+```
+
+You can also bring your own base image; just ensure it includes the required CLI(s). Point Pitaya at a custom image with `--docker-image` or set `runner.docker_image` in `pitaya.yaml`.
+
 Dev install from source:
 
 ```bash
