@@ -179,6 +179,9 @@ async def run(console: Console, args: argparse.Namespace) -> int:
                 console, orch, args, full_config, run_id
             )
         return await tui_runner.run_tui(console, orch, args, full_config, run_id)
+    except KeyboardInterrupt:
+        console.print("\n[yellow]Interrupted — shutting down gracefully[/yellow]")
+        return 2
     except ValueError as e:
         console.print(f"[red]Invalid arguments: {e}[/red]")
         return 2

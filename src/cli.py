@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import signal
 import sys
 from typing import Final
 
@@ -40,18 +39,6 @@ def main() -> None:
     parser = create_parser()
     args = parser.parse_args()
     console = Console()
-
-    # Graceful Ctrl+C: convert 2nd SIGINT into hard exit
-    stop = asyncio.Event()
-
-    def _sigint_handler(_sig, _frame) -> None:
-        if not stop.is_set():
-            console.print("\n[dim]Shutting down... (Ctrl+C again to force)[/dim]")
-            stop.set()
-        else:
-            sys.exit(2)
-
-    signal.signal(signal.SIGINT, _sigint_handler)
 
     try:
         rc = asyncio.run(_dispatch(console, args))
