@@ -57,7 +57,7 @@ def perform_preflight_checks(console: Console, args: Any) -> bool:
     repo_path = Path(getattr(args, "repo"))
     if not _check_repo(console, repo_path, getattr(args, "base_branch", "main")):
         return False
-    # Working tree cleanliness is a warning only
+    # Enforce clean working tree if requested; warn otherwise
     try:
         dirty = subprocess.run(
             ["git", "-C", str(repo_path), "status", "--porcelain"],
@@ -65,9 +65,15 @@ def perform_preflight_checks(console: Console, args: Any) -> bool:
             text=True,
         )
         if dirty.returncode == 0 and dirty.stdout.strip():
-            console.print(
-                "[yellow]Warning: Working tree has uncommitted changes.[/yellow]"
-            )
+            if getattr(args, "require_clean_wt", False):
+                console.print(
+                    "[red]Working tree has uncommitted changes. Use --require-clean-wt=false to bypass.[/red]"
+                )
+                return False
+            else:
+                console.print(
+                    "[yellow]Warning: Working tree has uncommitted changes.[/yellow]"
+                )
     except Exception:
         pass
     # Docker image access check is non-blocking; leave to orchestrator

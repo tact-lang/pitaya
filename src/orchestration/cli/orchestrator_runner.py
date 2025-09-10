@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import sys
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -85,10 +86,27 @@ def _parallel(cfg: Dict[str, Any]) -> tuple[int, int]:
     return total_val, min(start_val, total_val)
 
 
-def _build_orchestrator(cfg: Dict[str, Any], auth: AuthConfig) -> Orchestrator:
+def _build_orchestrator(
+    cfg: Dict[str, Any], auth: AuthConfig, args=None
+) -> Orchestrator:
     total, start = _parallel(cfg)
     orch = cfg.get("orchestration", {})
     runr = cfg.get("runner", {})
+
+    # Collect agent CLI passthrough args (parity with pre-refactor CLI)
+    agent_args = None
+    try:
+        import shlex as _shlex
+
+        collected: list[str] = []
+        if args is not None and getattr(args, "agent_cli_arg", None):
+            collected.extend([str(a) for a in args.agent_cli_arg if a is not None])
+        if args is not None and getattr(args, "agent_cli_args_str", None):
+            collected.extend(_shlex.split(str(args.agent_cli_args_str)))
+        agent_args = collected or None
+    except Exception:
+        agent_args = None
+
     return Orchestrator(
         max_parallel_instances=total,
         max_parallel_startup=start,
@@ -108,7 +126,7 @@ def _build_orchestrator(cfg: Dict[str, Any], auth: AuthConfig) -> Orchestrator:
         default_plugin_name=str(cfg.get("plugin_name", "claude-code")),
         default_model_alias=str(cfg.get("model", "sonnet")),
         default_docker_image=runr.get("docker_image"),
-        default_agent_cli_args=None,
+        default_agent_cli_args=agent_args,
         force_commit=bool(runr.get("force_commit", False)),
         randomize_queue_order=bool(orch.get("randomize_queue_order", False)),
     )
@@ -116,6 +134,32 @@ def _build_orchestrator(cfg: Dict[str, Any], auth: AuthConfig) -> Orchestrator:
 
 async def run(console: Console, args) -> int:
     run_id = _make_run_id(getattr(args, "resume", None))
+    # Restore --json convenience: implies headless JSON output
+    if getattr(args, "json", False):
+        args.no_tui = True
+        args.output = "json"
+    # Default to headless in non-TTY/CI unless explicitly overridden
+    try:
+        if not sys.stdout.isatty() and not getattr(args, "json", False):
+            args.no_tui = True
+    except Exception:
+        pass
+
+    # Validate Docker connectivity early (matches previous behavior)
+    try:
+        from ...utils.platform_utils import validate_docker_setup
+
+        ok, _err = validate_docker_setup()
+        if not ok:
+            console.print("[red]cannot connect to docker daemon[/red]")
+            console.print("Try:")
+            console.print("  • start Docker Desktop / system service")
+            console.print("  • check $DOCKER_HOST")
+            console.print("  • run: docker info")
+            return 1
+    except Exception:
+        # If platform utils not available, continue; orchestrator will surface errors
+        pass
     if not getattr(args, "resume", None):
         if not perform_preflight_checks(console, args):
             return 1
@@ -125,7 +169,7 @@ async def run(console: Console, args) -> int:
         return 1
 
     auth_cfg = get_auth_config(args, full_config)
-    orch = _build_orchestrator(full_config, auth_cfg)
+    orch = _build_orchestrator(full_config, auth_cfg, args)
     await orch.initialize()
 
     try:

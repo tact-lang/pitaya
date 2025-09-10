@@ -44,6 +44,13 @@ async def run_tui(
     console: Console, orch: Orchestrator, args, cfg: Dict[str, Any], run_id: str
 ) -> int:
     display = _display(console, cfg)
+    # Apply CLI display flags to TUI to match previous behavior
+    try:
+        if getattr(args, "display", None) and args.display != "auto":
+            display.set_forced_display_mode(args.display)
+        display.set_ids_full(getattr(args, "show_ids", "short") == "full")
+    except Exception:
+        pass
     events_file = args.logs_dir / run_id / "events.jsonl"
     events_file.parent.mkdir(parents=True, exist_ok=True)
 
