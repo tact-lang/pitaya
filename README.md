@@ -76,7 +76,7 @@ pitaya "Write the funniest and most original joke possible" --strategy best-of-n
 # Iterative refine (generate → review → refine)
 pitaya "Write the funniest and most original joke possible" --strategy iterative -S iterations=3
 
-# Headless JSON output
+# Headless JSON output (pure NDJSON)
 pitaya "task" --json
 ```
 
@@ -117,7 +117,7 @@ CLI overrides config; `-S key=value` only affects the selected strategy.
 
 ## Results & Logs
 
-- Logs: `logs/<run_id>/events.jsonl` and component logs
+- Logs: `logs/<run_id>/events.jsonl` and JSONL component logs (orchestration.jsonl, runner.jsonl, tui.jsonl, other.jsonl)
 - Results: `results/<run_id>/` (summary.json, branches.txt, instance_metrics.csv)
 - Branches: `pitaya/<strategy>/<run_id>/k<short8>` (hierarchical namespace)
 - Resume: `pitaya --resume <run_id>`

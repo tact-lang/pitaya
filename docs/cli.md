@@ -116,7 +116,7 @@ Built‑ins: simple, scoring, best-of-n, iterative, bug-finding, doc-review
 
   ```bash
   pitaya "task" --no-tui --output streaming   # human text
-  pitaya "task" --no-tui --output json        # structured JSON
+  pitaya "task" --no-tui --output json        # structured NDJSON (one JSON per line)
   pitaya "task" --no-tui --output quiet       # minimal
   ```
 
@@ -124,6 +124,7 @@ Built‑ins: simple, scoring, best-of-n, iterative, bug-finding, doc-review
 
   ```bash
   pitaya "task" --json   # implies --no-tui --output json
+  # Note: JSON mode writes only NDJSON to stdout (no human summary)
   ```
 
 - TUI density:
@@ -157,6 +158,7 @@ pitaya "task" --force-commit                  # force a commit if changes exist
   ```bash
   pitaya "task" --config ./pitaya.yaml
   ```
+  If you pass `--config` with a missing/unreadable file, Pitaya errors out with a clear message (no silent fallback).
 
 - Precedence: CLI > env > .env > project config > defaults.
 - Directories:
@@ -187,6 +189,8 @@ pitaya --resume run_20250114_123456     # resume an interrupted run
   pitaya config print --redact false   # allow unredacted when PITAYA_ALLOW_UNREDACTED=1
   ```
 
+  Redaction patterns from config (`logging.redaction.custom_patterns`) are applied to events and logs.
+
 - Agree to confirmations automatically:
 
   ```bash
@@ -199,6 +203,8 @@ pitaya --resume run_20250114_123456     # resume an interrupted run
 - 1: Error (validation, environment, or runtime failure)
 - 2: Interrupted by user (Ctrl+C)
 - 3: Completed with failures (some instances failed)
+
+Ctrl+C behavior: one press initiates graceful shutdown (containers stopped, state snapshotted, resume hint printed). A second press forces exit.
 
 ## Examples
 

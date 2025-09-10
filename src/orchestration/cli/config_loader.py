@@ -1,4 +1,10 @@
-"""Project config loading and CLI config assembly."""
+"""Project config loading and CLI config assembly.
+
+Behavior: if the user explicitly passes `--config <path>` and the file is
+missing or unreadable, raise `ValueError` so the CLI can fail fast with a
+clear message. If no path is provided and the default `pitaya.yaml` is not
+present, return an empty dict.
+"""
 
 from __future__ import annotations
 
@@ -11,16 +17,36 @@ __all__ = ["load_project_config", "build_cli_config"]
 
 
 def load_project_config(config_path: Optional[Path]) -> Dict[str, Any]:
-    """Load YAML project configuration, returning an empty dict on absence."""
+    """Load YAML project configuration.
+
+    Rules:
+    - If `config_path` is provided and does not exist or is unreadable ⇒ raise ValueError.
+    - If `config_path` is None and `pitaya.yaml` does not exist ⇒ return {}.
+    - On YAML parse errors for an explicit file ⇒ raise ValueError.
+    """
+    explicit = config_path is not None
     path = config_path
-    if not path:
+    if path is None:
         default_path = Path("pitaya.yaml")
         path = default_path if default_path.exists() else None
-    if not path or not path.exists():
+    if path is None:
         return {}
-    with open(path, "r", encoding="utf-8") as f:
-        data = yaml.safe_load(f) or {}
-    return data if isinstance(data, dict) else {}
+    if not path.exists():
+        if explicit:
+            raise ValueError(f"config file not found: {path}")
+        return {}
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = yaml.safe_load(f) or {}
+        if not isinstance(data, dict):
+            if explicit:
+                raise ValueError(f"invalid config format (expected mapping): {path}")
+            return {}
+        return data
+    except (OSError, yaml.YAMLError) as e:
+        if explicit:
+            raise ValueError(f"failed to read config {path}: {e}")
+        return {}
 
 
 def build_cli_config(args) -> Dict[str, Any]:

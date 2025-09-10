@@ -190,8 +190,13 @@ async def _execute(
 
 
 def _exit_code(results) -> int:
-    failed = [getattr(r, "success", False) for r in results]
-    return 3 if any(not ok for ok in failed) else 0
+    """Return 3 only if any instance actually failed (not canceled)."""
+    for r in results:
+        status = getattr(r, "status", "")
+        success = getattr(r, "success", False)
+        if not success and status != "canceled":
+            return 3
+    return 0
 
 
 async def run_headless(

@@ -103,7 +103,7 @@ uv run pitaya "Create a HELLO.txt file with 'Hello from Pitaya' text in it and c
 
 Tips
 
-- Press Ctrl+C to stop the run. You’ll see a resume hint printed with the run ID.
+  - Press Ctrl+C to stop the run. Pitaya shuts down gracefully (containers stopped, state saved) and prints a resume hint with the run ID.
 - After completion, results are written under `results/<run_id>/` and logs under `logs/<run_id>/`.
 - Branches are created only if the agent commits changes.
 
@@ -131,7 +131,7 @@ pitaya "Write the funniest and most original joke possible" --strategy iterative
 
 ## Where to Find Results
 
-- Logs: `logs/<run_id>/events.jsonl` and component logs
+- Logs: `logs/<run_id>/events.jsonl` and JSONL component logs (orchestration.jsonl, runner.jsonl, tui.jsonl, other.jsonl)
 - Results: `results/<run_id>/` (summary.json, branches.txt, metrics)
 - Branches: `pitaya/<strategy>/<run_id>/k<short8>` (hierarchical namespace)
 

@@ -164,59 +164,61 @@ async def run(console: Console, args: argparse.Namespace) -> int:
     if not getattr(args, "resume", None):
         if not perform_preflight_checks(console, args):
             return 1
-
-    full_config = _merge_full_config(args)
-
-    # Structured logging and rotation setup (restored from pre-refactor behavior)
-    try:
-        from ...utils.structured_logging import setup_structured_logging
-        from ...utils.log_rotation import cleanup_old_logs, setup_log_rotation_task
-
-        logs_dir_cfg = full_config.get("orchestration", {}).get("logs_dir") or getattr(
-            args, "logs_dir", Path("./logs")
-        )
-        logs_dir = Path(logs_dir_cfg)
-        quiet = bool(
-            getattr(args, "no_tui", False) and getattr(args, "output", "") == "quiet"
-        )
-        setup_structured_logging(
-            logs_dir=logs_dir,
-            run_id=run_id,
-            debug=True,
-            quiet=quiet,
-            no_tui=bool(getattr(args, "no_tui", False)),
-        )
-        try:
-            cleanup_old_logs(logs_dir)
-            # Determine max size from config if present (bytes → MB)
-            max_bytes = (full_config.get("logging", {}) or {}).get(
-                "max_file_size", 10485760
-            )
-            try:
-                max_mb = (
-                    int(max_bytes / (1024 * 1024))
-                    if isinstance(max_bytes, (int, float))
-                    else 100
-                )
-            except (TypeError, ValueError):
-                max_mb = 100
-            import asyncio as _asyncio
-
-            _asyncio.create_task(setup_log_rotation_task(logs_dir, max_size_mb=max_mb))
-        except (OSError, PermissionError):
-            # Non-fatal; continue without rotation
-            pass
-    except ImportError:
-        # Logging helpers unavailable; skip structured logging setup
-        pass
-
-    # (moved) custom redaction pattern application occurs after orchestrator creation
-    if not validate_full_config(console, full_config, args):
-        return 1
-
     orch: Orchestrator | None = None
 
     try:
+        # Merge full configuration (may raise ValueError for bad --config)
+        full_config = _merge_full_config(args)
+
+        # Structured logging and rotation setup (restored from pre-refactor behavior)
+        try:
+            from ...utils.structured_logging import setup_structured_logging
+            from ...utils.log_rotation import cleanup_old_logs, setup_log_rotation_task
+
+            logs_dir_cfg = full_config.get("orchestration", {}).get(
+                "logs_dir"
+            ) or getattr(args, "logs_dir", Path("./logs"))
+            logs_dir = Path(logs_dir_cfg)
+            quiet = bool(
+                getattr(args, "no_tui", False)
+                and getattr(args, "output", "") == "quiet"
+            )
+            setup_structured_logging(
+                logs_dir=logs_dir,
+                run_id=run_id,
+                debug=True,
+                quiet=quiet,
+                no_tui=bool(getattr(args, "no_tui", False)),
+            )
+            try:
+                cleanup_old_logs(logs_dir)
+                # Determine max size from config if present (bytes → MB)
+                max_bytes = (full_config.get("logging", {}) or {}).get(
+                    "max_file_size", 10485760
+                )
+                try:
+                    max_mb = (
+                        int(max_bytes / (1024 * 1024))
+                        if isinstance(max_bytes, (int, float))
+                        else 100
+                    )
+                except (TypeError, ValueError):
+                    max_mb = 100
+                import asyncio as _asyncio
+
+                _asyncio.create_task(
+                    setup_log_rotation_task(logs_dir, max_size_mb=max_mb)
+                )
+            except (OSError, PermissionError):
+                # Non-fatal; continue without rotation
+                pass
+        except ImportError:
+            # Logging helpers unavailable; skip structured logging setup
+            pass
+
+        if not validate_full_config(console, full_config, args):
+            return 1
+
         auth_cfg = get_auth_config(args, full_config)
         orch = _build_orchestrator(full_config, auth_cfg, args)
         # Apply custom redaction patterns from config to event bus (on creation during run)

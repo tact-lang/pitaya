@@ -35,7 +35,7 @@ Use `--display detailed|compact|dense` to force a mode; otherwise auto‑selecti
 
 ## Headless Output
 
-- In non‑TTY (e.g., CI) or when `--no-tui` is set, Pitaya streams concise logs (`--output streaming`) or emits JSON (`--output json`, or `--json`).
+- In non‑TTY (e.g., CI) or when `--no-tui` is set, Pitaya streams concise logs (`--output streaming`) or emits JSON (`--output json`, or `--json`). JSON mode writes NDJSON only (one JSON object per line) with no trailing human summary.
 
 ## Offline Viewer (optional)
 
@@ -53,6 +53,6 @@ Filters:
 
 ## Tips
 
-- Cancel with Ctrl+C; you’ll see a resume hint printed with the run ID.
+- Cancel with Ctrl+C; a graceful shutdown stops containers, saves state, and prints a resume hint with the run ID.
 - Logs live at `logs/<run_id>/`; results at `results/<run_id>/`.
 - In compact mode, long branches shorten to their unique suffix with a leading `/` so the `k<short8>` tail is visible.

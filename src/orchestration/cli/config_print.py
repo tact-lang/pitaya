@@ -54,23 +54,30 @@ def _load_project_config(path: Path | None) -> Dict[str, Any]:
             return {}
         path = default
     if not path.exists():
-        return {}
+        # Explicit path not found: fail fast
+        raise ValueError(f"config file not found: {path}")
     try:
         import yaml
 
         with open(path, "r", encoding="utf-8") as f:
             data = yaml.safe_load(f) or {}
-        return data if isinstance(data, dict) else {}
-    except (OSError, yaml.YAMLError):
-        return {}
+        if not isinstance(data, dict):
+            raise ValueError(f"invalid config format (expected mapping): {path}")
+        return data
+    except (OSError, yaml.YAMLError) as e:
+        raise ValueError(f"failed to read config {path}: {e}")
 
 
 async def run_config_print(console: Console, args: argparse.Namespace) -> int:
-    env = load_env_config()
-    dotenv = load_dotenv_config()
-    defaults = get_default_config()
-    global_cfg = load_global_config()
-    project_cfg = _load_project_config(getattr(args, "config", None))
+    try:
+        env = load_env_config()
+        dotenv = load_dotenv_config()
+        defaults = get_default_config()
+        global_cfg = load_global_config()
+        project_cfg = _load_project_config(getattr(args, "config", None))
+    except ValueError as e:
+        console.print(f"[red]{e}[/red]")
+        return 1
     merged = merge_config(
         {},
         env,
