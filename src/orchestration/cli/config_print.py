@@ -9,6 +9,7 @@ import json
 import os
 from pathlib import Path
 from typing import Any, Dict
+import argparse
 
 from rich.console import Console
 
@@ -58,12 +59,13 @@ def _load_project_config(path: Path | None) -> Dict[str, Any]:
         import yaml
 
         with open(path, "r", encoding="utf-8") as f:
-            return yaml.safe_load(f) or {}
-    except Exception:
+            data = yaml.safe_load(f) or {}
+        return data if isinstance(data, dict) else {}
+    except (OSError, yaml.YAMLError):
         return {}
 
 
-async def run_config_print(console: Console, args) -> int:
+async def run_config_print(console: Console, args: argparse.Namespace) -> int:
     env = load_env_config()
     dotenv = load_dotenv_config()
     defaults = get_default_config()

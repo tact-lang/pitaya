@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 from typing import Any, Dict
 
 
@@ -24,9 +25,13 @@ def _parse_value(value: str) -> Any:
 
 
 def get_strategy_config(
-    args, full_config: Dict[str, Any] | None = None
+    args: argparse.Namespace, full_config: Dict[str, Any] | None = None
 ) -> Dict[str, Any]:
-    """Build a dict to configure the selected strategy."""
+    """Build a dict to configure the selected strategy.
+
+    Raises:
+        ValueError: if a strategy parameter is not formatted as KEY=VALUE.
+    """
     cfg: Dict[str, Any] = {}
     strategy_name = getattr(args, "strategy", None) or (full_config or {}).get(
         "strategy", "simple"
@@ -46,9 +51,7 @@ def get_strategy_config(
     )
     for param in getattr(args, "strategy_params", []) or []:
         if "=" not in param:
-            raise SystemExit(
-                f"Invalid -S parameter format: {param}. Expected key=value."
-            )
+            raise ValueError(f"invalid strategy param: {param!r}; expected KEY=VALUE")
         key, value = param.split("=", 1)
         cfg[key] = _parse_value(value)
     return cfg

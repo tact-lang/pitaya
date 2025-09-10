@@ -51,19 +51,16 @@ def _print_instance(console: Console, result) -> None:
 def _summary(console: Console, results: Iterable, state: Any | None) -> None:
     console.print("[bold]Summary:[/bold]")
     if state and hasattr(state, "strategies") and state.strategies:
-        try:
-            strat_states = [getattr(s, "state", "") for s in state.strategies.values()]
-            strat_success = sum(1 for s in strat_states if s == "completed")
-            strat_canceled = sum(1 for s in strat_states if s == "canceled")
-            strat_failed = sum(1 for s in strat_states if s == "failed")
-            console.print(
-                f"  Strategies: {strat_success}/{len(strat_states)} completed; {strat_canceled} canceled; {strat_failed} failed"
-            )
-            if strat_canceled > 0 and getattr(state, "run_id", None):
-                console.print("\n[blue]Run interrupted. To resume this run:[/blue]")
-                console.print(f"  pitaya --resume {state.run_id}")
-        except Exception:
-            pass
+        strat_states = [getattr(s, "state", "") for s in state.strategies.values()]
+        strat_success = sum(1 for s in strat_states if s == "completed")
+        strat_canceled = sum(1 for s in strat_states if s == "canceled")
+        strat_failed = sum(1 for s in strat_states if s == "failed")
+        console.print(
+            f"  Strategies: {strat_success}/{len(strat_states)} completed; {strat_canceled} canceled; {strat_failed} failed"
+        )
+        if strat_canceled > 0 and getattr(state, "run_id", None):
+            console.print("\n[blue]Run interrupted. To resume this run:[/blue]")
+            console.print(f"  pitaya --resume {state.run_id}")
 
     total_duration = sum(getattr(r, "duration_seconds", 0) or 0 for r in results)
     total_cost = sum(getattr(r, "metrics", {}).get("total_cost", 0) for r in results)

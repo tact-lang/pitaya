@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 import sys
 from pathlib import Path
 from typing import Any, Dict, Optional
+import argparse
 
 from rich.console import Console
 
@@ -69,7 +70,7 @@ def _parallel(cfg: Dict[str, Any]) -> tuple[int, int]:
     def _cpu_default() -> int:
         try:
             return max(2, int(_os.cpu_count() or 2))
-        except Exception:
+        except (TypeError, ValueError):
             return 2
 
     orch = cfg.get("orchestration", {})
@@ -104,7 +105,7 @@ def _build_orchestrator(
         if args is not None and getattr(args, "agent_cli_args_str", None):
             collected.extend(_shlex.split(str(args.agent_cli_args_str)))
         agent_args = collected or None
-    except Exception:
+    except (AttributeError, ValueError, ImportError):
         agent_args = None
 
     return Orchestrator(
@@ -132,7 +133,7 @@ def _build_orchestrator(
     )
 
 
-async def run(console: Console, args) -> int:
+async def run(console: Console, args: argparse.Namespace) -> int:
     run_id = _make_run_id(getattr(args, "resume", None))
     # Restore --json convenience: implies headless JSON output
     if getattr(args, "json", False):
@@ -142,7 +143,7 @@ async def run(console: Console, args) -> int:
     try:
         if not sys.stdout.isatty() and not getattr(args, "json", False):
             args.no_tui = True
-    except Exception:
+    except (AttributeError, OSError):
         pass
 
     # Validate Docker connectivity early (matches previous behavior)
@@ -157,7 +158,7 @@ async def run(console: Console, args) -> int:
             console.print("  • check $DOCKER_HOST")
             console.print("  • run: docker info")
             return 1
-    except Exception:
+    except ImportError:
         # If platform utils not available, continue; orchestrator will surface errors
         pass
     if not getattr(args, "resume", None):
@@ -178,6 +179,9 @@ async def run(console: Console, args) -> int:
                 console, orch, args, full_config, run_id
             )
         return await tui_runner.run_tui(console, orch, args, full_config, run_id)
+    except ValueError as e:
+        console.print(f"[red]Invalid arguments: {e}[/red]")
+        return 2
     except (OrchestratorError, DockerError, ValidationError) as e:
         console.print(f"[red]Error: {e}[/red]")
         console.print_exception()
@@ -185,5 +189,5 @@ async def run(console: Console, args) -> int:
     finally:
         try:
             await orch.shutdown()
-        except Exception:
+        except (OrchestratorError, RuntimeError, OSError):
             pass

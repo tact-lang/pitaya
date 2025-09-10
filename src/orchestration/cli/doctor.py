@@ -41,17 +41,13 @@ def _check_docker(rows: list[tuple[str, str, str, list[str]]]) -> None:
                 "docker",
                 "ok" if valid else "cannot connect to docker daemon",
                 (
-                    [
-                        "start Docker",
-                        "check $DOCKER_HOST",
-                        "run: docker info",
-                    ]
+                    ["start Docker", "check $DOCKER_HOST", "run: docker info"]
                     if not valid
                     else []
                 ),
             )
         )
-    except Exception as e:  # pragma: no cover - environment dependent
+    except (OSError, RuntimeError) as e:  # pragma: no cover - environment dependent
         rows.append(
             ("✗", "docker", str(e), ["ensure Docker installed", "run: docker info"])
         )
@@ -69,13 +65,10 @@ def _check_disk(rows: list[tuple[str, str, str, list[str]]]) -> None:
                     "✗",
                     "disk",
                     f"insufficient disk space: {free_gb:.1f}GB free (<20GB)",
-                    [
-                        "free space on this volume",
-                        "move repo to larger disk",
-                    ],
+                    ["free space on this volume", "move repo to larger disk"],
                 )
             )
-    except Exception as e:  # pragma: no cover - platform dependent
+    except OSError as e:  # pragma: no cover - platform dependent
         rows.append(("i", "disk", f"could not check: {e}", []))
 
 
@@ -107,7 +100,7 @@ def _check_repo(
                     ],
                 )
             )
-    except Exception as e:  # pragma: no cover
+    except (subprocess.SubprocessError, OSError) as e:  # pragma: no cover
         rows.append(("i", "repo", f"check failed: {e}", []))
 
 
@@ -119,37 +112,34 @@ def _check_temp(rows: list[tuple[str, str, str, list[str]]]) -> None:
         test.write_text("ok", encoding="utf-8")
         test.unlink(missing_ok=True)
         rows.append(("✓", "temp", str(td), []))
-    except Exception as e:  # pragma: no cover
+    except OSError as e:  # pragma: no cover
         rows.append(
             ("✗", "temp", f"not writable: {e}", ["adjust permissions", "set TMPDIR"])
         )
 
 
 def _check_auth(rows: list[tuple[str, str, str, list[str]]]) -> None:
-    try:
-        env = load_env_config()
-        dotenv = load_dotenv_config()
-        ok = any(
+    env = load_env_config()
+    dotenv = load_dotenv_config()
+    ok = any(
+        (
+            env.get("runner", {}).get("oauth_token"),
+            dotenv.get("runner", {}).get("oauth_token"),
+            env.get("runner", {}).get("api_key"),
+            dotenv.get("runner", {}).get("api_key"),
+        )
+    )
+    if ok:
+        rows.append(("✓", "auth", "credentials found", []))
+    else:
+        rows.append(
             (
-                env.get("runner", {}).get("oauth_token"),
-                dotenv.get("runner", {}).get("oauth_token"),
-                env.get("runner", {}).get("api_key"),
-                dotenv.get("runner", {}).get("api_key"),
+                "✗",
+                "auth",
+                "no credentials",
+                ["set CLAUDE_CODE_OAUTH_TOKEN", "or set ANTHROPIC_API_KEY"],
             )
         )
-        if ok:
-            rows.append(("✓", "auth", "credentials found", []))
-        else:
-            rows.append(
-                (
-                    "✗",
-                    "auth",
-                    "no credentials",
-                    ["set CLAUDE_CODE_OAUTH_TOKEN", "or set ANTHROPIC_API_KEY"],
-                )
-            )
-    except Exception:
-        pass
 
 
 async def run_doctor(console: Console, args: Any) -> int:

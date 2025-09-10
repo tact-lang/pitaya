@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import subprocess
 from pathlib import Path
-from typing import Any
+import argparse
 
 from rich.console import Console
 
@@ -53,7 +53,7 @@ def _check_repo(console: Console, repo_path: Path, base_branch: str) -> bool:
     return True
 
 
-def perform_preflight_checks(console: Console, args: Any) -> bool:
+def perform_preflight_checks(console: Console, args: argparse.Namespace) -> bool:
     repo_path = Path(getattr(args, "repo"))
     if not _check_repo(console, repo_path, getattr(args, "base_branch", "main")):
         return False
@@ -67,14 +67,14 @@ def perform_preflight_checks(console: Console, args: Any) -> bool:
         if dirty.returncode == 0 and dirty.stdout.strip():
             if getattr(args, "require_clean_wt", False):
                 console.print(
-                    "[red]Working tree has uncommitted changes. Use --require-clean-wt=false to bypass.[/red]"
+                    "[red]Working tree has uncommitted changes. Use --require-clean-wt to enforce cleanliness.[/red]"
                 )
                 return False
-            else:
-                console.print(
-                    "[yellow]Warning: Working tree has uncommitted changes.[/yellow]"
-                )
-    except Exception:
-        pass
+            console.print(
+                "[yellow]Warning: Working tree has uncommitted changes.[/yellow]"
+            )
+    except (subprocess.SubprocessError, OSError):
+        # Non-fatal; orchestrator will surface more specific errors later
+        return True
     # Docker image access check is non-blocking; leave to orchestrator
     return True

@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+import argparse
 
 from rich.console import Console
 from rich.table import Table
@@ -20,11 +20,11 @@ def _load_json(path: Path) -> dict | None:
     try:
         with open(path, "r", encoding="utf-8") as f:
             return json.load(f)
-    except Exception:
+    except (OSError, json.JSONDecodeError):
         return None
 
 
-async def run_list_runs(console: Console, args: Any) -> int:
+async def run_list_runs(console: Console, args: argparse.Namespace) -> int:
     state_dir: Path = args.state_dir
     if not state_dir.exists():
         console.print("[yellow]No runs found[/yellow]")
@@ -141,7 +141,7 @@ def _render_instances(console: Console, data: dict) -> None:
     console.print(inst_tree)
 
 
-async def run_show_run(console: Console, args: Any) -> int:
+async def run_show_run(console: Console, args: argparse.Namespace) -> int:
     run_id: str = args.show_run
     state_dir: Path = args.state_dir / run_id
     if not state_dir.exists():

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from typing import Any, Dict
+import argparse
 
 from rich.console import Console
 
@@ -15,8 +16,8 @@ __all__ = ["run_tui"]
 
 
 async def _start_orchestrator(
-    orch: Orchestrator, args, run_id: str, cfg: Dict[str, Any]
-):
+    orch: Orchestrator, args: argparse.Namespace, run_id: str, cfg: Dict[str, Any]
+) -> Any:
     if getattr(args, "resume", None):
         return await orch.resume_run(run_id)
     strat_cfg = get_strategy_config(args, cfg)
@@ -35,22 +36,23 @@ def _display(console: Console, cfg: Dict[str, Any]) -> TUIDisplay:
     try:
         rr_ms = int(cfg.get("tui", {}).get("refresh_rate_ms", 100))
         rr = max(0.01, rr_ms / 1000.0)
-    except Exception:
+    except (TypeError, ValueError, AttributeError):
         rr = 0.1
     return TUIDisplay(console=console, refresh_rate=rr, state_poll_interval=3.0)
 
 
 async def run_tui(
-    console: Console, orch: Orchestrator, args, cfg: Dict[str, Any], run_id: str
+    console: Console,
+    orch: Orchestrator,
+    args: argparse.Namespace,
+    cfg: Dict[str, Any],
+    run_id: str,
 ) -> int:
     display = _display(console, cfg)
     # Apply CLI display flags to TUI to match previous behavior
-    try:
-        if getattr(args, "display", None) and args.display != "auto":
-            display.set_forced_display_mode(args.display)
-        display.set_ids_full(getattr(args, "show_ids", "short") == "full")
-    except Exception:
-        pass
+    if getattr(args, "display", None) and args.display != "auto":
+        display.set_forced_display_mode(args.display)
+    display.set_ids_full(getattr(args, "show_ids", "short") == "full")
     events_file = args.logs_dir / run_id / "events.jsonl"
     events_file.parent.mkdir(parents=True, exist_ok=True)
 
@@ -60,30 +62,19 @@ async def run_tui(
     )
 
     # Wait for orchestrator to finish
-    try:
-        results = await orch_task
-    except Exception:
-        # Stop TUI if orchestrator crashed
-        await display.stop()
-        return 1
+    results = await orch_task
 
     # Stop TUI cleanly now that orchestration is complete
     await display.stop()
     try:
         await tui_task
-    except Exception:
+    except asyncio.CancelledError:
         pass
 
     # Print a final summary to console for visibility after the TUI closes
-    try:
-        from .results_display import display_detailed_results
+    from .results_display import display_detailed_results
 
-        state = orch.get_current_state() if hasattr(orch, "get_current_state") else None
-        rid = getattr(state, "run_id", run_id)
-        display_detailed_results(console, results, rid, state)
-    except Exception:
-        pass
-    try:
-        return 3 if any((not r.success) for r in results) else 0
-    except Exception:
-        return 0
+    state = orch.get_current_state() if hasattr(orch, "get_current_state") else None
+    rid = getattr(state, "run_id", run_id)
+    display_detailed_results(console, results, rid, state)
+    return 3 if any((not getattr(r, "success", False)) for r in results) else 0

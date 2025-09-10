@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
-from typing import Any, Dict
+import argparse
+from typing import Any, Dict, Callable
+from functools import partial
 
 from rich.console import Console
 
@@ -14,22 +16,15 @@ from .results_display import display_detailed_results
 __all__ = ["run_headless"]
 
 
-def _subscribe_streaming(console: Console, orch: Orchestrator, args) -> None:
+def _make_glyph(no_emoji: bool) -> Callable[[str], str]:
+    if no_emoji:
+        return lambda _n: ""
+    table = {"started": " ▶", "completed": " ✅", "failed": " ❌", "interrupted": " ⏸"}
+    return lambda n: table.get(n, "")
+
+
+def _make_prefix(show_full: bool) -> Callable[[dict], str]:
     import hashlib
-
-    no_emoji = bool(getattr(args, "no_emoji", False))
-    show_full = getattr(args, "show_ids", "short") == "full"
-    verbose = bool(getattr(args, "verbose", False))
-
-    def _glyph(name: str) -> str:
-        if no_emoji:
-            return ""
-        return {
-            "started": " ▶",
-            "completed": " ✅",
-            "failed": " ❌",
-            "interrupted": " ⏸",
-        }.get(name, "")
 
     def _prefix(ev: dict) -> str:
         sid = ev.get("strategy_execution_id") or ev.get("data", {}).get(
@@ -47,65 +42,104 @@ def _subscribe_streaming(console: Console, orch: Orchestrator, args) -> None:
         inst = iid if show_full else (iid[:5] if iid else "?????")
         return f"[k{k8}][inst-{inst}] "
 
-    def emit(ev: dict) -> None:
-        et = ev.get("type", "")
-        data = ev.get("data", {})
-        pre = _prefix(ev)
-        if et == "task.scheduled":
-            if verbose:
-                console.print(f"{pre}scheduled{_glyph('started')}")
-            return
-        if et == "task.started":
-            model = data.get("model")
-            base = data.get("base_branch")
-            line = f"{pre}started{_glyph('started')}"
-            if model:
-                line += f" model={model}"
-            if base:
-                line += f" base={base}"
-            console.print(line)
-        elif et == "task.progress":
-            if verbose:
-                activity = data.get("activity") or data.get("tool") or ev.get("type")
-                console.print(f"{pre}{activity}")
-        elif et == "task.completed":
-            dur = data.get("metrics", {}).get("duration_seconds") or data.get(
-                "duration_seconds"
-            )
-            cost = data.get("metrics", {}).get("total_cost")
-            toks = data.get("metrics", {}).get("total_tokens")
-            branch = (data.get("artifact") or {}).get("branch_final") or (
-                data.get("artifact") or {}
-            ).get("branch_planned")
-            parts = [f"{pre}completed{_glyph('completed')}"]
-            if dur is not None:
-                try:
-                    parts.append(f"time={float(dur):.1f}s")
-                except Exception:
-                    pass
-            if cost is not None:
-                try:
-                    parts.append(f"cost=${float(cost):.2f}")
-                except Exception:
-                    pass
-            if toks is not None:
-                parts.append(f"tok={toks}")
-            if branch:
-                parts.append(f"branch={branch}")
-            console.print(" ".join(parts))
-        elif et == "task.failed":
-            etype = data.get("error_type") or "unknown"
-            msg = (
-                (data.get("message") or data.get("error") or "")
-                .strip()
-                .replace("\n", " ")
-            )
-            line = f"{pre}failed{_glyph('failed')} type={etype}"
-            if msg:
-                line += f' message="{msg[:200]}"'
-            console.print(line)
+    return _prefix
 
-    types = [
+
+def _handle_scheduled(
+    console: Console,
+    prefix: Callable[[dict], str],
+    glyph: Callable[[str], str],
+    verbose: bool,
+    ev: dict,
+) -> None:
+    if verbose:
+        console.print(f"{prefix(ev)}scheduled{glyph('started')}")
+
+
+def _handle_started(
+    console: Console,
+    prefix: Callable[[dict], str],
+    glyph: Callable[[str], str],
+    ev: dict,
+) -> None:
+    data = ev.get("data", {})
+    model = data.get("model")
+    base = data.get("base_branch")
+    parts = [f"{prefix(ev)}started{glyph('started')}"]
+    if model:
+        parts.append(f"model={model}")
+    if base:
+        parts.append(f"base={base}")
+    console.print(" ".join(parts))
+
+
+def _handle_progress(console: Console, prefix: Callable[[dict], str], ev: dict) -> None:
+    data = ev.get("data", {})
+    activity = data.get("activity") or data.get("tool") or ev.get("type")
+    console.print(f"{prefix(ev)}{activity}")
+
+
+def _handle_completed(
+    console: Console,
+    prefix: Callable[[dict], str],
+    glyph: Callable[[str], str],
+    ev: dict,
+) -> None:
+    data = ev.get("data", {})
+    metrics = data.get("metrics", {})
+    dur = metrics.get("duration_seconds") or data.get("duration_seconds")
+    cost = metrics.get("total_cost")
+    toks = metrics.get("total_tokens")
+    artifact = data.get("artifact") or {}
+    branch = artifact.get("branch_final") or artifact.get("branch_planned")
+    parts = [f"{prefix(ev)}completed{glyph('completed')}"]
+    try:
+        if dur is not None:
+            parts.append(f"time={float(dur):.1f}s")
+    except (TypeError, ValueError):
+        pass
+    try:
+        if cost is not None:
+            parts.append(f"cost=${float(cost):.2f}")
+    except (TypeError, ValueError):
+        pass
+    if toks is not None:
+        parts.append(f"tok={toks}")
+    if branch:
+        parts.append(f"branch={branch}")
+    console.print(" ".join(parts))
+
+
+def _handle_failed(
+    console: Console,
+    prefix: Callable[[dict], str],
+    glyph: Callable[[str], str],
+    ev: dict,
+) -> None:
+    data = ev.get("data", {})
+    etype = data.get("error_type") or "unknown"
+    msg = (data.get("message") or data.get("error") or "").strip().replace("\n", " ")
+    line = f"{prefix(ev)}failed{glyph('failed')} type={etype}"
+    if msg:
+        line += f' message="{msg[:200]}"'
+    console.print(line)
+
+
+def _subscribe_streaming(
+    console: Console, orch: Orchestrator, args: argparse.Namespace
+) -> None:
+    glyph = _make_glyph(bool(getattr(args, "no_emoji", False)))
+    prefix = _make_prefix(getattr(args, "show_ids", "short") == "full")
+    verbose = bool(getattr(args, "verbose", False))
+
+    handlers: dict[str, Callable[[dict], None]] = {
+        "task.started": partial(_handle_started, console, prefix, glyph),
+        "task.progress": partial(_handle_progress, console, prefix),
+        "task.completed": partial(_handle_completed, console, prefix, glyph),
+        "task.failed": partial(_handle_failed, console, prefix, glyph),
+        "task.scheduled": partial(_handle_scheduled, console, prefix, glyph, verbose),
+    }
+    event_types = [
         "task.started",
         "task.completed",
         "task.failed",
@@ -113,9 +147,9 @@ def _subscribe_streaming(console: Console, orch: Orchestrator, args) -> None:
         "strategy.completed",
     ]
     if verbose:
-        types.extend(["task.scheduled", "task.progress"])
-    for t in types:
-        orch.subscribe(t, emit)
+        event_types.extend(["task.scheduled", "task.progress"])
+    for t in event_types:
+        orch.subscribe(t, handlers.get(t, lambda _e: None))
 
 
 def _subscribe_json(orch: Orchestrator) -> None:
@@ -135,7 +169,12 @@ def _subscribe_json(orch: Orchestrator) -> None:
         orch.subscribe(t, emit)
 
 
-async def _execute(orch: Orchestrator, args, full_config: Dict[str, Any], run_id: str):
+async def _execute(
+    orch: Orchestrator,
+    args: argparse.Namespace,
+    full_config: Dict[str, Any],
+    run_id: str,
+):
     if getattr(args, "resume", None):
         return await orch.resume_run(run_id)
     cfg = get_strategy_config(args, full_config)
@@ -151,14 +190,16 @@ async def _execute(orch: Orchestrator, args, full_config: Dict[str, Any], run_id
 
 
 def _exit_code(results) -> int:
-    try:
-        return 3 if any((not r.success) for r in results) else 0
-    except Exception:
-        return 0
+    failed = [getattr(r, "success", False) for r in results]
+    return 3 if any(not ok for ok in failed) else 0
 
 
 async def run_headless(
-    console: Console, orch: Orchestrator, args, full_config: Dict[str, Any], run_id: str
+    console: Console,
+    orch: Orchestrator,
+    args: argparse.Namespace,
+    full_config: Dict[str, Any],
+    run_id: str,
 ) -> int:
     mode = getattr(args, "output", "streaming")
     if mode == "streaming":
@@ -169,11 +210,9 @@ async def run_headless(
 
     results = await _execute(orch, args, full_config, run_id)
     if mode != "quiet":
-        # Try to get state (best-effort)
-        state = getattr(
-            getattr(orch, "state_manager", None), "get_current_state", lambda: None
-        )()
-        display_detailed_results(
-            console, results, state.run_id if state else run_id, state
-        )
+        state = None
+        if hasattr(orch, "get_current_state"):
+            state = orch.get_current_state()  # type: ignore[attr-defined]
+        rid = getattr(state, "run_id", run_id)
+        display_detailed_results(console, results, rid, state)
     return _exit_code(results)
