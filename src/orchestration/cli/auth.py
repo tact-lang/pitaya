@@ -53,7 +53,9 @@ def _apply_mode(
     return (None, api_key)
 
 
-def get_auth_config(args: argparse.Namespace, config: Optional[Dict[str, Any]] = None) -> AuthConfig:
+def get_auth_config(
+    args: argparse.Namespace, config: Optional[Dict[str, Any]] = None
+) -> AuthConfig:
     """Derive AuthConfig from CLI/env/dotenv/config (plugin-aware).
 
     Raises:
@@ -79,9 +81,7 @@ def get_auth_config(args: argparse.Namespace, config: Optional[Dict[str, Any]] =
             raise ValueError(
                 "missing API key for OpenAI‑compatible provider; set OPENAI_API_KEY or use --api-key"
             )
-        raise ValueError(
-            "missing API key; set ANTHROPIC_API_KEY (or use --api-key)"
-        )
+        raise ValueError("missing API key; set ANTHROPIC_API_KEY (or use --api-key)")
     if mode == "subscription" and not oauth_token:
         raise ValueError(
             "missing OAuth token for subscription mode; set CLAUDE_CODE_OAUTH_TOKEN or use --oauth-token"
