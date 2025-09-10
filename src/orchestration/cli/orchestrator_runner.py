@@ -172,12 +172,13 @@ async def run(console: Console, args: argparse.Namespace) -> int:
         from ...utils.structured_logging import setup_structured_logging
         from ...utils.log_rotation import cleanup_old_logs, setup_log_rotation_task
 
-        logs_dir_cfg = (
-            full_config.get("orchestration", {}).get("logs_dir")
-            or getattr(args, "logs_dir", Path("./logs"))
+        logs_dir_cfg = full_config.get("orchestration", {}).get("logs_dir") or getattr(
+            args, "logs_dir", Path("./logs")
         )
         logs_dir = Path(logs_dir_cfg)
-        quiet = bool(getattr(args, "no_tui", False) and getattr(args, "output", "") == "quiet")
+        quiet = bool(
+            getattr(args, "no_tui", False) and getattr(args, "output", "") == "quiet"
+        )
         setup_structured_logging(
             logs_dir=logs_dir,
             run_id=run_id,
@@ -188,9 +189,15 @@ async def run(console: Console, args: argparse.Namespace) -> int:
         try:
             cleanup_old_logs(logs_dir)
             # Determine max size from config if present (bytes → MB)
-            max_bytes = (full_config.get("logging", {}) or {}).get("max_file_size", 10485760)
+            max_bytes = (full_config.get("logging", {}) or {}).get(
+                "max_file_size", 10485760
+            )
             try:
-                max_mb = int(max_bytes / (1024 * 1024)) if isinstance(max_bytes, (int, float)) else 100
+                max_mb = (
+                    int(max_bytes / (1024 * 1024))
+                    if isinstance(max_bytes, (int, float))
+                    else 100
+                )
             except (TypeError, ValueError):
                 max_mb = 100
             import asyncio as _asyncio
