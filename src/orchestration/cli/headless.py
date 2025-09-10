@@ -209,7 +209,8 @@ async def run_headless(
     # quiet: no subscriptions
 
     results = await _execute(orch, args, full_config, run_id)
-    if mode != "quiet":
+    # Emit human summary only in streaming mode; JSON mode must remain pure NDJSON
+    if mode == "streaming":
         state = None
         if hasattr(orch, "get_current_state"):
             state = orch.get_current_state()  # type: ignore[attr-defined]

@@ -209,11 +209,22 @@ async def run(console: Console, args: argparse.Namespace) -> int:
     except ImportError:
         # Logging helpers unavailable; skip structured logging setup
         pass
+
+    # (moved) custom redaction pattern application occurs after orchestrator creation
     if not validate_full_config(console, full_config, args):
         return 1
 
     auth_cfg = get_auth_config(args, full_config)
     orch = _build_orchestrator(full_config, auth_cfg, args)
+    # Apply custom redaction patterns from config to event bus (on creation during run)
+    try:
+        redaction = (full_config.get("logging", {}) or {}).get("redaction", {}) or {}
+        patterns = redaction.get("custom_patterns") or []
+        if patterns and hasattr(orch, "set_pending_redaction_patterns"):
+            orch.set_pending_redaction_patterns([str(p) for p in patterns])
+    except Exception:
+        # Non-fatal: continue without custom patterns
+        pass
     await orch.initialize()
 
     try:
