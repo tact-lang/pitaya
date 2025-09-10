@@ -511,6 +511,14 @@ class Orchestrator:
                 self.event_bus.close()
             self.event_bus.persist_path = event_log_path
             self.event_bus._open_persist_file()
+            # Ensure pending patterns still get applied when bus pre-existed
+            try:
+                if self._pending_redaction_patterns:
+                    self.event_bus.set_custom_redaction_patterns(
+                        list(self._pending_redaction_patterns)
+                    )
+            except Exception:
+                pass
 
         # Set event bus on state manager
         self.state_manager.event_bus = self.event_bus
@@ -1967,10 +1975,24 @@ class Orchestrator:
             self.event_bus = EventBus(
                 max_events=self.event_buffer_size, persist_path=event_log_path
             )
+            try:
+                if self._pending_redaction_patterns:
+                    self.event_bus.set_custom_redaction_patterns(
+                        list(self._pending_redaction_patterns)
+                    )
+            except Exception:
+                pass
         else:
             # Repoint persist path to this run
             self.event_bus.persist_path = event_log_path
             self.event_bus._open_persist_file()
+            try:
+                if self._pending_redaction_patterns:
+                    self.event_bus.set_custom_redaction_patterns(
+                        list(self._pending_redaction_patterns)
+                    )
+            except Exception:
+                pass
         self.state_manager.event_bus = self.event_bus
 
         saved_state = await self.state_manager.load_and_recover_state(run_id)
