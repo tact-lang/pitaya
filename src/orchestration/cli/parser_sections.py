@@ -116,10 +116,12 @@ def add_display_args(parser: argparse.ArgumentParser) -> None:
         "--output",
         choices=["streaming", "json", "quiet"],
         default="streaming",
-        help="Headless output format",
+        help="Headless output format (json emits NDJSON only)",
     )
     g.add_argument(
-        "--json", action="store_true", help="Shortcut for --no-tui --output json"
+        "--json",
+        action="store_true",
+        help="Shortcut for --no-tui --output json (NDJSON only)",
     )
     g.add_argument("--no-emoji", action="store_true", help="Disable emoji in output")
     g.add_argument(

@@ -41,7 +41,7 @@ def _epilog() -> str:
         '  pitaya "task" --strategy ./examples/propose_refine.py\n\n'
         "  # Headless modes\n"
         '  pitaya "task" --no-tui --output streaming --verbose\n'
-        '  pitaya "task" --json\n\n'
+        '  pitaya "task" --json  # emits NDJSON only (no human summary)\n\n'
         "  # Run management\n"
         "  pitaya --list-runs\n"
         "  pitaya --show-run run_20250114_123456\n"
