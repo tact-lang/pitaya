@@ -60,6 +60,14 @@ pitaya "Write the funniest and most original joke possible" \
   --base-url https://openrouter.ai/api/v1
 ```
 
+### Validation & errors
+
+- Pitaya validates credentials early:
+  - `--mode api` requires an API key.
+  - `--mode subscription` requires an OAuth token.
+  - Auto mode: at least one of the above must be present (per plugin).
+- Missing credentials produce a friendly CLI error and exit code 2.
+
 ## CLI Passthrough
 
 Forward raw flags to the underlying agent CLI for advanced use.

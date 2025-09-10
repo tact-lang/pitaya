@@ -118,6 +118,8 @@ class Orchestrator:
         self.container_limits = container_limits or ContainerLimits()
         self.retry_config = retry_config or RetryConfig()
         self.auth_config = auth_config
+        # Custom redaction patterns requested by caller; applied when event bus is created
+        self._pending_redaction_patterns: Optional[List[str]] = None
         self.snapshot_interval = snapshot_interval
         self.event_buffer_size = event_buffer_size
         self.runner_timeout_seconds = max(1, int(runner_timeout_seconds))
@@ -266,6 +268,14 @@ class Orchestrator:
             f"max_parallel_startup={self.max_parallel_startup} and {num_executors} executor tasks"
         )
         self._initialized = True
+
+    def set_pending_redaction_patterns(self, patterns: Optional[List[str]]) -> None:
+        """Set regex patterns to redact; applied on next run when event bus is created."""
+        try:
+            # Store a copy to avoid external mutation
+            self._pending_redaction_patterns = list(patterns or [])
+        except Exception:
+            self._pending_redaction_patterns = []
 
     # Server extension support removed
 
@@ -485,6 +495,14 @@ class Orchestrator:
                 persist_path=event_log_path,
                 run_id=run_id,
             )
+            # Apply any pending custom redaction patterns before emitting events
+            try:
+                if self._pending_redaction_patterns:
+                    self.event_bus.set_custom_redaction_patterns(
+                        list(self._pending_redaction_patterns)
+                    )
+            except Exception:
+                pass
         else:
             # If event bus exists, update persistence path
             event_log_path = self.logs_dir / run_id / "events.jsonl"
@@ -493,6 +511,14 @@ class Orchestrator:
                 self.event_bus.close()
             self.event_bus.persist_path = event_log_path
             self.event_bus._open_persist_file()
+            # Ensure pending patterns still get applied when bus pre-existed
+            try:
+                if self._pending_redaction_patterns:
+                    self.event_bus.set_custom_redaction_patterns(
+                        list(self._pending_redaction_patterns)
+                    )
+            except Exception:
+                pass
 
         # Set event bus on state manager
         self.state_manager.event_bus = self.event_bus
@@ -1949,10 +1975,24 @@ class Orchestrator:
             self.event_bus = EventBus(
                 max_events=self.event_buffer_size, persist_path=event_log_path
             )
+            try:
+                if self._pending_redaction_patterns:
+                    self.event_bus.set_custom_redaction_patterns(
+                        list(self._pending_redaction_patterns)
+                    )
+            except Exception:
+                pass
         else:
             # Repoint persist path to this run
             self.event_bus.persist_path = event_log_path
             self.event_bus._open_persist_file()
+            try:
+                if self._pending_redaction_patterns:
+                    self.event_bus.set_custom_redaction_patterns(
+                        list(self._pending_redaction_patterns)
+                    )
+            except Exception:
+                pass
         self.state_manager.event_bus = self.event_bus
 
         saved_state = await self.state_manager.load_and_recover_state(run_id)

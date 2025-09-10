@@ -47,7 +47,7 @@ class OrchestratorTUI:
                 "  pitaya-tui --run-id run_20250114_123456\n\n"
                 "  # Stream as text from a file\n"
                 "  pitaya-tui --events-file logs/run_20250114_123456/events.jsonl --output streaming\n\n"
-                "  # Emit JSON events (no TUI)\n"
+                "  # Emit JSON events (NDJSON, no TUI)\n"
                 "  pitaya-tui --events-file events.jsonl --output json\n"
             ),
         )
@@ -73,7 +73,7 @@ class OrchestratorTUI:
             "--output",
             choices=["tui", "streaming", "json", "quiet"],
             default="tui",
-            help="Output mode (default: tui)",
+            help="Output mode (default: tui). JSON emits NDJSON only.",
         )
         g_display.add_argument(
             "--display-mode",
