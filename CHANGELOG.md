@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Persist per-instance metadata to results and logs artifacts. ([#79](https://github.com/tact-lang/pitaya/pull/79))
+
 ## [0.2.0] - 2025-08-29
 
 ### Added
