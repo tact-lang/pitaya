@@ -825,6 +825,16 @@ class Orchestrator:
             if state:
                 state.completed_at = datetime.now(timezone.utc)
                 await self.state_manager.save_snapshot()
+                # Finalize results once more to ensure completed_at/status are persisted
+                try:
+                    # Collect latest results from state
+                    latest_results: List[InstanceResult] = []
+                    for _iid, _info in (state.instances or {}).items():
+                        if getattr(_info, "result", None):
+                            latest_results.append(_info.result)  # type: ignore[attr-defined]
+                    await self._save_results(run_id, latest_results)
+                except Exception:
+                    pass
 
             self.event_bus.emit(
                 "run.completed",
@@ -2576,6 +2586,9 @@ class Orchestrator:
             # Create results directory
             results_dir = Path("./results") / run_id
             results_dir.mkdir(parents=True, exist_ok=True)
+            # Ensure per-run logs dir exists
+            run_logs_dir = self.logs_dir / run_id
+            run_logs_dir.mkdir(parents=True, exist_ok=True)
 
             # Get current state
             state = self.state_manager.current_state
@@ -2611,16 +2624,51 @@ class Orchestrator:
                 completed_instances = state.completed_instances
                 failed_instances = state.failed_instances
 
+            # Compute a robust completed_at for the run (fallback to latest instance completion)
+            from datetime import datetime
+
+            def _to_dt(v: Any) -> Any:
+                if v is None:
+                    return None
+                if isinstance(v, datetime):
+                    return v
+                if isinstance(v, str):
+                    try:
+                        # Support trailing 'Z' and timezone-aware strings
+                        s = v.replace("Z", "+00:00")
+                        return datetime.fromisoformat(s)
+                    except Exception:
+                        return None
+                return None
+
+            def _latest_completed_at() -> Any:
+                try:
+                    times = [
+                        _to_dt(getattr(r, "completed_at", None))
+                        for r in results
+                        if getattr(r, "completed_at", None)
+                    ]
+                    times = [t for t in times if t is not None]
+                    return max(times) if times else None
+                except Exception:
+                    return None
+
+            computed_completed_at = _to_dt(state.completed_at) or _latest_completed_at()
+
             summary_data = {
                 "run_id": run_id,
                 "status": ("interrupted" if any_interrupted else "completed"),
                 "started_at": state.started_at.isoformat(),
                 "completed_at": (
-                    state.completed_at.isoformat() if state.completed_at else None
+                    computed_completed_at.isoformat() if computed_completed_at else None
                 ),
                 "duration_seconds": (
-                    (state.completed_at - state.started_at).total_seconds()
-                    if state.completed_at
+                    (
+                        (computed_completed_at - state.started_at).total_seconds()
+                        if isinstance(state.started_at, datetime)
+                        else None
+                    )
+                    if computed_completed_at
                     else None
                 ),
                 "prompt": state.prompt,
@@ -2633,6 +2681,72 @@ class Orchestrator:
                 "total_tokens": state.total_tokens,
                 "strategies": {},
                 "results": [],
+            }
+
+            # Assemble run metadata (superset of summary: includes runtime/config info)
+            try:
+                from . import (
+                    __version__ as pitaya_version,
+                )  # local import to avoid cycles
+            except Exception:
+                pitaya_version = "unknown"
+
+            meta: Dict[str, Any] = {
+                "run_id": run_id,
+                "pitaya_version": pitaya_version,
+                "started_at": summary_data["started_at"],
+                "completed_at": summary_data["completed_at"],
+                "status": summary_data["status"],
+                "prompt": state.prompt,
+                "repo_path": str(state.repo_path),
+                "base_branch": state.base_branch,
+                "orchestrator": {
+                    "max_parallel_instances": self.max_parallel_instances,
+                    "max_parallel_startup": self.max_parallel_startup,
+                    "branch_namespace": getattr(
+                        self, "branch_namespace", "hierarchical"
+                    ),
+                    "randomize_queue_order": getattr(
+                        self, "randomize_queue_order", False
+                    ),
+                    "snapshot_interval": self.snapshot_interval,
+                    "event_buffer_size": self.event_buffer_size,
+                },
+                "runner": {
+                    "timeout_seconds": self.runner_timeout_seconds,
+                    "default_network_egress": self.default_network_egress,
+                    "container_limits": {
+                        "cpu_count": getattr(self.container_limits, "cpu_count", None),
+                        "memory_gb": getattr(self.container_limits, "memory_gb", None),
+                    },
+                    "force_commit": getattr(self, "force_commit", False),
+                },
+                "defaults": {
+                    "plugin_name": getattr(self, "default_plugin_name", None),
+                    "model_alias": getattr(self, "default_model_alias", None),
+                    "docker_image": getattr(self, "default_docker_image", None),
+                    "agent_cli_args": getattr(self, "default_agent_cli_args", None),
+                },
+                "strategies": {
+                    sid: {
+                        "name": sinfo.strategy_name,
+                        "config": sinfo.config,
+                        "state": sinfo.state,
+                    }
+                    for sid, sinfo in state.strategies.items()
+                },
+                "paths": {
+                    "logs_dir": str(run_logs_dir),
+                    "results_dir": str(results_dir),
+                    "events_file": str(run_logs_dir / "events.jsonl"),
+                },
+                "metrics": {
+                    "total_cost": state.total_cost,
+                    "total_tokens": state.total_tokens,
+                    "completed_instances": completed_instances,
+                    "failed_instances": failed_instances,
+                    "total_instances": total_instances,
+                },
             }
 
             # Add strategy information
@@ -2655,18 +2769,56 @@ class Orchestrator:
             # Add results information
             branches = []
 
-            # Build a reverse lookup from result to instance_id
-            result_to_instance = {}
+            # Build reverse lookups from state to resolve instance_id robustly
+            result_to_instance: Dict[int, str] = {}
+            by_branch_session: Dict[tuple, str] = {}
+            by_container: Dict[str, str] = {}
+            by_started: Dict[str, str] = {}
             for instance_id, info in state.instances.items():
                 if info.result:
                     result_to_instance[id(info.result)] = instance_id
+                    bn = getattr(info.result, "branch_name", None)
+                    sid = getattr(info.result, "session_id", None)
+                    if bn or sid:
+                        by_branch_session[(bn, sid)] = instance_id
+                    cn = getattr(info, "container_name", None)
+                    if cn:
+                        by_container[cn] = instance_id
+                    st = None
+                    try:
+                        st = getattr(info.result, "started_at", None)
+                    except Exception:
+                        pass
+                    if st:
+                        by_started[str(st)] = instance_id
 
+            def _resolve_instance_id(res) -> str:
+                iid = result_to_instance.get(id(res))
+                if iid:
+                    return iid
+                key = (
+                    getattr(res, "branch_name", None),
+                    getattr(res, "session_id", None),
+                )
+                iid = by_branch_session.get(key)
+                if iid:
+                    return iid
+                cn = getattr(res, "container_name", None)
+                if cn and cn in by_container:
+                    return by_container[cn]
+                st = getattr(res, "started_at", None)
+                if st and str(st) in by_started:
+                    return by_started[str(st)]
+                return "unknown"
+
+            unknown_counter = 0
+            instance_file_names: list[str] = []
             for result in results:
                 # Extract commit statistics
                 commit_stats = result.commit_statistics or {}
 
                 # Get instance_id from state mapping
-                instance_id = result_to_instance.get(id(result), "unknown")
+                instance_id = _resolve_instance_id(result)
 
                 result_data = {
                     "instance_id": instance_id,
@@ -2705,6 +2857,8 @@ class Orchestrator:
                     "container_name": result.container_name,
                     "started_at": result.started_at,
                     "completed_at": result.completed_at,
+                    # Per-instance metadata from strategies (opaque to orchestrator)
+                    "metadata": getattr(result, "metadata", None) or {},
                 }
                 summary_data["results"].append(result_data)
 
@@ -2736,7 +2890,7 @@ class Orchestrator:
                     commit_stats = result.commit_statistics or {}
 
                     # Get instance_id from state mapping
-                    instance_id = result_to_instance.get(id(result), "unknown")
+                    instance_id = _resolve_instance_id(result)
 
                     row = [
                         (
@@ -2859,6 +3013,11 @@ class Orchestrator:
                                     if not isinstance(r, dict)
                                     else bool(r.get("success", False))
                                 ),
+                                "metadata": (
+                                    getattr(r, "metadata", None)
+                                    if not isinstance(r, dict)
+                                    else r.get("metadata")
+                                ),
                             }
                             for r in (strat_info.results or [])
                         ],
@@ -2866,6 +3025,80 @@ class Orchestrator:
 
                     with open(strategy_file, "w") as f:
                         json.dump(strategy_data, f, indent=2)
+
+            # Persist per-instance metadata files to both results and logs
+            try:
+                inst_dir_results = results_dir / "instances"
+                inst_dir_logs = run_logs_dir / "instances"
+                inst_dir_results.mkdir(exist_ok=True)
+                inst_dir_logs.mkdir(exist_ok=True)
+                for idx, result in enumerate(results, 1):
+                    iid = _resolve_instance_id(result)
+                    inst_meta_raw = {
+                        "instance_id": iid,
+                        "status": result.status,
+                        "success": result.success,
+                        "branch_name": result.branch_name,
+                        "metadata": getattr(result, "metadata", None) or {},
+                        "duration_seconds": result.duration_seconds,
+                        "metrics": result.metrics or {},
+                        "error": result.error,
+                        "container_name": result.container_name,
+                        "started_at": result.started_at,
+                        "completed_at": result.completed_at,
+                    }
+                    # Best-effort redaction via event bus sanitizer if available
+                    try:
+                        if self.event_bus and hasattr(self.event_bus, "_sanitize"):
+                            inst_meta = self.event_bus._sanitize(inst_meta_raw)  # type: ignore[attr-defined]
+                            # Preserve non-sensitive numeric token counts that may be over-redacted
+                            try:
+                                keep = (
+                                    "total_tokens",
+                                    "input_tokens",
+                                    "output_tokens",
+                                    "turn_count",
+                                )
+                                raw_metrics = inst_meta_raw.get("metrics", {}) or {}
+                                if isinstance(inst_meta.get("metrics"), dict):
+                                    for k in keep:
+                                        if k in raw_metrics:
+                                            inst_meta["metrics"][k] = raw_metrics.get(k)
+                            except Exception:
+                                pass
+                        else:
+                            inst_meta = inst_meta_raw
+                    except Exception:
+                        inst_meta = inst_meta_raw
+
+                    base_name = (iid or "unknown").replace("/", "_")
+                    if base_name == "unknown":
+                        unknown_counter += 1
+                        base_name = f"idx_{unknown_counter:03d}"
+                    instance_file_names.append(f"{base_name}.json")
+                    with open(
+                        inst_dir_results / f"{base_name}.json", "w", encoding="utf-8"
+                    ) as f:
+                        json.dump(inst_meta, f, indent=2, default=str)
+                    with open(
+                        inst_dir_logs / f"{base_name}.json", "w", encoding="utf-8"
+                    ) as f:
+                        json.dump(inst_meta, f, indent=2, default=str)
+            except Exception as e:
+                logger.debug(f"Failed to persist per-instance metadata: {e}")
+
+            # Write metadata.json alongside summary to both results and logs (add instances index)
+            try:
+                meta_with_index = dict(meta)
+                meta_with_index["instances_dir"] = str(results_dir / "instances")
+                meta_with_index["instances"] = instance_file_names
+                mdj = json.dumps(meta_with_index, indent=2, default=str)
+                with open(results_dir / "metadata.json", "w", encoding="utf-8") as f:
+                    f.write(mdj)
+                with open(run_logs_dir / "metadata.json", "w", encoding="utf-8") as f:
+                    f.write(mdj)
+            except Exception as e:
+                logger.debug(f"Failed to write metadata.json: {e}")
 
             # Optional Markdown export (summary-focused)
             try:

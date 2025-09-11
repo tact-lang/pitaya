@@ -132,7 +132,7 @@ pitaya "Write the funniest and most original joke possible" --strategy iterative
 ## Where to Find Results
 
 - Logs: `logs/<run_id>/events.jsonl` and JSONL component logs (orchestration.jsonl, runner.jsonl, tui.jsonl, other.jsonl)
-- Results: `results/<run_id>/` (summary.json, branches.txt, metrics)
+- Results: `results/<run_id>/` (summary.json, metadata.json, branches.txt, metrics, instances/<id>.json)
 - Branches: `pitaya/<strategy>/<run_id>/k<short8>` (hierarchical namespace)
 
 List branches:

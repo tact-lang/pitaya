@@ -80,7 +80,7 @@ Most strategies leave these at defaults. To force an import even when there are 
 
 - State: `pitaya_state/` (can be changed with `--state-dir`)
 - Logs: `logs/<run_id>/` (change with `--logs-dir`)
-- Results: `results/<run_id>/` (summary.json, branches.txt, instance_metrics.csv)
+- Results: `results/<run_id>/` (summary.json, metadata.json, branches.txt, instance_metrics.csv, instances/<id>.json)
 
 Structured logs
 
