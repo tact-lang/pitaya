@@ -334,10 +334,20 @@ async def run(console: Console, args: argparse.Namespace) -> int:
                 def changed(name: str) -> bool:
                     return getattr(a, name, None) != getattr(defaults, name, None)
 
-                if changed("max_parallel") and getattr(a, "max_parallel", None) is not None:
-                    cfg.setdefault("orchestration", {})["max_parallel_instances"] = a.max_parallel
-                if changed("max_startup_parallel") and getattr(a, "max_startup_parallel", None) is not None:
-                    cfg.setdefault("orchestration", {})["max_parallel_startup"] = a.max_startup_parallel
+                if (
+                    changed("max_parallel")
+                    and getattr(a, "max_parallel", None) is not None
+                ):
+                    cfg.setdefault("orchestration", {})[
+                        "max_parallel_instances"
+                    ] = a.max_parallel
+                if (
+                    changed("max_startup_parallel")
+                    and getattr(a, "max_startup_parallel", None) is not None
+                ):
+                    cfg.setdefault("orchestration", {})[
+                        "max_parallel_startup"
+                    ] = a.max_startup_parallel
                 if changed("randomize_queue") and getattr(a, "randomize_queue", False):
                     cfg.setdefault("orchestration", {})["randomize_queue_order"] = True
                 if changed("timeout") and getattr(a, "timeout", None) is not None:
