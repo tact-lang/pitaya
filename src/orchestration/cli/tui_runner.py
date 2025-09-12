@@ -89,6 +89,11 @@ async def run_tui(
         if orch_task in done and orch_task.exception() is not None:
             exc = orch_task.exception()
             await display.stop()
+            # Ensure the TUI task is fully torn down to avoid pending-task warnings
+            try:
+                await tui_task
+            except Exception:
+                pass
             # Let outer runner show a friendly message too, but give a hint here
             console.print(f"[red]Run failed:[/red] {exc}")
             return 1
@@ -124,5 +129,9 @@ async def run_tui(
     except Exception as e:
         # Generic failure: stop TUI first, then surface the error
         await display.stop()
+        try:
+            await tui_task
+        except Exception:
+            pass
         console.print(f"[red]Run failed:[/red] {e}")
         return 1
