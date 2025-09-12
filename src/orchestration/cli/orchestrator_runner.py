@@ -373,6 +373,10 @@ async def run(console: Console, args: argparse.Namespace) -> int:
                         or ("r" + run_id[-4:])
                     )
 
+            # Important: re-validate after applying overrides so malformed values are caught early
+            if not validate_full_config(console, full_config, args):
+                return 1
+
         auth_cfg = get_auth_config(args, full_config)
         orch = _build_orchestrator(full_config, auth_cfg, args)
         try:
