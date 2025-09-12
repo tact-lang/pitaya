@@ -181,6 +181,17 @@ def add_maintenance_args(parser: argparse.ArgumentParser) -> None:
     g.add_argument("--resume", metavar="RUN_ID", help="Resume an interrupted run")
     g.add_argument("--list-runs", action="store_true", help="List previous runs")
     g.add_argument("--show-run", metavar="RUN_ID", help="Show run details")
+    g.add_argument(
+        "--override-config",
+        action="store_true",
+        help="Allow overrides to the saved run configuration on resume",
+    )
+    g.add_argument(
+        "--resume-key-policy",
+        choices=["strict", "suffix"],
+        default="strict",
+        help="When overriding config on resume: 'strict' enforces durable-key fidelity; 'suffix' appends a resume suffix to new task keys",
+    )
 
 
 def add_diag_args(parser: argparse.ArgumentParser) -> None:

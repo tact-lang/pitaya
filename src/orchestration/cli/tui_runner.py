@@ -120,12 +120,29 @@ async def run_tui(
             ):
                 return 3
         return 0
-    except KeyboardInterrupt:
-        # Stop the TUI before bubbling up to higher-level handler
+    except (KeyboardInterrupt, asyncio.CancelledError):
+        # Stop the TUI and ensure Live is torn down, then print hint and exit 2
         try:
             await display.stop()
-        finally:
-            raise
+            try:
+                await tui_task
+            except Exception:
+                pass
+        except Exception:
+            pass
+        # Print resume hint here (terminal restored), unless in JSON mode
+        try:
+            is_json = bool(
+                getattr(args, "json", False) or getattr(args, "output", "") == "json"
+            )
+            if not is_json and run_id:
+                console.print(
+                    "\n[yellow]Interrupted — shutting down gracefully[/yellow]"
+                )
+                console.print(f"[blue]Resume:[/blue] pitaya --resume {run_id}")
+        except Exception:
+            pass
+        return 2
     except Exception as e:
         # Generic failure: stop TUI first, then surface the error
         await display.stop()
