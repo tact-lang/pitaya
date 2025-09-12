@@ -317,7 +317,49 @@ async def run(console: Console, args: argparse.Namespace) -> int:
 
         # Apply resume overrides: safe by default; unsafe require --override-config
         if getattr(args, "resume", None):
-            overrides = build_cli_config(args)
+            # Only apply CLI flags that the user explicitly provided, not parser defaults.
+            # This prevents silently overwriting recovered config values (e.g., timeout)
+            # with default CLI values during resume.
+            def _explicit_cli_overrides(a: argparse.Namespace) -> Dict[str, Any]:
+                try:
+                    from ..cli_parser import create_parser  # type: ignore
+                except Exception:
+                    # Fallback: treat all as explicit (conservative)
+                    return build_cli_config(a)
+                parser = create_parser()
+                defaults = parser.parse_args([])
+
+                cfg: Dict[str, Any] = {}
+
+                def changed(name: str) -> bool:
+                    return getattr(a, name, None) != getattr(defaults, name, None)
+
+                if changed("max_parallel") and getattr(a, "max_parallel", None) is not None:
+                    cfg.setdefault("orchestration", {})["max_parallel_instances"] = a.max_parallel
+                if changed("max_startup_parallel") and getattr(a, "max_startup_parallel", None) is not None:
+                    cfg.setdefault("orchestration", {})["max_parallel_startup"] = a.max_startup_parallel
+                if changed("randomize_queue") and getattr(a, "randomize_queue", False):
+                    cfg.setdefault("orchestration", {})["randomize_queue_order"] = True
+                if changed("timeout") and getattr(a, "timeout", None) is not None:
+                    cfg.setdefault("runner", {})["timeout"] = a.timeout
+                if changed("force_commit") and getattr(a, "force_commit", False):
+                    cfg.setdefault("runner", {})["force_commit"] = True
+                if changed("docker_image") and getattr(a, "docker_image", None):
+                    cfg.setdefault("runner", {})["docker_image"] = a.docker_image
+                if changed("model") and getattr(a, "model", None):
+                    cfg["model"] = a.model
+                if changed("plugin") and getattr(a, "plugin", None):
+                    cfg["plugin_name"] = a.plugin
+                # Auth are explicit if present (defaults are None)
+                if getattr(a, "oauth_token", None) is not None:
+                    cfg.setdefault("runner", {})["oauth_token"] = a.oauth_token
+                if getattr(a, "api_key", None) is not None:
+                    cfg.setdefault("runner", {})["api_key"] = a.api_key
+                if getattr(a, "base_url", None) is not None:
+                    cfg.setdefault("runner", {})["base_url"] = a.base_url
+                return cfg
+
+            overrides = _explicit_cli_overrides(args)
             safe_paths = {
                 ("runner", "timeout"),
                 ("runner", "docker_image"),
