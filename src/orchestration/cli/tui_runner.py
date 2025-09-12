@@ -109,7 +109,10 @@ async def run_tui(
         display_detailed_results(console, results, rid, state)
         # Exit 3 only if any instance actually failed (ignore canceled)
         for r in results:
-            if not getattr(r, "success", False) and getattr(r, "status", "") != "canceled":
+            if (
+                not getattr(r, "success", False)
+                and getattr(r, "status", "") != "canceled"
+            ):
                 return 3
         return 0
     except KeyboardInterrupt:
