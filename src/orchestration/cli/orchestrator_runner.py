@@ -377,6 +377,20 @@ async def run(console: Console, args: argparse.Namespace) -> int:
             if not validate_full_config(console, full_config, args):
                 return 1
 
+        # If resuming, propagate recovered directories from config back to args so
+        # downstream components (e.g., TUI, diagnostics) read the correct paths.
+        try:
+            if getattr(args, "resume", None):
+                orch_cfg = full_config.get("orchestration", {}) or {}
+                ld = orch_cfg.get("logs_dir")
+                sd = orch_cfg.get("state_dir")
+                if ld:
+                    args.logs_dir = Path(ld)
+                if sd:
+                    args.state_dir = Path(sd)
+        except Exception:
+            pass
+
         auth_cfg = get_auth_config(args, full_config)
         orch = _build_orchestrator(full_config, auth_cfg, args)
         try:
