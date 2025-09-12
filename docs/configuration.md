@@ -88,6 +88,23 @@ Structured logs
 - Old log directories are cleaned up periodically; component files rotate by size.
 - Custom redaction patterns from `logging.redaction.custom_patterns` are applied to both logs and emitted events.
 
+## Effective config persistence and resume
+
+On a fresh run, Pitaya writes the fully merged configuration (CLI + env + .env + file + defaults):
+
+- Unredacted copy to `pitaya_state/<run_id>/config.json` (for fidelity on resume). The `pitaya_state/` directory is git‑ignored by default.
+- Redacted copy to `logs/<run_id>/config.json` (tokens/API keys masked) for auditability alongside logs.
+
+On `--resume <run_id>`, Pitaya loads the saved effective config by default. This preserves durable keys and behavior. CLI overrides on resume are applied as follows:
+
+- Safe overrides (applied by default): timeouts, Docker image, force_commit, parallelism settings, queue randomization, and auth secrets/base URL.
+- Unsafe overrides (require `--override-config`): `model`, `plugin_name`, and `runner.network_egress`.
+
+When unsafe overrides are applied, durable keys might change. To avoid collisions with previously scheduled tasks, you can choose a policy with `--resume-key-policy`:
+
+- `strict` (default): keep keys unchanged; if an override would change them, it is ignored.
+- `suffix`: append a short resume suffix to newly generated keys (e.g., `/r1a2b`).
+
 ## Tips
 
 - Prefer configuration for persistent team defaults; use CLI for ad‑hoc overrides.

@@ -173,6 +173,29 @@ pitaya --show-run run_20250114_123456   # show run details
 pitaya --resume run_20250114_123456     # resume an interrupted run
 ```
 
+### Resume overrides (advanced)
+
+By default, resume uses the saved effective configuration from the original run to preserve durable keys and behavior. You can override some values safely on resume (e.g., timeouts, parallelism, Docker image). Unsafe overrides (e.g., model, plugin, network egress) are ignored unless you opt in.
+
+```bash
+# Allow unsafe overrides on resume
+pitaya --resume <run_id> \
+  --override-config \
+  --model sonnet-extended \
+  --plugin claude-code \
+  --max-parallel 2
+
+# If you change model/plugin and want to avoid disturbing durable task keys,
+# you can append a suffix to newly scheduled keys on resume:
+pitaya --resume <run_id> \
+  --override-config \
+  --resume-key-policy suffix
+```
+
+Policies:
+- `strict` (default): keep durable keys identical; unsafe overrides are applied only if they won’t change keys. If they would, they are ignored and a warning is printed.
+- `suffix`: when unsafe overrides are applied, new tasks get a `/r<xxxx>` suffix to their durable keys to avoid collisions with prior work.
+
 ## Diagnostics & Utilities
 
 - Doctor (Docker, repo, disk, auth checks):

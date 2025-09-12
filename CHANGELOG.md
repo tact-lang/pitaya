@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- CLI flags: `--override-config` and `--resume-key-policy {strict|suffix}` to control how resume applies overrides and durable key behavior. ([#81](https://github.com/tact-lang/pitaya/pull/81))
+- Persist the effective run configuration to `pitaya_state/<run_id>/config.json` and a redacted copy to `logs/<run_id>/config.json` to improve resume fidelity. ([#81](https://github.com/tact-lang/pitaya/pull/81))
+
 ### Fixed
 
 - TUI: coordinated error handling and graceful teardown; surface friendly errors instead of plain crashes. ([#80](https://github.com/tact-lang/pitaya/pull/80))
