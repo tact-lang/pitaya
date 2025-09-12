@@ -55,15 +55,20 @@ class KeyConflictDifferentFingerprint(OrchestratorError):
 
 
 class TaskFailed(OrchestratorError):
-    """Raised by ctx.wait(handle) when a single task fails."""
+    """Raised by ctx.wait(handle) when a single task fails.
+
+    Carries the failed InstanceResult when available so strategies can surface
+    richer diagnostics (final_message, metrics, log_path).
+    """
 
     def __init__(
-        self, key: str, error_type: str = "unknown", message: str = ""
+        self, key: str, error_type: str = "unknown", message: str = "", *, result=None
     ) -> None:
         super().__init__(f"TaskFailed(key={key}, type={error_type}): {message}")
         self.key = key
         self.error_type = error_type
         self.message = message
+        self.result = result
 
 
 class AggregateTaskFailed(OrchestratorError):

@@ -547,6 +547,7 @@ class StrategyContext:
                     handle.key,
                     getattr(r, "error_type", "unknown") or "unknown",
                     getattr(r, "error", "") or "",
+                    result=r,
                 )
             except ImportError:
                 # Fallback to returning the result if exceptions module is unavailable

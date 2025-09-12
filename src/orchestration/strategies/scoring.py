@@ -105,13 +105,22 @@ class ScoringStrategy(Strategy):
         try:
             gen_result = await ctx.wait(gen_handle)
         except Exception as e:
-            from ...shared import InstanceResult as _IR
+            # Prefer rich result from TaskFailed (includes final_message/metrics/log_path)
+            try:
+                from ...exceptions import TaskFailed
 
-            err_type = getattr(e, "error_type", "unknown")
-            msg = getattr(e, "message", str(e))
-            gen_result = _IR(
-                success=False, error=msg, error_type=err_type, status="failed"
-            )
+                if isinstance(e, TaskFailed) and getattr(e, "result", None):
+                    gen_result = e.result  # type: ignore[assignment]
+                else:
+                    raise e
+            except Exception:
+                from ...shared import InstanceResult as _IR
+
+                err_type = getattr(e, "error_type", "unknown")
+                msg = getattr(e, "message", str(e))
+                gen_result = _IR(
+                    success=False, error=msg, error_type=err_type, status="failed"
+                )
 
         if not gen_result.success:
             return [gen_result]
