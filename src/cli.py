@@ -40,10 +40,10 @@ def main() -> None:
     args = parser.parse_args()
     console = Console()
 
-    try:
-        rc = asyncio.run(_dispatch(console, args))
-    except KeyboardInterrupt:
-        rc = 2
+    # Let downstream code handle KeyboardInterrupt and print helpful hints.
+    # If an interrupt somehow bubbles this far, allow it to terminate normally
+    # so the shell shows the standard ^C without swallowing prior output.
+    rc = asyncio.run(_dispatch(console, args))
     sys.exit(int(rc))
 
 

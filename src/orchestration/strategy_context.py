@@ -68,7 +68,15 @@ class StrategyContext:
 
     # Deterministic utilities per spec
     def key(self, *parts: Any) -> str:
-        return "/".join(str(p) for p in parts)
+        base = "/".join(str(p) for p in parts)
+        # Apply resume key suffix policy if set on orchestrator and we are in a resume scenario
+        try:
+            suffix = getattr(self._orchestrator, "resume_key_suffix", None)
+            if suffix:
+                return f"{base}/{suffix}"
+        except Exception:
+            pass
+        return base
 
     def now(self) -> float:
         return time.time()

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import asyncio
 import sys
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -158,17 +159,57 @@ async def run(console: Console, args: argparse.Namespace) -> int:
             console.print("  • check $DOCKER_HOST")
             console.print("  • run: docker info")
             return 1
+    except (KeyboardInterrupt, asyncio.CancelledError):
+        console.print("\n[yellow]Interrupted — shutting down gracefully[/yellow]")
+        try:
+            is_json = bool(
+                getattr(args, "json", False) or getattr(args, "output", "") == "json"
+            )
+            if not is_json and run_id:
+                console.print(f"[blue]Resume:[/blue] pitaya --resume {run_id}")
+        except Exception:
+            pass
+        return 2
     except ImportError:
         # If platform utils not available, continue; orchestrator will surface errors
         pass
     if not getattr(args, "resume", None):
-        if not perform_preflight_checks(console, args):
-            return 1
+        try:
+            if not perform_preflight_checks(console, args):
+                return 1
+        except (KeyboardInterrupt, asyncio.CancelledError):
+            console.print("\n[yellow]Interrupted — shutting down gracefully[/yellow]")
+            try:
+                is_json = bool(
+                    getattr(args, "json", False)
+                    or getattr(args, "output", "") == "json"
+                )
+                if not is_json and run_id:
+                    console.print(f"[blue]Resume:[/blue] pitaya --resume {run_id}")
+            except Exception:
+                pass
+            return 2
     orch: Orchestrator | None = None
 
     try:
         # Merge full configuration (may raise ValueError for bad --config)
-        full_config = _merge_full_config(args)
+        # On resume, prefer saved config from state_dir/<run_id>/config.json
+        full_config = None
+        if getattr(args, "resume", None):
+            try:
+                cfg_path = (
+                    Path(getattr(args, "state_dir", Path("./pitaya_state")))
+                    / run_id
+                    / "config.json"
+                )
+                import json as _json
+
+                with open(cfg_path, "r", encoding="utf-8") as f:
+                    full_config = _json.load(f)
+            except Exception:
+                full_config = None
+        if not full_config:
+            full_config = _merge_full_config(args)
 
         # Structured logging and rotation setup (restored from pre-refactor behavior)
         try:
@@ -219,8 +260,127 @@ async def run(console: Console, args: argparse.Namespace) -> int:
         if not validate_full_config(console, full_config, args):
             return 1
 
+        # Persist effective config for fresh runs to support resume fidelity
+        if not getattr(args, "resume", None):
+            try:
+                import json as _json
+
+                sdir = Path(
+                    full_config.get("orchestration", {}).get(
+                        "state_dir", getattr(args, "state_dir", Path("./pitaya_state"))
+                    )
+                )
+                ldir = Path(
+                    full_config.get("orchestration", {}).get(
+                        "logs_dir", getattr(args, "logs_dir", Path("./logs"))
+                    )
+                )
+                (sdir / run_id).mkdir(parents=True, exist_ok=True)
+                (ldir / run_id).mkdir(parents=True, exist_ok=True)
+
+                def _redact_cfg(d: Dict[str, Any]) -> Dict[str, Any]:
+                    import copy as _copy
+
+                    def scrub(obj):
+                        if isinstance(obj, dict):
+                            out = {}
+                            for k, v in obj.items():
+                                kl = str(k).lower()
+                                if any(
+                                    s in kl
+                                    for s in (
+                                        "token",
+                                        "api_key",
+                                        "apikey",
+                                        "secret",
+                                        "password",
+                                        "authorization",
+                                        "cookie",
+                                    )
+                                ):
+                                    out[k] = "[REDACTED]"
+                                else:
+                                    out[k] = scrub(v)
+                            return out
+                        if isinstance(obj, list):
+                            return [scrub(v) for v in obj]
+                        return obj
+
+                    return scrub(_copy.deepcopy(d))
+
+                with open(sdir / run_id / "config.json", "w", encoding="utf-8") as f:
+                    _json.dump(full_config, f, indent=2, default=str)
+                with open(ldir / run_id / "config.json", "w", encoding="utf-8") as f:
+                    _json.dump(_redact_cfg(full_config), f, indent=2, default=str)
+            except Exception:
+                pass
+
+        # Apply resume overrides: safe by default; unsafe require --override-config
+        if getattr(args, "resume", None):
+            overrides = build_cli_config(args)
+            safe_paths = {
+                ("runner", "timeout"),
+                ("runner", "docker_image"),
+                ("runner", "force_commit"),
+                ("orchestration", "max_parallel_instances"),
+                ("orchestration", "max_parallel_startup"),
+                ("orchestration", "randomize_queue_order"),
+                # Auth overrides
+                ("runner", "oauth_token"),
+                ("runner", "api_key"),
+                ("runner", "base_url"),
+            }
+            unsafe_top = {"model", "plugin_name"}
+            unsafe_runner = {"network_egress"}
+            for sect, key in safe_paths:
+                val = (overrides.get(sect, {}) or {}).get(key)
+                if val is not None:
+                    full_config.setdefault(sect, {})[key] = val
+            unsafe_requested: list[str] = []
+            for k in unsafe_top:
+                if (
+                    k in overrides
+                    and overrides[k] is not None
+                    and overrides[k] != full_config.get(k)
+                ):
+                    unsafe_requested.append(k)
+            for k in unsafe_runner:
+                if (
+                    k in (overrides.get("runner", {}) or {})
+                    and overrides["runner"][k] is not None
+                    and overrides["runner"][k]
+                    != (full_config.get("runner", {}) or {}).get(k)
+                ):
+                    unsafe_requested.append(f"runner.{k}")
+            if unsafe_requested and not getattr(args, "override_config", False):
+                console.print(
+                    "[yellow]Ignoring overrides on resume for: "
+                    + ", ".join(unsafe_requested)
+                    + ". Use --override-config to force (may change durable keys).[/yellow]"
+                )
+            elif unsafe_requested and getattr(args, "override_config", False):
+                if "model" in overrides:
+                    full_config["model"] = overrides["model"]
+                if "plugin_name" in overrides:
+                    full_config["plugin_name"] = overrides["plugin_name"]
+                if "network_egress" in (overrides.get("runner", {}) or {}):
+                    full_config.setdefault("runner", {})["network_egress"] = overrides[
+                        "runner"
+                    ]["network_egress"]
+                if getattr(args, "resume_key_policy", "strict") == "suffix":
+                    full_config.setdefault("orchestration", {})["resume_key_suffix"] = (
+                        full_config.get("orchestration", {}).get("resume_key_suffix")
+                        or ("r" + run_id[-4:])
+                    )
+
         auth_cfg = get_auth_config(args, full_config)
         orch = _build_orchestrator(full_config, auth_cfg, args)
+        try:
+            suffix = full_config.get("orchestration", {}).get("resume_key_suffix")
+            if suffix:
+                setattr(orch, "resume_key_suffix", str(suffix))
+        except Exception:
+            pass
         # Apply custom redaction patterns from config to event bus (on creation during run)
         try:
             redaction = (full_config.get("logging", {}) or {}).get(
@@ -238,9 +398,20 @@ async def run(console: Console, args: argparse.Namespace) -> int:
             return await headless_run.run_headless(
                 console, orch, args, full_config, run_id
             )
-        return await tui_runner.run_tui(console, orch, args, full_config, run_id)
-    except KeyboardInterrupt:
+        rc = await tui_runner.run_tui(console, orch, args, full_config, run_id)
+        # TUI prints its own resume hint on interrupt; avoid duplicate here
+        return rc
+    except (KeyboardInterrupt, asyncio.CancelledError):
         console.print("\n[yellow]Interrupted — shutting down gracefully[/yellow]")
+        try:
+            # Avoid polluting JSON mode; only print hint for streaming/TUI
+            is_json = bool(
+                getattr(args, "json", False) or getattr(args, "output", "") == "json"
+            )
+            if not is_json and run_id:
+                console.print(f"[blue]Resume:[/blue] pitaya --resume {run_id}")
+        except Exception:
+            pass
         return 2
     except ValueError as e:
         console.print(f"[red]Invalid arguments: {e}[/red]")
