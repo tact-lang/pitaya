@@ -362,6 +362,19 @@ async def _run_instance_attempt(
         """Emit an event (generic agent namespace)."""
         if not event_callback:
             return
+        # Capture agent result context for error paths that occur after emit
+        try:
+            if event_type.endswith("agent_result"):
+                fm = data.get("final_message")
+                if isinstance(fm, str) and fm:
+                    nonlocal final_message
+                    final_message = fm
+                m = data.get("metrics") or {}
+                if isinstance(m, dict) and m:
+                    nonlocal metrics
+                    metrics.update(m)
+        except Exception:
+            pass
         event_callback(
             {
                 "type": event_type,
@@ -372,6 +385,9 @@ async def _run_instance_attempt(
         )
 
     docker_manager: Optional[DockerManager] = None
+    # Carry context across failure paths for better diagnostics
+    final_message: str = ""
+    metrics: Dict[str, Any] = {}
     try:
         # Phase 1: Validation
         logger.info(f"Starting instance {instance_id} with prompt: {prompt[:100]}...")
@@ -652,7 +668,7 @@ async def _run_instance_attempt(
 
             agent_session_id = result_data.get("session_id")
             final_message = result_data.get("final_message", "")
-            metrics = result_data.get("metrics", {})
+            metrics = result_data.get("metrics", {}) or {}
 
             emit_event(
                 "instance.agent_completed",
@@ -926,6 +942,8 @@ async def _run_instance_attempt(
                 log_path=log_path,
                 workspace_path=None,
                 status="timeout",
+                final_message=final_message,
+                metrics=metrics,
             )
 
         except (DockerError, GitError, AgentError, ValidationError) as e:
@@ -988,6 +1006,8 @@ async def _run_instance_attempt(
                 log_path=log_path,
                 workspace_path=None,
                 status="failed",
+                final_message=final_message,
+                metrics=metrics,
             )
 
         except asyncio.CancelledError:
@@ -1025,6 +1045,8 @@ async def _run_instance_attempt(
                 log_path=log_path,
                 workspace_path=str(workspace_dir) if workspace_dir else None,
                 status="canceled",
+                final_message=final_message,
+                metrics=metrics,
             )
         except (OSError, IOError) as e:
             logger.exception(f"System error in instance {instance_id}")
@@ -1077,6 +1099,8 @@ async def _run_instance_attempt(
                 log_path=log_path,
                 workspace_path=None,
                 status="failed",
+                final_message=final_message,
+                metrics=metrics,
             )
 
     finally:

@@ -31,9 +31,16 @@ def _print_instance(console: Console, result) -> None:
     if getattr(result, "success", False):
         console.print(line, style="green" if status == "✓" else "red")
     else:
-        console.print(
-            f"{line}  [red]Failed: {getattr(result, 'error', 'Unknown error')}[/red]"
-        )
+        etype = getattr(result, "error_type", None) or ""
+        emsg = getattr(result, "error", "Unknown error") or "Unknown error"
+        if etype:
+            console.print(f"{line}  [red]Failed ({etype}): {emsg}[/red]")
+        else:
+            console.print(f"{line}  [red]Failed: {emsg}[/red]")
+        # Surface log path if available for quick debugging
+        lpath = getattr(result, "log_path", None)
+        if lpath:
+            console.print(f"    [dim]log:[/dim] {lpath}")
 
     md = getattr(result, "metadata", None) or {}
     pieces: list[str] = []
@@ -91,11 +98,15 @@ def display_detailed_results(
     console.print(f"\n═══ Run Complete: {run_id} ═══\n")
 
     if state and hasattr(state, "strategies"):
-        # Group by strategy if we have richer state
+        # Group by strategy if we have richer state; capture orphans too
         grouped: dict[str, list] = {}
+        orphans: list = []
         for r in results:
-            sid = getattr(r, "metadata", {}).get("strategy_execution_id", "unknown")
-            grouped.setdefault(sid, []).append(r)
+            sid = getattr(r, "metadata", {}).get("strategy_execution_id")
+            if sid:
+                grouped.setdefault(sid, []).append(r)
+            else:
+                orphans.append(r)
 
         for strat_id, strat_info in state.strategies.items():
             console.print(f"[bold]Strategy: {strat_info.strategy_name}[/bold]")
@@ -104,9 +115,26 @@ def display_detailed_results(
             console.print()
         console.print(f"[bold]Runs:[/bold] {len(state.strategies)}\n")
         console.print("[bold]Results by strategy:[/bold]\n")
+        # When there is only one strategy, fall back to printing orphans under it
+        single_strategy = len(state.strategies) == 1
         for idx, (sid, strat_info) in enumerate(state.strategies.items(), 1):
             console.print(f"[bold]Strategy #{idx} ({strat_info.strategy_name}):[/bold]")
+            printed = False
             for r in grouped.get(sid, []):
+                printed = True
+                _print_instance(console, r)
+            if single_strategy and not printed and orphans:
+                for r in orphans:
+                    _print_instance(console, r)
+                printed = True
+                orphans = []
+            if not printed:
+                console.print("  (no results)")
+            console.print()
+        # If any orphans remain (multi-strategy), render them in a separate section
+        if orphans:
+            console.print("[bold]Ungrouped Results:[/bold]")
+            for r in orphans:
                 _print_instance(console, r)
             console.print()
     else:

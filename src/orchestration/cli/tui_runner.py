@@ -61,24 +61,77 @@ async def run_tui(
         display.run(orchestrator=orch, events_file=events_file, from_offset=0)
     )
 
-    # Wait for orchestrator to finish
-    results = await orch_task
-
-    # Stop TUI cleanly now that orchestration is complete
-    await display.stop()
     try:
-        await tui_task
-    except asyncio.CancelledError:
-        pass
+        # Wait until either task fails or the orchestrator completes
+        done, pending = await asyncio.wait(
+            {orch_task, tui_task}, return_when=asyncio.FIRST_COMPLETED
+        )
 
-    # Print a final summary to console for visibility after the TUI closes
-    from .results_display import display_detailed_results
+        # If the TUI task failed, stop everything and report a friendly error
+        if tui_task in done and tui_task.exception() is not None:
+            exc = tui_task.exception()
+            # Cancel orchestrator if still running
+            if not orch_task.done():
+                orch_task.cancel()
+                try:
+                    await orch_task
+                except Exception:
+                    pass
+            await display.stop()
+            try:
+                await tui_task
+            except Exception:
+                pass
+            console.print(f"[red]TUI error:[/red] {exc}")
+            return 1
 
-    state = orch.get_current_state() if hasattr(orch, "get_current_state") else None
-    rid = getattr(state, "run_id", run_id)
-    display_detailed_results(console, results, rid, state)
-    # Exit 3 only if any instance actually failed (ignore canceled)
-    for r in results:
-        if not getattr(r, "success", False) and getattr(r, "status", "") != "canceled":
-            return 3
-    return 0
+        # Otherwise, ensure the orchestrator finished (success or error)
+        if orch_task in done and orch_task.exception() is not None:
+            exc = orch_task.exception()
+            await display.stop()
+            # Ensure the TUI task is fully torn down to avoid pending-task warnings
+            try:
+                await tui_task
+            except Exception:
+                pass
+            # Let outer runner show a friendly message too, but give a hint here
+            console.print(f"[red]Run failed:[/red] {exc}")
+            return 1
+        results = await orch_task
+
+        # Stop TUI cleanly now that orchestration is complete
+        await display.stop()
+        try:
+            await tui_task
+        except asyncio.CancelledError:
+            pass
+
+        # Print a final summary to console for visibility after the TUI closes
+        from .results_display import display_detailed_results
+
+        state = orch.get_current_state() if hasattr(orch, "get_current_state") else None
+        rid = getattr(state, "run_id", run_id)
+        display_detailed_results(console, results, rid, state)
+        # Exit 3 only if any instance actually failed (ignore canceled)
+        for r in results:
+            if (
+                not getattr(r, "success", False)
+                and getattr(r, "status", "") != "canceled"
+            ):
+                return 3
+        return 0
+    except KeyboardInterrupt:
+        # Stop the TUI before bubbling up to higher-level handler
+        try:
+            await display.stop()
+        finally:
+            raise
+    except Exception as e:
+        # Generic failure: stop TUI first, then surface the error
+        await display.stop()
+        try:
+            await tui_task
+        except Exception:
+            pass
+        console.print(f"[red]Run failed:[/red] {e}")
+        return 1
