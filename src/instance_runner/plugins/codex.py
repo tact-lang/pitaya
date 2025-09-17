@@ -1,28 +1,33 @@
-"""
-Codex CLI plugin implementation.
-
-Integrates Codex (open-source Codex CLI) with the Pitaya RunnerPlugin
-interface, mirroring the generic agent behavior for event streaming and metrics.
-"""
+"""Open-source Codex CLI plugin implementation."""
 
 from __future__ import annotations
 
 import logging
 import os
-from typing import Any, Dict, List, Optional, Tuple, TYPE_CHECKING, Callable
+from typing import Any, Callable, Dict, List, Optional, Tuple, TYPE_CHECKING
 
-from ..plugin_interface import RunnerPlugin, PluginCapabilities
 from ..codex_parser import CodexOutputParser
+from ..plugin_interface import PluginCapabilities, RunnerPlugin
 
 if TYPE_CHECKING:
     from docker.models.containers import Container
 
+EventCallback = Callable[[Dict[str, Any]], None]
+ParserState = Dict[str, Any]
 
 logger = logging.getLogger(__name__)
 
+__all__ = ["CodexPlugin"]
+
+_ENV_API_KEY = "OPENAI_API_KEY"
+_ENV_BASE_URL = "OPENAI_BASE_URL"
+_DEFAULT_IMAGE = "pitaya-agents:latest"
+_BASE_COMMAND = ["codex", "exec", "--json", "-C", "/workspace"]
+_SANDBOX_FLAGS = ["--skip-git-repo-check", "--dangerously-bypass-approvals-and-sandbox"]
+
 
 class CodexPlugin(RunnerPlugin):
-    """Plugin for running Codex CLI in containers."""
+    """Runner plugin for Codex CLI."""
 
     def __init__(self) -> None:
         self._parser = CodexOutputParser()
@@ -33,7 +38,7 @@ class CodexPlugin(RunnerPlugin):
 
     @property
     def docker_image(self) -> str:  # pragma: no cover - simple property
-        return "pitaya-agents:latest"
+        return _DEFAULT_IMAGE
 
     @property
     def capabilities(self) -> PluginCapabilities:
@@ -54,13 +59,10 @@ class CodexPlugin(RunnerPlugin):
         """Validate Codex can run (auth optional)."""
         # Codex supports multiple providers. For OpenAI, accept OPENAI_API_KEY via
         # auth_config or environment; otherwise, proceed without hard requirement.
-        try:
-            if auth_config and auth_config.get("api_key"):
-                return True, None
-            if os.environ.get("OPENAI_API_KEY"):
-                return True, None
-        except Exception:
-            pass
+        if auth_config and auth_config.get("api_key"):
+            return True, None
+        if os.environ.get(_ENV_API_KEY):
+            return True, None
         # No API key is still valid (OSS modes); runner will rely on container tooling
         return True, None
 
@@ -70,24 +72,7 @@ class CodexPlugin(RunnerPlugin):
         auth_config: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, str]:
         """Prepare Codex environment variables for the container."""
-        env: Dict[str, str] = {}
-
-        # Prefer explicit auth_config over host env
-        if auth_config:
-            if auth_config.get("api_key"):
-                env["OPENAI_API_KEY"] = str(auth_config["api_key"])
-            if auth_config.get("base_url"):
-                env["OPENAI_BASE_URL"] = str(auth_config["base_url"])
-        # Host env fallback
-        if "OPENAI_API_KEY" in os.environ:
-            env.setdefault("OPENAI_API_KEY", os.environ["OPENAI_API_KEY"])
-        if "OPENAI_BASE_URL" in os.environ:
-            env.setdefault("OPENAI_BASE_URL", os.environ["OPENAI_BASE_URL"])
-
-        # .env fallback is handled globally by the CLI/config merger; avoid plugin-level dotenv reads
-
-        # Proxy passthrough will be handled in DockerManager based on network_egress
-        return env
+        return _collect_codex_env(auth_config)
 
     async def prepare_container(
         self,
@@ -109,26 +94,15 @@ class CodexPlugin(RunnerPlugin):
 
         We use container isolation as the primary sandbox and stream JSON.
         """
-        # Base command
-        cmd: List[str] = [
-            "codex",
-            "exec",
-            "--json",
-            "-C",
-            "/workspace",
-        ]
-
-        # Prefer running without interactive approvals and repo checks inside our containerized sandbox
-        cmd += ["--skip-git-repo-check", "--dangerously-bypass-approvals-and-sandbox"]
+        cmd: List[str] = list(_BASE_COMMAND)
+        cmd += _SANDBOX_FLAGS
 
         # Model passthrough (if provided)
         if model:
             cmd += ["-m", model]
 
-        # Custom provider wiring: when a base URL is provided (via runner), configure
-        # Codex CLI provider using -c flags. This is required for non-default endpoints.
         provider_base_url = kwargs.get("provider_base_url")
-        provider_env_key = kwargs.get("provider_env_key") or "OPENAI_API_KEY"
+        provider_env_key = kwargs.get("provider_env_key") or _ENV_API_KEY
         if provider_base_url:
             # Select a custom provider key and map model + provider config
             cmd += ["-c", "model_provider=pitaya_custom"]
@@ -156,31 +130,25 @@ class CodexPlugin(RunnerPlugin):
             cmd += ["--system-prompt", str(system_prompt)]
 
         # Agent CLI passthrough args: insert before prompt
-        try:
-            extra_args = kwargs.get("agent_cli_args") or []
-            if isinstance(extra_args, (list, tuple)):
-                cmd += [str(x) for x in extra_args if x is not None]
-        except Exception:
-            pass
+        extra_args = kwargs.get("agent_cli_args")
+        if isinstance(extra_args, (list, tuple)):
+            cmd += [str(arg) for arg in extra_args if arg is not None]
 
         # Final positional: the prompt
         if prompt:
             cmd.append(prompt)
-        else:
-            try:
-                logger.debug(
-                    "codex: omitted prompt (resume flow) session_id=%s",
-                    str(session_id)[:16],
-                )
-            except Exception:
-                pass
+        elif session_id:
+            logger.debug(
+                "codex: omitted prompt (resume flow) session_id=%s",
+                str(session_id)[:16],
+            )
 
         return cmd
 
     async def parse_events(
         self,
         output_line: str,
-        parser_state: Dict[str, Any],
+        parser_state: ParserState,
     ) -> Optional[Dict[str, Any]]:
         """Parse Codex JSONL into runner events using CodexOutputParser."""
         if "_parser" not in parser_state:
@@ -190,7 +158,7 @@ class CodexPlugin(RunnerPlugin):
 
     async def extract_result(
         self,
-        parser_state: Dict[str, Any],
+        parser_state: ParserState,
     ) -> Dict[str, Any]:
         if "_parser" not in parser_state:
             return {"session_id": None, "final_message": None, "metrics": {}}
@@ -210,7 +178,7 @@ class CodexPlugin(RunnerPlugin):
         model: str,
         session_id: Optional[str] = None,
         timeout_seconds: int = 3600,
-        event_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
+        event_callback: Optional[EventCallback] = None,
         **kwargs: Any,
     ) -> Dict[str, Any]:
         """Execute Codex CLI inside container and collect the result."""
@@ -220,13 +188,12 @@ class CodexPlugin(RunnerPlugin):
         # Optional raw stream log path (tee everything to file)
         stream_log_path = kwargs.get("stream_log_path")
 
+        callback = event_callback if callable(event_callback) else None
         result = await docker_manager.execute_command(
             container=container,
             command=command,
             plugin=self,
-            event_callback=(
-                (lambda ev: event_callback(ev)) if callable(event_callback) else None
-            ),
+            event_callback=callback,
             timeout_seconds=timeout_seconds,
             max_turns=kwargs.get("max_turns"),
             stream_log_path=stream_log_path,
@@ -250,3 +217,20 @@ class CodexPlugin(RunnerPlugin):
             return "docker", True
         # Generic Codex error; retryable by default
         return "codex", True
+
+
+def _collect_codex_env(auth_config: Optional[Dict[str, Any]]) -> Dict[str, str]:
+    env: Dict[str, str] = {}
+
+    if auth_config:
+        if auth_config.get("api_key"):
+            env[_ENV_API_KEY] = str(auth_config["api_key"])
+        if auth_config.get("base_url"):
+            env[_ENV_BASE_URL] = str(auth_config["base_url"])
+
+    if _ENV_API_KEY in os.environ:
+        env.setdefault(_ENV_API_KEY, os.environ[_ENV_API_KEY])
+    if _ENV_BASE_URL in os.environ:
+        env.setdefault(_ENV_BASE_URL, os.environ[_ENV_BASE_URL])
+
+    return env
