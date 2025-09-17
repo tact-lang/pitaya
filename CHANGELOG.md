@@ -17,6 +17,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - TUI: coordinated error handling and graceful teardown; surface friendly errors instead of plain crashes. ([#80](https://github.com/tact-lang/pitaya/pull/80))
 - Errors: propagate agent `final_message`/metrics on failures and show `error_type` + per‑instance log hint in the summary. ([#80](https://github.com/tact-lang/pitaya/pull/80))
 
+### Changed
+
+- `TaskFailed` now groups metadata under `failure` (with `key`, `error_type`, `message`, `result`). Update custom strategies to inspect `exc.failure`. ([#83](https://github.com/tact-lang/pitaya/pull/83))
+- `.env` loading is now best-effort; if `python-dotenv` is missing Pitaya silently skips that layer. ([#82](https://github.com/tact-lang/pitaya/pull/82))
+
 ### Added
 
 - Persist per-instance metadata to results and logs artifacts. ([#79](https://github.com/tact-lang/pitaya/pull/79))

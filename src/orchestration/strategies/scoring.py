@@ -109,8 +109,8 @@ class ScoringStrategy(Strategy):
             try:
                 from ...exceptions import TaskFailed
 
-                if isinstance(e, TaskFailed) and getattr(e, "result", None):
-                    gen_result = e.result  # type: ignore[assignment]
+                if isinstance(e, TaskFailed) and e.failure.result is not None:
+                    gen_result = e.failure.result  # type: ignore[assignment]
                 else:
                     raise e
             except Exception:
