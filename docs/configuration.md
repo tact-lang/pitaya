@@ -64,7 +64,7 @@ logging:
   - `OPENAI_API_KEY`
   - `OPENAI_BASE_URL`
 
-`.env` files are loaded as a separate layer (useful in development). Secrets are redacted by default in `pitaya config print` unless `PITAYA_ALLOW_UNREDACTED=1` and `--redact false` are used.
+`.env` files are loaded as a separate layer (useful in development). Loading is best-effort: if `python-dotenv` is not installed, Pitaya skips this layer without raising. Secrets are redacted by default in `pitaya config print` unless `PITAYA_ALLOW_UNREDACTED=1` and `--redact false` are used.
 
 ## Import policy
 
