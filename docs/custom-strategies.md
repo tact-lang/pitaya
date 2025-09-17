@@ -23,7 +23,7 @@ Subclass `Strategy` and implement `execute(self, prompt, base_branch, ctx) -> Li
 Context methods
 
 - `ctx.run(task_dict, key=...) -> Handle`: schedule a durable task; keys identify tasks and drive deterministic branch names.
-- `await ctx.wait(handle) -> InstanceResult`: wait for one task; raises on failure (use try/except to tolerate).
+- `await ctx.wait(handle) -> InstanceResult`: wait for one task; raises `TaskFailed` on failure (inspect `exc.failure` for details such as `key`, `error_type`, and `result`).
 - `await ctx.wait_all(handles, tolerate_failures=False) -> List[InstanceResult]` or `(successes, failures)` when tolerate_failures=True.
 - `ctx.key(*parts) -> str`: build stable keys like `ctx.key("gen", i)`.
 - `ctx.rand() -> float`: deterministic 0..1 for tie‑breakers and randomized choices.
