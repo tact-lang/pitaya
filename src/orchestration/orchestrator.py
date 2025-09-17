@@ -1498,6 +1498,15 @@ class Orchestrator:
                 elif et == "instance.agent_system":
                     phase, activity = "system", "Agent connected"
 
+                extras: Dict[str, Any] = {}
+                if isinstance(data, dict):
+                    usage_payload = data.get("usage")
+                    if isinstance(usage_payload, dict):
+                        extras["usage"] = usage_payload
+                    message_id_val = data.get("message_id")
+                    if isinstance(message_id_val, str):
+                        extras["message_id"] = message_id_val
+
                 if phase and task_key:
                     self.event_bus.emit_canonical(
                         type="task.progress",
@@ -1517,6 +1526,7 @@ class Orchestrator:
                             "phase": phase,
                             **({"activity": activity} if activity else {}),
                             **({"tool": tool} if tool else {}),
+                            **extras,
                         },
                     )
             except Exception:

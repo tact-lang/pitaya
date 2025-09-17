@@ -275,7 +275,17 @@ class AdaptiveDisplay:
         except Exception:
             pass
 
-        # Tokens and cost are omitted in cards by default (see details/footer)
+        # Tokens and cost
+        try:
+            token_text = f"{instance.total_tokens:,} (↓{instance.input_tokens:,} ↑{instance.output_tokens:,})"
+            table.add_row("Tokens:", token_text)
+        except Exception:
+            pass
+        if instance.cost:
+            try:
+                table.add_row("Cost:", f"${instance.cost:.4f}")
+            except Exception:
+                table.add_row("Cost:", f"${instance.cost}")
 
         # Error info
         if instance.error:
@@ -445,7 +455,13 @@ class AdaptiveDisplay:
                     br = br_full if len(br_full) <= BRANCH_FULL_MAX else trimmed
                 except Exception:
                     br = br_full
-                rows.append((stat_str, inst_label, act, dur, br))
+                tokens_disp = f"{inst.total_tokens:,}"
+                try:
+                    tokens_disp = f"{inst.total_tokens:,} (↓{inst.input_tokens:,} ↑{inst.output_tokens:,})"
+                except Exception:
+                    pass
+                cost_disp = f"${inst.cost:.4f}" if inst.cost else "-"
+                rows.append((stat_str, inst_label, act, dur, tokens_disp, cost_disp, br))
 
             # Fixed widths for consistency
             STATUS_W = 12
@@ -453,6 +469,8 @@ class AdaptiveDisplay:
             MODEL_W = 16
             ACT_W = 24
             DUR_W = 6
+            TOK_W = 16
+            COST_W = 10
 
             table = Table(show_header=True, header_style="bold", expand=True)
             table.add_column("Status", width=STATUS_W, no_wrap=True)
@@ -460,8 +478,10 @@ class AdaptiveDisplay:
             table.add_column("Model", width=MODEL_W, no_wrap=True)
             table.add_column("Activity", width=ACT_W, no_wrap=True)
             table.add_column("Dur", width=DUR_W, no_wrap=True)
+            table.add_column("Tokens", width=TOK_W, no_wrap=True)
+            table.add_column("Cost", width=COST_W, no_wrap=True)
             table.add_column("Branch", ratio=3, no_wrap=True)
-            for stat_str, inst_label, act, dur, br in rows:
+            for stat_str, inst_label, act, dur, tok, cost, br in rows:
                 stext = Text(stat_str)
                 try:
                     parts = stat_str.split(" ", 1)
@@ -500,7 +520,7 @@ class AdaptiveDisplay:
                         inst_col = str(inst_label)
                         model_col = ""
 
-                table.add_row(stext, inst_col, model_col, act_disp, dur, br)
+                table.add_row(stext, inst_col, model_col, act_disp, dur, tok, cost, br)
 
             try:
                 summary = strat.status_summary()  # type: ignore[misc]
