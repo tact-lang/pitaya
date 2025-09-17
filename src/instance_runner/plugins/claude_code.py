@@ -1,28 +1,35 @@
-"""
-Anthropic plugin implementation.
+"""Anthropic Claude Code plugin implementation."""
 
-This plugin integrates the Anthropic coding agent with Pitaya's
-runner interface.
-"""
+from __future__ import annotations
 
 import logging
 import os
-from typing import Any, Dict, List, Optional, Tuple, TYPE_CHECKING
+from typing import Any, Callable, Dict, List, Optional, Tuple, TYPE_CHECKING
 
-from ..plugin_interface import RunnerPlugin, PluginCapabilities
 from ..claude_parser import ClaudeOutputParser
+from ..plugin_interface import PluginCapabilities, RunnerPlugin
 
 if TYPE_CHECKING:
     from docker.models.containers import Container
 
+EventCallback = Callable[[Dict[str, Any]], None]
+ParserState = Dict[str, Any]
 
 logger = logging.getLogger(__name__)
 
+__all__ = ["ClaudeCodePlugin"]
+
+_ENV_OAUTH = "CLAUDE_CODE_OAUTH_TOKEN"
+_ENV_API_KEY = "ANTHROPIC_API_KEY"
+_ENV_BASE_URL = "ANTHROPIC_BASE_URL"
+_DEFAULT_IMAGE = "pitaya-agents:latest"
+_CLI_STREAM_FORMAT = "stream-json"
+
 
 class ClaudeCodePlugin(RunnerPlugin):
-    """Plugin for running the Anthropic agent in containers."""
+    """Runner plugin that wraps the Anthropic Claude Code CLI."""
 
-    def __init__(self):
+    def __init__(self) -> None:
         self._parser = ClaudeOutputParser()
 
     @property
@@ -31,7 +38,7 @@ class ClaudeCodePlugin(RunnerPlugin):
 
     @property
     def docker_image(self) -> str:
-        return "pitaya-agents:latest"
+        return _DEFAULT_IMAGE
 
     @property
     def capabilities(self) -> PluginCapabilities:
@@ -49,28 +56,19 @@ class ClaudeCodePlugin(RunnerPlugin):
     async def validate_environment(
         self, auth_config: Optional[Dict[str, Any]] = None
     ) -> Tuple[bool, Optional[str]]:
-        """Validate plugin can run with required credentials."""
-        # Check for authentication from auth_config first, then environment
-        has_auth = False
+        """Ensure required authentication is available."""
+        if auth_config and (
+            auth_config.get("oauth_token") or auth_config.get("api_key")
+        ):
+            return True, None
 
-        if auth_config:
-            has_auth = bool(
-                auth_config.get("oauth_token") or auth_config.get("api_key")
-            )
+        if os.environ.get(_ENV_OAUTH) or os.environ.get(_ENV_API_KEY):
+            return True, None
 
-        if not has_auth:
-            # Fall back to environment variables
-            has_oauth = bool(os.environ.get("CLAUDE_CODE_OAUTH_TOKEN"))
-            has_api_key = bool(os.environ.get("ANTHROPIC_API_KEY"))
-            has_auth = has_oauth or has_api_key
-
-        if not has_auth:
-            return (
-                False,
-                "No authentication found. Set CLAUDE_CODE_OAUTH_TOKEN or ANTHROPIC_API_KEY",
-            )
-
-        return True, None
+        return (
+            False,
+            "No authentication found. Set CLAUDE_CODE_OAUTH_TOKEN or ANTHROPIC_API_KEY",
+        )
 
     async def prepare_environment(
         self,
@@ -78,27 +76,7 @@ class ClaudeCodePlugin(RunnerPlugin):
         auth_config: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, str]:
         """Prepare environment variables for authentication."""
-        env_vars = {}
-
-        if auth_config:
-            if auth_config.get("oauth_token"):
-                env_vars["CLAUDE_CODE_OAUTH_TOKEN"] = auth_config["oauth_token"]
-            if auth_config.get("api_key"):
-                env_vars["ANTHROPIC_API_KEY"] = auth_config["api_key"]
-            if auth_config.get("base_url"):
-                env_vars["ANTHROPIC_BASE_URL"] = auth_config["base_url"]
-        else:
-            # Fall back to environment variables from host
-            if os.environ.get("CLAUDE_CODE_OAUTH_TOKEN"):
-                env_vars["CLAUDE_CODE_OAUTH_TOKEN"] = os.environ[
-                    "CLAUDE_CODE_OAUTH_TOKEN"
-                ]
-            if os.environ.get("ANTHROPIC_API_KEY"):
-                env_vars["ANTHROPIC_API_KEY"] = os.environ["ANTHROPIC_API_KEY"]
-            if os.environ.get("ANTHROPIC_BASE_URL"):
-                env_vars["ANTHROPIC_BASE_URL"] = os.environ["ANTHROPIC_BASE_URL"]
-
-        return env_vars
+        return _collect_auth_env(auth_config)
 
     async def prepare_container(
         self,
@@ -106,13 +84,6 @@ class ClaudeCodePlugin(RunnerPlugin):
         session_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Add plugin-specific container configuration (if needed)."""
-        # Authentication is already handled by docker_manager.py based on auth_config
-        # Session ID is also handled by docker_manager.py
-        # This method is kept for future Claude-specific container needs
-
-        # Note: /home/claude is mounted as a named volume by docker_manager.py
-        # for session persistence
-
         return container_config
 
     async def build_command(
@@ -124,66 +95,61 @@ class ClaudeCodePlugin(RunnerPlugin):
         **kwargs,
     ) -> List[str]:
         """Build command for the Anthropic CLI."""
-        command = [
+        command: List[str] = [
             "claude",
             "--model",
             model,
-            "--print",  # Non-interactive mode
-            "--verbose",  # Required for stream-json
+            "--print",
+            "--verbose",
             "--output-format",
-            "stream-json",
-            "--dangerously-skip-permissions",  # Skip permissions in sandbox
+            _CLI_STREAM_FORMAT,
+            "--dangerously-skip-permissions",
         ]
 
         if session_id:
             command.extend(["--resume", session_id])
 
         # Add prompt engineering options if provided
-        if "system_prompt" in kwargs and kwargs["system_prompt"]:
-            command.extend(["--system-prompt", kwargs["system_prompt"]])
+        system_prompt = kwargs.get("system_prompt")
+        if system_prompt:
+            command.extend(["--system-prompt", str(system_prompt)])
 
-        if "append_system_prompt" in kwargs and kwargs["append_system_prompt"]:
-            command.extend(["--append-system-prompt", kwargs["append_system_prompt"]])
+        append_system_prompt = kwargs.get("append_system_prompt")
+        if append_system_prompt:
+            command.extend(["--append-system-prompt", str(append_system_prompt)])
 
-        # Add passthrough CLI args, if any
-        try:
-            extra_args = kwargs.get("agent_cli_args") or []
-            if isinstance(extra_args, (list, tuple)):
-                command.extend([str(x) for x in extra_args if x is not None])
-        except Exception:
-            pass
+        extra_args = kwargs.get("agent_cli_args")
+        if isinstance(extra_args, (list, tuple)):
+            command.extend([str(arg) for arg in extra_args if arg is not None])
 
         # Always pass the prompt when provided. On resume, Orchestrator supplies
         # a minimal continuation prompt (e.g., "Continue") so the agent keeps going.
         if prompt:
             command.append(prompt)
-            try:
-                if session_id and operator_resume:
-                    logger.debug(
-                        "claude-code: operator_resume=True; including continuation prompt with session_id=%s",
-                        str(session_id)[:16],
-                    )
-            except Exception:
-                pass
+            if session_id and operator_resume:
+                logger.debug(
+                    "claude-code: operator_resume=True; including continuation prompt (session_id=%s)",
+                    str(session_id)[:16],
+                )
 
         return command
 
     async def parse_events(
         self,
         output_line: str,
-        parser_state: Dict[str, Any],
+        parser_state: ParserState,
     ) -> Optional[Dict[str, Any]]:
         """Parse agent stream-json output."""
         # Initialize parser in state if needed
         if "_parser" not in parser_state:
             parser_state["_parser"] = ClaudeOutputParser()
 
-        parser = parser_state["_parser"]
+        parser: ClaudeOutputParser = parser_state["_parser"]
         return parser.parse_line(output_line)
 
     async def extract_result(
         self,
-        parser_state: Dict[str, Any],
+        parser_state: ParserState,
     ) -> Dict[str, Any]:
         """Extract final result from the parser."""
         if "_parser" not in parser_state:
@@ -193,7 +159,7 @@ class ClaudeCodePlugin(RunnerPlugin):
                 "metrics": {},
             }
 
-        parser = parser_state["_parser"]
+        parser: ClaudeOutputParser = parser_state["_parser"]
         summary = parser.get_summary()
 
         return {
@@ -210,22 +176,19 @@ class ClaudeCodePlugin(RunnerPlugin):
         """Determine error type and retryability."""
         error_str = str(error).lower()
 
-        # Check for specific Claude errors
         if "rate limit" in error_str:
             return "rate_limit", True
-        elif "authentication" in error_str or "unauthorized" in error_str:
+        if "authentication" in error_str or "unauthorized" in error_str:
             return "auth", False
-        elif "timeout" in error_str:
+        if "timeout" in error_str:
             return "timeout", True
-        elif "docker" in error_str:
+        if "docker" in error_str:
             return "docker", True
-        elif "session" in error_str and (
+        if "session" in error_str and (
             "corrupt" in error_str or "invalid" in error_str
         ):
             return "session_corrupted", False
-        else:
-            # Generic agent error
-            return "agent", True
+        return "agent", True
 
     async def execute(
         self,
@@ -235,7 +198,7 @@ class ClaudeCodePlugin(RunnerPlugin):
         model: str,
         session_id: Optional[str] = None,
         timeout_seconds: int = 3600,
-        event_callback: Optional[Any] = None,
+        event_callback: Optional[EventCallback] = None,
         **kwargs,
     ) -> Dict[str, Any]:
         """Execute the agent inside the container and return result data."""
@@ -254,16 +217,36 @@ class ClaudeCodePlugin(RunnerPlugin):
         # Optional raw stream log path (tee everything to file)
         stream_log_path = kwargs.get("stream_log_path")
 
+        callback = event_callback if callable(event_callback) else None
         result_data = await docker_manager.execute_command(
             container=container,
             command=command,
             plugin=self,
-            event_callback=(
-                (lambda ev: event_callback(ev)) if callable(event_callback) else None
-            ),
+            event_callback=callback,
             timeout_seconds=timeout_seconds,
             max_turns=kwargs.get("max_turns"),
             stream_log_path=stream_log_path,
         )
 
         return result_data
+
+
+def _collect_auth_env(auth_config: Optional[Dict[str, Any]]) -> Dict[str, str]:
+    env: Dict[str, str] = {}
+
+    if auth_config:
+        if auth_config.get("oauth_token"):
+            env[_ENV_OAUTH] = str(auth_config["oauth_token"])
+        if auth_config.get("api_key"):
+            env[_ENV_API_KEY] = str(auth_config["api_key"])
+        if auth_config.get("base_url"):
+            env[_ENV_BASE_URL] = str(auth_config["base_url"])
+        return env
+
+    if _ENV_OAUTH in os.environ:
+        env[_ENV_OAUTH] = os.environ[_ENV_OAUTH]
+    if _ENV_API_KEY in os.environ:
+        env[_ENV_API_KEY] = os.environ[_ENV_API_KEY]
+    if _ENV_BASE_URL in os.environ:
+        env[_ENV_BASE_URL] = os.environ[_ENV_BASE_URL]
+    return env
