@@ -277,7 +277,10 @@ class AdaptiveDisplay:
 
         # Tokens and cost
         try:
-            token_text = f"{instance.total_tokens:,} (↓{instance.output_tokens:,} ↑{instance.input_tokens:,})"
+            token_text = f"{instance.total_tokens:,} (↓{instance.output_tokens:,} ↑{instance.input_tokens:,}"
+            if getattr(instance, "cached_input_tokens", 0):
+                token_text += f" +{instance.cached_input_tokens:,} cached"
+            token_text += ")"
             table.add_row("Tokens:", token_text)
         except Exception:
             pass
@@ -457,7 +460,10 @@ class AdaptiveDisplay:
                     br = br_full
                 tokens_disp = f"{inst.total_tokens:,}"
                 try:
-                    tokens_disp = f"{inst.total_tokens:,} (↓{inst.output_tokens:,} ↑{inst.input_tokens:,})"
+                    tokens_disp = f"{inst.total_tokens:,} (↓{inst.output_tokens:,} ↑{inst.input_tokens:,}"
+                    if getattr(inst, "cached_input_tokens", 0):
+                        tokens_disp += f" +{inst.cached_input_tokens:,} cached"
+                    tokens_disp += ")"
                 except Exception:
                     pass
                 cost_disp = f"${inst.cost:.4f}" if inst.cost else "-"

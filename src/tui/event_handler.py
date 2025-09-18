@@ -355,31 +355,54 @@ class EventProcessor:
                     inst.cost = float(tc) if isinstance(tc, (int, float)) else inst.cost
                 except Exception:
                     pass
+
+                total_tokens_val: Optional[int] = None
                 try:
                     tt = metrics.get("total_tokens")
                     if isinstance(tt, (int, float)):
-                        inst.total_tokens = int(tt)
+                        total_tokens_val = int(tt)
+                        inst.total_tokens = total_tokens_val
                         inst.usage_running_total = max(
-                            inst.usage_running_total, inst.total_tokens
+                            inst.usage_running_total, total_tokens_val
                         )
                 except Exception:
                     pass
-                # Optional in/out tokens
+
+                input_raw: Optional[int] = None
+                output_raw: Optional[int] = None
                 try:
                     it = metrics.get("input_tokens")
                     ot = metrics.get("output_tokens")
                     if isinstance(it, (int, float)):
-                        inst.input_tokens = int(it)
+                        input_raw = int(it)
                         inst.usage_input_running_total = max(
-                            inst.usage_input_running_total, inst.input_tokens
+                            inst.usage_input_running_total, input_raw
                         )
                     if isinstance(ot, (int, float)):
-                        inst.output_tokens = int(ot)
+                        output_raw = int(ot)
+                        inst.output_tokens = output_raw
                         inst.usage_output_running_total = max(
-                            inst.usage_output_running_total, inst.output_tokens
+                            inst.usage_output_running_total, output_raw
                         )
                 except Exception:
                     pass
+
+                fresh_input = None
+                if total_tokens_val is not None and output_raw is not None:
+                    fresh_input = max(0, total_tokens_val - output_raw)
+                elif input_raw is not None:
+                    fresh_input = max(0, input_raw)
+
+                if fresh_input is not None:
+                    inst.input_tokens = fresh_input
+                    inst.usage_prompt_running_total = max(
+                        inst.usage_prompt_running_total, fresh_input
+                    )
+                if input_raw is not None and fresh_input is not None:
+                    inst.cached_input_tokens = max(
+                        inst.cached_input_tokens, max(0, input_raw - fresh_input)
+                    )
+
                 try:
                     delta_total = inst.total_tokens - prev_total
                     if delta_total > 0:
@@ -765,10 +788,54 @@ class EventProcessor:
 
         # Update metrics from data
         metrics = data.get("metrics", {})
-        instance.cost = metrics.get("total_cost", 0.0)
-        instance.total_tokens = metrics.get("total_tokens", 0)
-        instance.input_tokens = metrics.get("input_tokens", 0)
-        instance.output_tokens = metrics.get("output_tokens", 0)
+        try:
+            instance.cost = float(metrics.get("total_cost", instance.cost) or 0.0)
+        except Exception:
+            pass
+
+        total_tokens_val = instance.total_tokens
+        input_raw = instance.input_tokens
+        output_raw = instance.output_tokens
+
+        try:
+            tt = metrics.get("total_tokens")
+            if isinstance(tt, (int, float)):
+                total_tokens_val = int(tt)
+        except Exception:
+            pass
+        try:
+            it = metrics.get("input_tokens")
+            if isinstance(it, (int, float)):
+                input_raw = int(it)
+        except Exception:
+            pass
+        try:
+            ot = metrics.get("output_tokens")
+            if isinstance(ot, (int, float)):
+                output_raw = int(ot)
+        except Exception:
+            pass
+
+        fresh_input = max(0, total_tokens_val - output_raw)
+        instance.total_tokens = total_tokens_val
+        instance.input_tokens = fresh_input
+        instance.output_tokens = output_raw
+        instance.cached_input_tokens = max(
+            instance.cached_input_tokens, max(0, input_raw - fresh_input)
+        )
+
+        instance.usage_running_total = max(
+            instance.usage_running_total, total_tokens_val
+        )
+        instance.usage_input_running_total = max(
+            instance.usage_input_running_total, input_raw
+        )
+        instance.usage_prompt_running_total = max(
+            instance.usage_prompt_running_total, fresh_input
+        )
+        instance.usage_output_running_total = max(
+            instance.usage_output_running_total, output_raw
+        )
 
         # Update run totals (avoid double-counting tokens/cost)
         self.state.current_run.completed_instances += 1
@@ -894,12 +961,16 @@ class EventProcessor:
         else:
             cumulative_total = cumulative_input + cumulative_output
 
+        fresh_input_total = max(0, cumulative_total - cumulative_output)
+        cached_input_total = max(0, cumulative_input - fresh_input_total)
+
         prev_usage_total = getattr(instance, "usage_running_total", 0)
         prev_input_total = getattr(instance, "usage_input_running_total", 0)
         prev_output_total = getattr(instance, "usage_output_running_total", 0)
+        prev_prompt_total = getattr(instance, "usage_prompt_running_total", 0)
 
         delta_total = max(0, cumulative_total - prev_usage_total)
-        delta_input = max(0, cumulative_input - prev_input_total)
+        delta_prompt = max(0, fresh_input_total - prev_prompt_total)
         delta_output = max(0, cumulative_output - prev_output_total)
 
         if delta_total <= 0 and message_id:
@@ -909,9 +980,11 @@ class EventProcessor:
         instance.usage_running_total = max(prev_usage_total, cumulative_total)
         instance.usage_input_running_total = max(prev_input_total, cumulative_input)
         instance.usage_output_running_total = max(prev_output_total, cumulative_output)
+        instance.usage_prompt_running_total = max(prev_prompt_total, fresh_input_total)
+        instance.cached_input_tokens = cached_input_total
 
-        if delta_input:
-            instance.input_tokens = instance.usage_input_running_total
+        if delta_prompt:
+            instance.input_tokens = instance.usage_prompt_running_total
         if delta_output:
             instance.output_tokens = instance.usage_output_running_total
         if delta_total:
@@ -1062,7 +1135,9 @@ class EventProcessor:
             "input_tokens": input_tokens,
             "cache_creation_input_tokens": cache_creation,
             "cache_read_input_tokens": cache_read,
-            "output_tokens": output_tokens + reasoning_tokens,
+            "output_tokens": output_tokens,
+            "reasoning_output_tokens": reasoning_tokens,
+            "tokens": total_tokens or tokens,
         }
         if tokens:
             usage["tokens"] = tokens
@@ -1162,32 +1237,40 @@ class EventProcessor:
             except Exception:
                 total_tokens = instance.total_tokens
             try:
-                input_tokens = int(
+                input_raw = int(
                     metrics.get("input_tokens", instance.input_tokens)
                     or instance.input_tokens
                 )
             except Exception:
-                input_tokens = instance.input_tokens
+                input_raw = instance.input_tokens
             try:
-                output_tokens = int(
+                output_raw = int(
                     metrics.get("output_tokens", instance.output_tokens)
                     or instance.output_tokens
                 )
             except Exception:
-                output_tokens = instance.output_tokens
+                output_raw = instance.output_tokens
 
             instance.total_tokens = total_tokens
-            instance.input_tokens = input_tokens
-            instance.output_tokens = output_tokens
             instance.usage_running_total = max(
                 instance.usage_running_total, total_tokens
             )
             instance.usage_input_running_total = max(
-                instance.usage_input_running_total, input_tokens
+                instance.usage_input_running_total, input_raw
             )
             instance.usage_output_running_total = max(
-                instance.usage_output_running_total, output_tokens
+                instance.usage_output_running_total, output_raw
             )
+
+            fresh_input = max(0, total_tokens - output_raw)
+            instance.input_tokens = fresh_input
+            instance.usage_prompt_running_total = max(
+                instance.usage_prompt_running_total, fresh_input
+            )
+            instance.cached_input_tokens = max(
+                instance.cached_input_tokens, max(0, input_raw - fresh_input)
+            )
+            instance.output_tokens = output_raw
 
             delta_total = total_tokens - prev_total
             if delta_total > 0:

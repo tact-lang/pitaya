@@ -69,8 +69,10 @@ class InstanceDisplay:
     usage_running_total: int = 0
     usage_input_running_total: int = 0
     usage_output_running_total: int = 0
+    usage_prompt_running_total: int = 0
     applied_run_tokens: int = 0
     applied_run_cost: float = 0.0
+    cached_input_tokens: int = 0
     # Track usage message IDs to avoid double-counting incremental usage updates
     usage_message_ids: set[str] = field(default_factory=set)
 
