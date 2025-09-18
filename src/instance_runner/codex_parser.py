@@ -25,6 +25,7 @@ class CodexOutputParser:
         self.tokens_in: int = 0
         self.tokens_out: int = 0
         self.total_tokens: int = 0
+        self.last_error: Optional[str] = None
         self._seen_shutdown: bool = False
 
     def _ts(self, src: Dict[str, Any]) -> str:
@@ -63,18 +64,55 @@ class CodexOutputParser:
 
         # Token counts
         if et in {"token_count", "tokens", "usage"}:
-            tin = int(data.get("input_tokens", 0) or data.get("in", 0) or 0)
-            tout = int(data.get("output_tokens", 0) or data.get("out", 0) or 0)
-            # Include cached_input_tokens and reasoning_output_tokens if present
-            try:
-                tin += int(data.get("cached_input_tokens", 0) or 0)
-            except Exception:
-                pass
-            try:
-                tout += int(data.get("reasoning_output_tokens", 0) or 0)
-            except Exception:
-                pass
-            tt = int(data.get("total_tokens", tin + tout) or (tin + tout))
+            # Codex sometimes nests usage metrics beneath an "info" object. Prefer
+            # the structured totals, then fall back to whatever flat fields are
+            # available. This keeps compatibility with older CLI builds.
+            usage_sections: list[Dict[str, Any]] = []
+
+            info = data.get("info")
+            if isinstance(info, dict):
+                for key in (
+                    "total_token_usage",
+                    "last_token_usage",
+                    "token_usage",
+                    "usage",
+                ):
+                    candidate = info.get(key)
+                    if isinstance(candidate, dict):
+                        usage_sections.append(candidate)
+                usage_sections.append(info)
+
+            usage_sections.append(data)
+
+            def _extract_tokens(src: Dict[str, Any]) -> tuple[int, int, int]:
+                """Return (input, output, total) token counts from a payload."""
+
+                tin = int(src.get("input_tokens", 0) or src.get("in", 0) or 0)
+                tout = int(src.get("output_tokens", 0) or src.get("out", 0) or 0)
+                # Include cached / reasoning token counters when present.
+                try:
+                    tin += int(src.get("cached_input_tokens", 0) or 0)
+                except Exception:
+                    pass
+                try:
+                    tout += int(src.get("reasoning_output_tokens", 0) or 0)
+                except Exception:
+                    pass
+                tt = int(src.get("total_tokens", tin + tout) or (tin + tout))
+                return tin, tout, tt
+
+            tin = tout = tt = 0
+            for section in usage_sections:
+                try:
+                    _tin, _tout, _tt = _extract_tokens(section)
+                except Exception:
+                    continue
+                if any(val for val in (_tin, _tout, _tt)):
+                    tin, tout, tt = _tin, _tout, _tt
+                    break
+
+            # If all sections were zero (e.g., missing fields), keep zeros so the
+            # rest of the parser can still emit diagnostic assistant events.
             # Use maxima to avoid double-add if multiple reports roll in
             self.tokens_in = max(self.tokens_in, tin)
             self.tokens_out = max(self.tokens_out, tout)
@@ -85,6 +123,8 @@ class CodexOutputParser:
                 "turn_metrics": {
                     "tokens": tt,
                     "total_tokens": self.total_tokens,
+                    "input_tokens": self.tokens_in,
+                    "output_tokens": self.tokens_out,
                 },
             }
 
@@ -199,8 +239,15 @@ class CodexOutputParser:
             }
 
         # Error pass-through
-        if et == "error":
-            emsg = data.get("error") or data.get("message") or obj.get("detail")
+        if et in {"error", "stream_error"}:
+            emsg = (
+                data.get("error")
+                or data.get("message")
+                or obj.get("detail")
+                or obj.get("status")
+            )
+            if emsg:
+                self.last_error = str(emsg)
             return {
                 "type": "error",
                 "timestamp": self._ts(obj),
@@ -228,4 +275,5 @@ class CodexOutputParser:
                 "output_tokens": self.tokens_out,
                 "total_tokens": self.total_tokens or (self.tokens_in + self.tokens_out),
             },
+            "error": self.last_error,
         }

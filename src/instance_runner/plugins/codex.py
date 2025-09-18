@@ -8,6 +8,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple, TYPE_CHECKING
 
 from ..codex_parser import CodexOutputParser
 from ..plugin_interface import PluginCapabilities, RunnerPlugin
+from ...exceptions import AgentError
 
 if TYPE_CHECKING:
     from docker.models.containers import Container
@@ -164,6 +165,9 @@ class CodexPlugin(RunnerPlugin):
             return {"session_id": None, "final_message": None, "metrics": {}}
         parser: CodexOutputParser = parser_state["_parser"]
         summary = parser.get_summary()
+        error_message = summary.get("error")
+        if error_message:
+            raise AgentError(str(error_message))
         return {
             "session_id": summary.get("session_id"),
             "final_message": summary.get("final_message"),
@@ -209,7 +213,15 @@ class CodexPlugin(RunnerPlugin):
         s = str(error).lower()
         if any(k in s for k in ("timeout", "timed out", "deadline")):
             return "timeout", True
-        if any(k in s for k in ("unauthorized", "forbidden", "invalid api key")):
+        if any(
+            k in s
+            for k in (
+                "unauthorized",
+                "forbidden",
+                "invalid api key",
+                "must be verified",
+            )
+        ):
             return "auth", False
         if any(k in s for k in ("dns", "econnrefused", "enetwork", "network")):
             return "network", True

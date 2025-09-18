@@ -137,6 +137,7 @@ class EventProcessor:
             "instance.agent_tool_use": self._handle_agent_tool_use,
             "instance.agent_tool_result": self._handle_agent_tool_result,
             "instance.agent_result": self._handle_agent_result,
+            "instance.agent_turn_complete": self._handle_agent_turn_complete,
             # Cancellation / lifecycle
             "instance.canceled": self._handle_instance_canceled,
             "state.instance_updated": self._handle_state_instance_updated,
@@ -349,24 +350,65 @@ class EventProcessor:
             metrics = data.get("metrics", {})
             if metrics:
                 try:
+                    prev_total = inst.total_tokens
                     tc = metrics.get("total_cost")
                     inst.cost = float(tc) if isinstance(tc, (int, float)) else inst.cost
                 except Exception:
                     pass
+
+                total_tokens_val: Optional[int] = None
                 try:
                     tt = metrics.get("total_tokens")
                     if isinstance(tt, (int, float)):
-                        inst.total_tokens = int(tt)
+                        total_tokens_val = int(tt)
+                        inst.total_tokens = total_tokens_val
+                        inst.usage_running_total = max(
+                            inst.usage_running_total, total_tokens_val
+                        )
                 except Exception:
                     pass
-                # Optional in/out tokens
+
+                input_raw: Optional[int] = None
+                output_raw: Optional[int] = None
                 try:
                     it = metrics.get("input_tokens")
                     ot = metrics.get("output_tokens")
                     if isinstance(it, (int, float)):
-                        inst.input_tokens = int(it)
+                        input_raw = int(it)
+                        inst.usage_input_running_total = max(
+                            inst.usage_input_running_total, input_raw
+                        )
                     if isinstance(ot, (int, float)):
-                        inst.output_tokens = int(ot)
+                        output_raw = int(ot)
+                        inst.output_tokens = output_raw
+                        inst.usage_output_running_total = max(
+                            inst.usage_output_running_total, output_raw
+                        )
+                except Exception:
+                    pass
+
+                fresh_input = None
+                if total_tokens_val is not None and output_raw is not None:
+                    fresh_input = max(0, total_tokens_val - output_raw)
+                elif input_raw is not None:
+                    fresh_input = max(0, input_raw)
+
+                if fresh_input is not None:
+                    inst.input_tokens = fresh_input
+                    inst.usage_prompt_running_total = max(
+                        inst.usage_prompt_running_total, fresh_input
+                    )
+                if input_raw is not None and fresh_input is not None:
+                    inst.cached_input_tokens = max(
+                        inst.cached_input_tokens, max(0, input_raw - fresh_input)
+                    )
+
+                try:
+                    delta_total = inst.total_tokens - prev_total
+                    if delta_total > 0:
+                        if self.state.current_run:
+                            self.state.current_run.total_tokens += delta_total
+                        inst.applied_run_tokens += delta_total
                 except Exception:
                     pass
             # Capture final message info
@@ -438,6 +480,15 @@ class EventProcessor:
             if friendly:
                 inst.current_activity = friendly
         inst.last_updated = datetime.now()
+        if isinstance(data, dict):
+            usage_payload = data.get("usage")
+            if isinstance(usage_payload, dict):
+                message_id = (
+                    data.get("message_id")
+                    if isinstance(data.get("message_id"), str)
+                    else None
+                )
+                self._apply_usage_metrics(inst, usage_payload, message_id)
         # Append progress message (phase/activity/tool)
         phase = data.get("phase")
         activity = data.get("activity")
@@ -737,18 +788,78 @@ class EventProcessor:
 
         # Update metrics from data
         metrics = data.get("metrics", {})
-        instance.cost = metrics.get("total_cost", 0.0)
-        instance.total_tokens = metrics.get("total_tokens", 0)
-        instance.input_tokens = metrics.get("input_tokens", 0)
-        instance.output_tokens = metrics.get("output_tokens", 0)
+        try:
+            instance.cost = float(metrics.get("total_cost", instance.cost) or 0.0)
+        except Exception:
+            pass
 
-        # Update run totals
+        total_tokens_val = instance.total_tokens
+        input_raw = instance.input_tokens
+        output_raw = instance.output_tokens
+
+        try:
+            tt = metrics.get("total_tokens")
+            if isinstance(tt, (int, float)):
+                total_tokens_val = int(tt)
+        except Exception:
+            pass
+        try:
+            it = metrics.get("input_tokens")
+            if isinstance(it, (int, float)):
+                input_raw = int(it)
+        except Exception:
+            pass
+        try:
+            ot = metrics.get("output_tokens")
+            if isinstance(ot, (int, float)):
+                output_raw = int(ot)
+        except Exception:
+            pass
+
+        fresh_input = max(0, total_tokens_val - output_raw)
+        instance.total_tokens = total_tokens_val
+        instance.input_tokens = fresh_input
+        instance.output_tokens = output_raw
+        instance.cached_input_tokens = max(
+            instance.cached_input_tokens, max(0, input_raw - fresh_input)
+        )
+
+        instance.usage_running_total = max(
+            instance.usage_running_total, total_tokens_val
+        )
+        instance.usage_input_running_total = max(
+            instance.usage_input_running_total, input_raw
+        )
+        instance.usage_prompt_running_total = max(
+            instance.usage_prompt_running_total, fresh_input
+        )
+        instance.usage_output_running_total = max(
+            instance.usage_output_running_total, output_raw
+        )
+
+        # Update run totals (avoid double-counting tokens/cost)
         self.state.current_run.completed_instances += 1
         self.state.current_run.active_instances = max(
             0, self.state.current_run.active_instances - 1
         )
-        self.state.current_run.total_cost += instance.cost
-        self.state.current_run.total_tokens += instance.total_tokens
+
+        try:
+            final_tokens = int(instance.total_tokens or 0)
+        except Exception:
+            final_tokens = 0
+        token_delta = max(0, final_tokens - getattr(instance, "applied_run_tokens", 0))
+        if token_delta > 0:
+            instance.applied_run_tokens += token_delta
+            self.state.current_run.total_tokens += token_delta
+
+        try:
+            final_cost = float(instance.cost or 0.0)
+        except Exception:
+            final_cost = 0.0
+        cost_delta = max(0.0, final_cost - getattr(instance, "applied_run_cost", 0.0))
+        if cost_delta > 0.0:
+            instance.applied_run_cost += cost_delta
+            self.state.current_run.total_cost += cost_delta
 
         logger.info(
             f"Instance {instance_id} completed. Run totals - Completed: {self.state.current_run.completed_instances}, Active: {self.state.current_run.active_instances}"
@@ -803,6 +914,92 @@ class EventProcessor:
 
         instance.current_activity = data.get("activity")
         instance.last_updated = datetime.now()
+
+        if isinstance(data, dict):
+            usage_payload = data.get("usage")
+            if isinstance(usage_payload, dict):
+                message_id = (
+                    data.get("message_id")
+                    if isinstance(data.get("message_id"), str)
+                    else None
+                )
+                self._apply_usage_metrics(instance, usage_payload, message_id)
+
+    def _apply_usage_metrics(
+        self,
+        instance: InstanceDisplay,
+        usage: Dict[str, Any],
+        message_id: Optional[str] = None,
+    ) -> None:
+        """Incrementally apply token usage to an instance and run totals."""
+        if message_id and message_id in instance.usage_message_ids:
+            return
+
+        def _as_int(value: Any) -> int:
+            try:
+                return int(value or 0)
+            except Exception:
+                return 0
+
+        input_tokens = _as_int(usage.get("input_tokens"))
+        cache_creation = _as_int(usage.get("cache_creation_input_tokens"))
+        cache_read = _as_int(usage.get("cache_read_input_tokens"))
+        output_tokens = _as_int(usage.get("output_tokens"))
+        output_tokens += _as_int(usage.get("reasoning_output_tokens"))
+
+        cumulative_input = input_tokens + cache_creation + cache_read
+        cumulative_output = output_tokens
+
+        explicit_total = usage.get("tokens")
+        if explicit_total is None:
+            explicit_total = usage.get("total_tokens")
+        if explicit_total is not None:
+            try:
+                cumulative_total = max(0, int(explicit_total))
+            except Exception:
+                cumulative_total = cumulative_input + cumulative_output
+        else:
+            cumulative_total = cumulative_input + cumulative_output
+
+        fresh_input_total = max(0, cumulative_total - cumulative_output)
+        cached_input_total = max(0, cumulative_input - fresh_input_total)
+
+        prev_usage_total = getattr(instance, "usage_running_total", 0)
+        prev_input_total = getattr(instance, "usage_input_running_total", 0)
+        prev_output_total = getattr(instance, "usage_output_running_total", 0)
+        prev_prompt_total = getattr(instance, "usage_prompt_running_total", 0)
+
+        delta_total = max(0, cumulative_total - prev_usage_total)
+        delta_prompt = max(0, fresh_input_total - prev_prompt_total)
+        delta_output = max(0, cumulative_output - prev_output_total)
+
+        if delta_total <= 0 and message_id:
+            instance.usage_message_ids.add(message_id)
+            return
+
+        instance.usage_running_total = max(prev_usage_total, cumulative_total)
+        instance.usage_input_running_total = max(prev_input_total, cumulative_input)
+        instance.usage_output_running_total = max(prev_output_total, cumulative_output)
+        instance.usage_prompt_running_total = max(prev_prompt_total, fresh_input_total)
+        instance.cached_input_tokens = cached_input_total
+
+        if delta_prompt:
+            instance.input_tokens = instance.usage_prompt_running_total
+        if delta_output:
+            instance.output_tokens = instance.usage_output_running_total
+        if delta_total:
+            instance.total_tokens = instance.usage_running_total
+
+        if message_id:
+            instance.usage_message_ids.add(message_id)
+
+        if delta_total > 0:
+            if self.state.current_run:
+                try:
+                    self.state.current_run.total_tokens += delta_total
+                except Exception:
+                    pass
+            instance.applied_run_tokens += delta_total
 
     def _handle_state_instance_registered(self, event: Dict[str, Any]) -> None:
         """Handle state.instance_registered snapshot to populate strategy name early."""
@@ -874,6 +1071,113 @@ class EventProcessor:
         instance.current_activity = "Agent is thinking..."
         instance.last_updated = datetime.now()
 
+        data = event.get("data", {}) or {}
+        usage = None
+        message_id = None
+
+        if isinstance(data, dict):
+            maybe_usage = data.get("usage")
+            if isinstance(maybe_usage, dict):
+                usage = maybe_usage
+            maybe_message_id = data.get("message_id")
+            if isinstance(maybe_message_id, str):
+                message_id = maybe_message_id
+
+            if usage is None:
+                message = data.get("message")
+                if isinstance(message, dict):
+                    maybe_usage = message.get("usage")
+                    if isinstance(maybe_usage, dict):
+                        usage = maybe_usage
+                    if not message_id:
+                        mid = message.get("id")
+                        if isinstance(mid, str):
+                            message_id = mid
+
+        if not isinstance(usage, dict):
+            return
+
+        self._apply_usage_metrics(instance, usage, message_id)
+
+    def _handle_agent_turn_complete(self, event: Dict[str, Any]) -> None:
+        """Handle explicit turn completion events with token metrics."""
+        if not self.state.current_run:
+            return
+
+        instance_id = event.get("instance_id")
+        if not instance_id or instance_id not in self.state.current_run.instances:
+            return
+
+        data = event.get("data", {}) or {}
+        metrics = data.get("turn_metrics", {}) if isinstance(data, dict) else {}
+        if not isinstance(metrics, dict):
+            return
+
+        instance = self.state.current_run.instances[instance_id]
+
+        def _as_int(val: Any) -> int:
+            try:
+                return int(val or 0)
+            except Exception:
+                return 0
+
+        input_tokens = _as_int(metrics.get("input_tokens"))
+        output_tokens = _as_int(metrics.get("output_tokens"))
+        cache_creation = _as_int(metrics.get("cache_creation_input_tokens"))
+        cache_read = _as_int(
+            metrics.get("cache_read_input_tokens", metrics.get("cached_input_tokens"))
+        )
+        reasoning_tokens = _as_int(metrics.get("reasoning_output_tokens"))
+        tokens = _as_int(metrics.get("tokens"))
+        total_tokens = _as_int(metrics.get("total_tokens"))
+
+        usage = {
+            "input_tokens": input_tokens,
+            "cache_creation_input_tokens": cache_creation,
+            "cache_read_input_tokens": cache_read,
+            "output_tokens": output_tokens,
+            "reasoning_output_tokens": reasoning_tokens,
+            "tokens": total_tokens or tokens,
+        }
+        if tokens:
+            usage["tokens"] = tokens
+
+        prev_total = instance.total_tokens
+        turn_number = data.get("turn_number")
+        message_id = (
+            f"turn-{turn_number}"
+            if isinstance(turn_number, (int, float, str))
+            else None
+        )
+
+        self._apply_usage_metrics(instance, usage, message_id)
+
+        post_usage_total = instance.total_tokens
+        if total_tokens and total_tokens > instance.total_tokens:
+            instance.total_tokens = total_tokens
+            instance.usage_running_total = max(
+                instance.usage_running_total, total_tokens
+            )
+            delta_total = total_tokens - post_usage_total
+            if delta_total > 0:
+                if self.state.current_run:
+                    self.state.current_run.total_tokens += delta_total
+                instance.applied_run_tokens += delta_total
+        else:
+            delta_total = instance.total_tokens - prev_total
+
+        if input_tokens and input_tokens > instance.input_tokens:
+            instance.input_tokens = input_tokens
+            instance.usage_input_running_total = max(
+                instance.usage_input_running_total, input_tokens
+            )
+        if output_tokens and output_tokens + reasoning_tokens > instance.output_tokens:
+            instance.output_tokens = output_tokens + reasoning_tokens
+            instance.usage_output_running_total = max(
+                instance.usage_output_running_total,
+                output_tokens + reasoning_tokens,
+            )
+
     def _handle_agent_tool_use(self, event: Dict[str, Any]) -> None:
         """Handle agent tool use."""
         if not self.state.current_run:
@@ -922,15 +1226,66 @@ class EventProcessor:
         data = event.get("data", {})
         instance = self.state.current_run.instances[instance_id]
 
-        # Update final metrics if not already set
         metrics = data.get("metrics", {})
         if metrics:
+            prev_total = instance.total_tokens
+            try:
+                total_tokens = int(
+                    metrics.get("total_tokens", instance.total_tokens)
+                    or instance.total_tokens
+                )
+            except Exception:
+                total_tokens = instance.total_tokens
+            try:
+                input_raw = int(
+                    metrics.get("input_tokens", instance.input_tokens)
+                    or instance.input_tokens
+                )
+            except Exception:
+                input_raw = instance.input_tokens
+            try:
+                output_raw = int(
+                    metrics.get("output_tokens", instance.output_tokens)
+                    or instance.output_tokens
+                )
+            except Exception:
+                output_raw = instance.output_tokens
+
+            instance.total_tokens = total_tokens
+            instance.usage_running_total = max(
+                instance.usage_running_total, total_tokens
+            )
+            instance.usage_input_running_total = max(
+                instance.usage_input_running_total, input_raw
+            )
+            instance.usage_output_running_total = max(
+                instance.usage_output_running_total, output_raw
+            )
+
+            fresh_input = max(0, total_tokens - output_raw)
+            instance.input_tokens = fresh_input
+            instance.usage_prompt_running_total = max(
+                instance.usage_prompt_running_total, fresh_input
+            )
+            instance.cached_input_tokens = max(
+                instance.cached_input_tokens, max(0, input_raw - fresh_input)
+            )
+            instance.output_tokens = output_raw
+
+            delta_total = total_tokens - prev_total
+            if delta_total > 0:
+                if self.state.current_run:
+                    try:
+                        self.state.current_run.total_tokens += delta_total
+                    except Exception:
+                        pass
+                instance.applied_run_tokens += delta_total
+
             if instance.cost == 0.0:
-                instance.cost = metrics.get("total_cost", 0.0)
-            if instance.total_tokens == 0:
-                instance.total_tokens = metrics.get("total_tokens", 0)
-                instance.input_tokens = metrics.get("input_tokens", 0)
-                instance.output_tokens = metrics.get("output_tokens", 0)
+                try:
+                    instance.cost = float(metrics.get("total_cost", 0.0) or 0.0)
+                except Exception:
+                    pass
 
     def _handle_instance_canceled(self, event: Dict[str, Any]) -> None:
         """Handle instance canceled (treated as interrupted)."""

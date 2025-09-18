@@ -682,10 +682,11 @@ class TUIDisplay:
             if inst.duration_seconds:
                 tbl.add_row("Time:", self._format_duration(inst.duration_seconds))
             if inst.total_tokens:
-                tbl.add_row(
-                    "Tokens:",
-                    f"{inst.total_tokens:,} (↓{inst.input_tokens:,} ↑{inst.output_tokens:,})",
-                )
+                token_str = f"{inst.total_tokens:,} (↓{inst.output_tokens:,} ↑{inst.input_tokens:,}"
+                if getattr(inst, "cached_input_tokens", 0):
+                    token_str += f" +{inst.cached_input_tokens:,} cached"
+                token_str += ")"
+                tbl.add_row("Tokens:", token_str)
             if inst.cost:
                 tbl.add_row("Cost:", f"${inst.cost:.2f}")
             # Final message
@@ -738,6 +739,9 @@ class TUIDisplay:
                 inst_list = list(run.instances.values())
                 total_tokens_in = sum(i.input_tokens for i in inst_list)
                 total_tokens_out = sum(i.output_tokens for i in inst_list)
+                total_tokens_cached = sum(
+                    getattr(i, "cached_input_tokens", 0) for i in inst_list
+                )
                 total_tokens = sum(i.total_tokens for i in inst_list)
                 total_cost = sum(i.cost for i in inst_list)
                 # Runtime (UI session)
@@ -775,9 +779,14 @@ class TUIDisplay:
                 line1.append("Tokens: ", style="bold white")
                 line1.append(f"{total_tokens:,}", style="bright_white")
                 line1.append(" (", style="white")
-                line1.append(f"↓{total_tokens_in:,}", style="bright_white")
+                line1.append(f"↓{total_tokens_out:,}", style="bright_white")
                 line1.append(" ", style="white")
-                line1.append(f"↑{total_tokens_out:,}", style="bright_white")
+                line1.append(f"↑{total_tokens_in:,}", style="bright_white")
+                if total_tokens_cached:
+                    line1.append(" ", style="white")
+                    line1.append(
+                        f"+{total_tokens_cached:,} cached", style="bright_white"
+                    )
                 line1.append(")  •  ", style="white")
                 line1.append("Cost: ", style="bold white")
                 line1.append(f"${total_cost:.4f}", style="bright_magenta")
@@ -951,6 +960,10 @@ class TUIDisplay:
                     total_tokens=inst.total_tokens,
                     input_tokens=inst.input_tokens,
                     output_tokens=inst.output_tokens,
+                    usage_running_total=inst.usage_running_total,
+                    usage_input_running_total=inst.usage_input_running_total,
+                    usage_output_running_total=inst.usage_output_running_total,
+                    usage_message_ids=set(inst.usage_message_ids),
                     started_at=inst.started_at,
                     completed_at=inst.completed_at,
                     last_updated=inst.last_updated,

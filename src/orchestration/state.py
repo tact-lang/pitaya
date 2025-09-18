@@ -42,6 +42,8 @@ class InstanceInfo:
     completed_at: Optional[datetime] = None
     session_id: Optional[str] = None
     interrupted_at: Optional[datetime] = None
+    aggregated_tokens: int = 0
+    aggregated_cost: float = 0.0
 
 
 @dataclass
@@ -621,10 +623,20 @@ class StateManager:
             # Update metrics
             if result and result.metrics:
                 # Use the correct key names from the plugin parser
-                cost = result.metrics.get("total_cost", 0.0)
-                tokens = result.metrics.get("total_tokens", 0)
-                self.current_state.total_cost += cost
-                self.current_state.total_tokens += tokens
+                cost = float(result.metrics.get("total_cost", 0.0) or 0.0)
+                tokens = int(result.metrics.get("total_tokens", 0) or 0)
+
+                cost_delta = max(0.0, cost - getattr(info, "aggregated_cost", 0.0))
+                token_delta = max(0, tokens - getattr(info, "aggregated_tokens", 0))
+
+                if cost_delta:
+                    self.current_state.total_cost += cost_delta
+                if token_delta:
+                    self.current_state.total_tokens += token_delta
+
+                # Persist the latest cumulative totals for future delta calculations
+                info.aggregated_cost = max(info.aggregated_cost, cost)
+                info.aggregated_tokens = max(info.aggregated_tokens, tokens)
 
         # Emit state change event (idempotent; consumers can de-dupe if old==new)
         if self.event_bus:
@@ -843,6 +855,19 @@ class StateManager:
                             total_tokens += int(
                                 i.result.metrics.get("total_tokens", 0) or 0
                             )
+                            try:
+                                i.aggregated_cost = max(
+                                    i.aggregated_cost,
+                                    float(
+                                        i.result.metrics.get("total_cost", 0.0) or 0.0
+                                    ),
+                                )
+                                i.aggregated_tokens = max(
+                                    i.aggregated_tokens,
+                                    int(i.result.metrics.get("total_tokens", 0) or 0),
+                                )
+                            except Exception:
+                                pass
                     except Exception:
                         pass
                 self.current_state.total_cost = total_cost

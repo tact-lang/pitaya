@@ -19,6 +19,8 @@ class ClaudeOutputParser:
         """Initialize parser state."""
         self.session_id: Optional[str] = None
         self.total_tokens: int = 0
+        self.input_tokens: int = 0
+        self.output_tokens: int = 0
         self.total_cost: float = 0.0
         self.turn_count: int = 0
         self.last_message: Optional[str] = None
@@ -51,19 +53,30 @@ class ClaudeOutputParser:
         # For assistant messages, check for tool use and capture text
         if event_type == "assistant" and "message" in data:
             message = data["message"]
+            usage_payload: Optional[Dict[str, Any]] = None
+            message_id: Optional[str] = None
 
             # Extract usage metrics from assistant messages
             if "usage" in message:
                 usage = message["usage"]
+                message_id = message.get("id") if isinstance(message, dict) else None
                 # Add up all token types
-                tokens_used = (
-                    usage.get("input_tokens", 0)
-                    + usage.get("output_tokens", 0)
-                    + usage.get("cache_creation_input_tokens", 0)
-                    + usage.get("cache_read_input_tokens", 0)
-                )
+                input_tokens = int(usage.get("input_tokens", 0) or 0)
+                cache_create = int(usage.get("cache_creation_input_tokens", 0) or 0)
+                cache_read = int(usage.get("cache_read_input_tokens", 0) or 0)
+                output_tokens = int(usage.get("output_tokens", 0) or 0)
+                tokens_used = input_tokens + cache_create + cache_read + output_tokens
                 self.total_tokens += tokens_used
+                self.input_tokens += input_tokens + cache_create + cache_read
+                self.output_tokens += output_tokens
                 # Note: assistant messages don't have cost, only the final result does
+
+                usage_payload = {
+                    "input_tokens": input_tokens,
+                    "cache_creation_input_tokens": cache_create,
+                    "cache_read_input_tokens": cache_read,
+                    "output_tokens": output_tokens,
+                }
 
             if isinstance(message.get("content"), list):
                 # Extract text content for last_message
@@ -72,7 +85,12 @@ class ClaudeOutputParser:
                     if item.get("type") == "text":
                         text_parts.append(item.get("text", ""))
                     elif item.get("type") == "tool_use":
-                        return self._parse_tool_use(item, data)
+                        tool_event = self._parse_tool_use(item, data)
+                        if usage_payload:
+                            tool_event["usage"] = usage_payload
+                            if message_id:
+                                tool_event["message_id"] = message_id
+                        return tool_event
 
                 # Update last message if we have text
                 if text_parts:
@@ -91,6 +109,10 @@ class ClaudeOutputParser:
             "type": event_type,
             "timestamp": data.get("timestamp", datetime.now(timezone.utc).isoformat()),
         }
+        if event_type == "assistant" and usage_payload:
+            event["usage"] = usage_payload
+            if message_id:
+                event["message_id"] = message_id
         # Surface assistant text content in-stream for diagnostics/logging
         # This does not affect canonical events; it is only written to runner.jsonl
         if event_type == "assistant" and self.last_message:
@@ -132,6 +154,8 @@ class ClaudeOutputParser:
                 )
                 output_tokens = usage.get("output_tokens", 0)
                 total_tokens = input_tokens + output_tokens
+                self.input_tokens = int(input_tokens)
+                self.output_tokens = int(output_tokens)
 
             # Extract metrics from the result message (SDK format)
             event["metrics"] = {
@@ -151,6 +175,10 @@ class ClaudeOutputParser:
                 self.turn_count = data["num_turns"]
             if total_tokens > 0:
                 self.total_tokens = total_tokens
+                if not self.input_tokens and input_tokens:
+                    self.input_tokens = int(input_tokens)
+                if not self.output_tokens and output_tokens:
+                    self.output_tokens = int(output_tokens)
 
             return event
 
@@ -243,6 +271,8 @@ class ClaudeOutputParser:
             # Extract metrics from SDK data if available
             event["metrics"] = {
                 "total_tokens": self.total_tokens,
+                "input_tokens": self.input_tokens,
+                "output_tokens": self.output_tokens,
                 "total_cost": data.get("total_cost_usd", self.total_cost),
                 "turn_count": data.get("num_turns", self.turn_count),
                 "duration_ms": data.get("duration_ms", 0),
@@ -254,6 +284,17 @@ class ClaudeOutputParser:
                 self.total_cost = data["total_cost_usd"]
             if "num_turns" in data:
                 self.turn_count = data["num_turns"]
+            if "usage" in data:
+                usage = data["usage"]
+                try:
+                    self.input_tokens = int(
+                        (usage.get("input_tokens", 0) or 0)
+                        + (usage.get("cache_creation_input_tokens", 0) or 0)
+                        + (usage.get("cache_read_input_tokens", 0) or 0)
+                    )
+                    self.output_tokens = int(usage.get("output_tokens", 0) or 0)
+                except Exception:
+                    pass
 
             return event
 
@@ -351,6 +392,8 @@ class ClaudeOutputParser:
             "final_message": self.last_message,
             "metrics": {
                 "total_tokens": self.total_tokens,
+                "input_tokens": self.input_tokens,
+                "output_tokens": self.output_tokens,
                 "total_cost": self.total_cost,
                 "turn_count": self.turn_count,
             },

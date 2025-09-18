@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from typing import Any, Iterable, List
-from ...shared import InstanceResult
+from ...shared import InstanceResult, InstanceStatus
 
 from rich.console import Console
 
@@ -56,6 +56,10 @@ def _print_instance(console: Console, result) -> None:
 
 
 def _summary(console: Console, results: Iterable, state: Any | None) -> None:
+    # Normalize results to a list so we can iterate multiple times without
+    # exhausting a generator passed by the caller.
+    results_list = list(results)
+
     console.print("[bold]Summary:[/bold]")
     if state and hasattr(state, "strategies") and state.strategies:
         strat_states = [getattr(s, "state", "") for s in state.strategies.values()]
@@ -69,20 +73,81 @@ def _summary(console: Console, results: Iterable, state: Any | None) -> None:
             console.print("\n[blue]Run interrupted. To resume this run:[/blue]")
             console.print(f"  pitaya --resume {state.run_id}")
 
-    total_duration = sum(getattr(r, "duration_seconds", 0) or 0 for r in results)
-    total_cost = sum(getattr(r, "metrics", {}).get("total_cost", 0) for r in results)
-    success_count = sum(1 for r in results if getattr(r, "success", False))
-    int_count = sum(1 for r in results if getattr(r, "status", "") == "canceled")
-    failed_count = sum(
-        1
-        for r in results
-        if (not getattr(r, "success", False) and getattr(r, "status", "") != "canceled")
-    )
-    total_count = len(list(results))
+    # Prefer authoritative run-level aggregates from state when available.
+    total_duration_seconds = None
+    total_cost = None
+    total_tokens = None
+    success_count = None
+    int_count = None
+    failed_count = None
+    total_count = None
 
-    duration_str = _fmt_duration(total_duration)
+    if state is not None:
+        try:
+            if getattr(state, "started_at", None) and getattr(
+                state, "completed_at", None
+            ):
+                total_duration_seconds = max(
+                    0.0,
+                    (state.completed_at - state.started_at).total_seconds(),
+                )
+        except Exception:
+            total_duration_seconds = None
+
+        total_cost = getattr(state, "total_cost", None)
+        total_tokens = getattr(state, "total_tokens", None)
+
+        try:
+            inst_infos = list(getattr(state, "instances", {}).values())
+            if inst_infos:
+                success_count = sum(
+                    1 for i in inst_infos if i.state == InstanceStatus.COMPLETED
+                )
+                int_count = sum(
+                    1 for i in inst_infos if i.state == InstanceStatus.INTERRUPTED
+                )
+                failed_count = sum(
+                    1 for i in inst_infos if i.state == InstanceStatus.FAILED
+                )
+                total_count = len(inst_infos)
+        except Exception:
+            success_count = int_count = failed_count = total_count = None
+
+    # Fall back to per-result aggregation when state data is absent.
+    if total_duration_seconds is None:
+        total_duration_seconds = sum(
+            getattr(r, "duration_seconds", 0) or 0 for r in results_list
+        )
+    if total_cost is None:
+        total_cost = sum(
+            getattr(r, "metrics", {}).get("total_cost", 0) for r in results_list
+        )
+    if total_tokens is None:
+        total_tokens = sum(
+            getattr(r, "metrics", {}).get("total_tokens", 0) for r in results_list
+        )
+    if success_count is None:
+        success_count = sum(1 for r in results_list if getattr(r, "success", False))
+    if int_count is None:
+        int_count = sum(
+            1 for r in results_list if getattr(r, "status", "") == "canceled"
+        )
+    if failed_count is None:
+        failed_count = sum(
+            1
+            for r in results_list
+            if (
+                not getattr(r, "success", False)
+                and getattr(r, "status", "") != "canceled"
+            )
+        )
+    if total_count is None:
+        total_count = len(results_list)
+
+    duration_str = _fmt_duration(total_duration_seconds)
     console.print(f"  Total Duration: {duration_str}")
     console.print(f"  Total Cost: ${total_cost:.2f}")
+    console.print(f"  Total Tokens: {total_tokens:,}")
     console.print(
         f"  Instances: {success_count} succeeded, {int_count} canceled, {failed_count} failed (total {total_count})"
     )
@@ -141,4 +206,4 @@ def display_detailed_results(
         for r in results:
             _print_instance(console, r)
 
-    _summary(console, list(results), state)
+    _summary(console, results, state)

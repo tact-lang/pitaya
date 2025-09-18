@@ -1497,6 +1497,30 @@ class Orchestrator:
                     phase, activity = "assistant", "Agent is thinking..."
                 elif et == "instance.agent_system":
                     phase, activity = "system", "Agent connected"
+                extras: Dict[str, Any] = {}
+                if isinstance(data, dict):
+                    usage_payload = data.get("usage")
+                    if isinstance(usage_payload, dict):
+                        extras["usage"] = usage_payload
+                    message_id_val = data.get("message_id")
+                    if isinstance(message_id_val, str):
+                        extras["message_id"] = message_id_val
+                if et == "instance.agent_turn_complete":
+                    phase = "assistant"
+                    activity = None
+                    tm = data.get("turn_metrics", {}) if isinstance(data, dict) else {}
+                    if isinstance(tm, dict):
+                        usage = {
+                            "tokens": int(tm.get("tokens", 0) or 0),
+                            "total_tokens": int(tm.get("total_tokens", 0) or 0),
+                        }
+                        if "input_tokens" in tm:
+                            usage["input_tokens"] = int(tm.get("input_tokens", 0) or 0)
+                        if "output_tokens" in tm:
+                            usage["output_tokens"] = int(
+                                tm.get("output_tokens", 0) or 0
+                            )
+                        extras.setdefault("usage", usage)
 
                 if phase and task_key:
                     self.event_bus.emit_canonical(
@@ -1517,6 +1541,7 @@ class Orchestrator:
                             "phase": phase,
                             **({"activity": activity} if activity else {}),
                             **({"tool": tool} if tool else {}),
+                            **extras,
                         },
                     )
             except Exception:

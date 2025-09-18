@@ -32,6 +32,18 @@ _SENSITIVE_KEYS = (
     "secret",
     "cookie",
 )
+
+_TOKEN_USAGE_KEYS = {
+    "tokens",
+    "total_tokens",
+    "input_tokens",
+    "output_tokens",
+    "cache_creation_input_tokens",
+    "cache_read_input_tokens",
+    "cached_input_tokens",
+    "reasoning_output_tokens",
+    "tokens_used",
+}
 _PATTERNS = [
     _re.compile(r"(?i)(authorization\s*:\s*Bearer)\s+[A-Za-z0-9._\-]+"),
     _re.compile(r"sk-[A-Za-z0-9]{16,}"),
@@ -369,8 +381,7 @@ class EventBus:
             if isinstance(obj, dict):
                 out: Dict[str, Any] = {}
                 for k, v in obj.items():
-                    kl = str(k).lower()
-                    if any(s in kl for s in _SENSITIVE_KEYS):
+                    if self._is_sensitive_key(k):
                         # Field-name redaction: value replaced regardless of type
                         out[k] = "[REDACTED]"
                     else:
@@ -394,6 +405,21 @@ class EventBus:
             return obj
         except Exception:
             return obj
+
+    @staticmethod
+    def _is_sensitive_key(key: Any) -> bool:
+        """Return True if a dictionary key should be redacted."""
+
+        try:
+            kl = str(key).lower()
+        except Exception:
+            return False
+
+        # Preserve only known usage metric fields (avoid exposing secrets such as access_tokens).
+        if kl in _TOKEN_USAGE_KEYS:
+            return False
+
+        return any(s in kl for s in _SENSITIVE_KEYS)
 
     def set_custom_redaction_patterns(self, patterns: List[str]) -> None:
         """Set additional regex patterns to redact in event payloads/logs."""
