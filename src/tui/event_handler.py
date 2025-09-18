@@ -1011,36 +1011,64 @@ class EventProcessor:
 
         instance = self.state.current_run.instances[instance_id]
 
-        try:
-            tokens = int(metrics.get("tokens", 0) or 0)
-        except Exception:
-            tokens = 0
-        try:
-            total_tokens = int(metrics.get("total_tokens", 0) or 0)
-        except Exception:
-            total_tokens = 0
-        try:
-            input_tokens = int(metrics.get("input_tokens", 0) or 0)
-        except Exception:
-            input_tokens = 0
-        try:
-            output_tokens = int(metrics.get("output_tokens", 0) or 0)
-        except Exception:
-            output_tokens = 0
+        def _as_int(val: Any) -> int:
+            try:
+                return int(val or 0)
+            except Exception:
+                return 0
+
+        input_tokens = _as_int(metrics.get("input_tokens"))
+        output_tokens = _as_int(metrics.get("output_tokens"))
+        cache_creation = _as_int(metrics.get("cache_creation_input_tokens"))
+        cache_read = _as_int(
+            metrics.get("cache_read_input_tokens", metrics.get("cached_input_tokens"))
+        )
+        reasoning_tokens = _as_int(metrics.get("reasoning_output_tokens"))
+        tokens = _as_int(metrics.get("tokens"))
+        total_tokens = _as_int(metrics.get("total_tokens"))
+
+        usage = {
+            "input_tokens": input_tokens,
+            "cache_creation_input_tokens": cache_creation,
+            "cache_read_input_tokens": cache_read,
+            "output_tokens": output_tokens + reasoning_tokens,
+        }
+        if tokens:
+            usage["tokens"] = tokens
 
         prev_total = instance.total_tokens
-        if total_tokens:
-            instance.total_tokens = max(instance.total_tokens, total_tokens)
-            delta_total = instance.total_tokens - prev_total
+        turn_number = data.get("turn_number")
+        message_id = (
+            f"turn-{turn_number}"
+            if isinstance(turn_number, (int, float, str))
+            else None
+        )
+
+        self._apply_usage_metrics(instance, usage, message_id)
+
+        post_usage_total = instance.total_tokens
+        if total_tokens and total_tokens > instance.total_tokens:
+            instance.total_tokens = total_tokens
+            instance.usage_running_total = max(
+                instance.usage_running_total, total_tokens
+            )
+            delta_total = total_tokens - post_usage_total
+            if self.state.current_run and delta_total > 0:
+                self.state.current_run.total_tokens += delta_total
         else:
-            instance.total_tokens += tokens
-            delta_total = tokens
+            delta_total = instance.total_tokens - prev_total
 
-        instance.input_tokens += input_tokens
-        instance.output_tokens += output_tokens
-
-        if self.state.current_run and delta_total > 0:
-            self.state.current_run.total_tokens += delta_total
+        if input_tokens and input_tokens > instance.input_tokens:
+            instance.input_tokens = input_tokens
+            instance.usage_input_running_total = max(
+                instance.usage_input_running_total, input_tokens
+            )
+        if output_tokens and output_tokens + reasoning_tokens > instance.output_tokens:
+            instance.output_tokens = output_tokens + reasoning_tokens
+            instance.usage_output_running_total = max(
+                instance.usage_output_running_total,
+                output_tokens + reasoning_tokens,
+            )
 
     def _handle_agent_tool_use(self, event: Dict[str, Any]) -> None:
         """Handle agent tool use."""
