@@ -65,8 +65,8 @@ class CodexPlugin(RunnerPlugin):
             supports_token_counts=True,
             supports_streaming=True,
             supports_cost_limits=False,
-            requires_auth=False,  # allow OSS mode; OpenAI auth optional
-            auth_methods=["api_key", "oss"],  # reflect actual supported auth paths
+            requires_auth=True,
+            auth_methods=["api_key"],
         )
 
     async def validate_environment(
