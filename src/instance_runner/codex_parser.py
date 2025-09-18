@@ -25,6 +25,7 @@ class CodexOutputParser:
         self.tokens_in: int = 0
         self.tokens_out: int = 0
         self.total_tokens: int = 0
+        self.last_error: Optional[str] = None
         self._seen_shutdown: bool = False
 
     def _ts(self, src: Dict[str, Any]) -> str:
@@ -122,6 +123,8 @@ class CodexOutputParser:
                 "turn_metrics": {
                     "tokens": tt,
                     "total_tokens": self.total_tokens,
+                    "input_tokens": self.tokens_in,
+                    "output_tokens": self.tokens_out,
                 },
             }
 
@@ -236,8 +239,15 @@ class CodexOutputParser:
             }
 
         # Error pass-through
-        if et == "error":
-            emsg = data.get("error") or data.get("message") or obj.get("detail")
+        if et in {"error", "stream_error"}:
+            emsg = (
+                data.get("error")
+                or data.get("message")
+                or obj.get("detail")
+                or obj.get("status")
+            )
+            if emsg:
+                self.last_error = str(emsg)
             return {
                 "type": "error",
                 "timestamp": self._ts(obj),
@@ -265,4 +275,5 @@ class CodexOutputParser:
                 "output_tokens": self.tokens_out,
                 "total_tokens": self.total_tokens or (self.tokens_in + self.tokens_out),
             },
+            "error": self.last_error,
         }
