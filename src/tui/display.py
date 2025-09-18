@@ -684,7 +684,7 @@ class TUIDisplay:
             if inst.total_tokens:
                 tbl.add_row(
                     "Tokens:",
-                    f"{inst.total_tokens:,} (↓{inst.input_tokens:,} ↑{inst.output_tokens:,})",
+                    f"{inst.total_tokens:,} (↓{inst.output_tokens:,} ↑{inst.input_tokens:,})",
                 )
             if inst.cost:
                 tbl.add_row("Cost:", f"${inst.cost:.2f}")
@@ -775,9 +775,9 @@ class TUIDisplay:
                 line1.append("Tokens: ", style="bold white")
                 line1.append(f"{total_tokens:,}", style="bright_white")
                 line1.append(" (", style="white")
-                line1.append(f"↓{total_tokens_in:,}", style="bright_white")
+                line1.append(f"↓{total_tokens_out:,}", style="bright_white")
                 line1.append(" ", style="white")
-                line1.append(f"↑{total_tokens_out:,}", style="bright_white")
+                line1.append(f"↑{total_tokens_in:,}", style="bright_white")
                 line1.append(")  •  ", style="white")
                 line1.append("Cost: ", style="bold white")
                 line1.append(f"${total_cost:.4f}", style="bright_magenta")

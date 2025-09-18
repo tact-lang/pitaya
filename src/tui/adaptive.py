@@ -277,7 +277,7 @@ class AdaptiveDisplay:
 
         # Tokens and cost
         try:
-            token_text = f"{instance.total_tokens:,} (↓{instance.input_tokens:,} ↑{instance.output_tokens:,})"
+            token_text = f"{instance.total_tokens:,} (↓{instance.output_tokens:,} ↑{instance.input_tokens:,})"
             table.add_row("Tokens:", token_text)
         except Exception:
             pass
@@ -457,7 +457,7 @@ class AdaptiveDisplay:
                     br = br_full
                 tokens_disp = f"{inst.total_tokens:,}"
                 try:
-                    tokens_disp = f"{inst.total_tokens:,} (↓{inst.input_tokens:,} ↑{inst.output_tokens:,})"
+                    tokens_disp = f"{inst.total_tokens:,} (↓{inst.output_tokens:,} ↑{inst.input_tokens:,})"
                 except Exception:
                     pass
                 cost_disp = f"${inst.cost:.4f}" if inst.cost else "-"

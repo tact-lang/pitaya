@@ -382,8 +382,10 @@ class EventProcessor:
                     pass
                 try:
                     delta_total = inst.total_tokens - prev_total
-                    if delta_total > 0 and self.state.current_run:
-                        self.state.current_run.total_tokens += delta_total
+                    if delta_total > 0:
+                        if self.state.current_run:
+                            self.state.current_run.total_tokens += delta_total
+                        inst.applied_run_tokens += delta_total
                 except Exception:
                     pass
             # Capture final message info
@@ -768,13 +770,29 @@ class EventProcessor:
         instance.input_tokens = metrics.get("input_tokens", 0)
         instance.output_tokens = metrics.get("output_tokens", 0)
 
-        # Update run totals
+        # Update run totals (avoid double-counting tokens/cost)
         self.state.current_run.completed_instances += 1
         self.state.current_run.active_instances = max(
             0, self.state.current_run.active_instances - 1
         )
-        self.state.current_run.total_cost += instance.cost
-        self.state.current_run.total_tokens += instance.total_tokens
+
+        try:
+            final_tokens = int(instance.total_tokens or 0)
+        except Exception:
+            final_tokens = 0
+        token_delta = max(0, final_tokens - getattr(instance, "applied_run_tokens", 0))
+        if token_delta > 0:
+            instance.applied_run_tokens += token_delta
+            self.state.current_run.total_tokens += token_delta
+
+        try:
+            final_cost = float(instance.cost or 0.0)
+        except Exception:
+            final_cost = 0.0
+        cost_delta = max(0.0, final_cost - getattr(instance, "applied_run_cost", 0.0))
+        if cost_delta > 0.0:
+            instance.applied_run_cost += cost_delta
+            self.state.current_run.total_cost += cost_delta
 
         logger.info(
             f"Instance {instance_id} completed. Run totals - Completed: {self.state.current_run.completed_instances}, Active: {self.state.current_run.active_instances}"
@@ -860,10 +878,21 @@ class EventProcessor:
         cache_creation = _as_int(usage.get("cache_creation_input_tokens"))
         cache_read = _as_int(usage.get("cache_read_input_tokens"))
         output_tokens = _as_int(usage.get("output_tokens"))
+        output_tokens += _as_int(usage.get("reasoning_output_tokens"))
 
         cumulative_input = input_tokens + cache_creation + cache_read
         cumulative_output = output_tokens
-        cumulative_total = cumulative_input + cumulative_output
+
+        explicit_total = usage.get("tokens")
+        if explicit_total is None:
+            explicit_total = usage.get("total_tokens")
+        if explicit_total is not None:
+            try:
+                cumulative_total = max(0, int(explicit_total))
+            except Exception:
+                cumulative_total = cumulative_input + cumulative_output
+        else:
+            cumulative_total = cumulative_input + cumulative_output
 
         prev_usage_total = getattr(instance, "usage_running_total", 0)
         prev_input_total = getattr(instance, "usage_input_running_total", 0)
@@ -891,11 +920,13 @@ class EventProcessor:
         if message_id:
             instance.usage_message_ids.add(message_id)
 
-        if delta_total and self.state.current_run:
-            try:
-                self.state.current_run.total_tokens += delta_total
-            except Exception:
-                pass
+        if delta_total > 0:
+            if self.state.current_run:
+                try:
+                    self.state.current_run.total_tokens += delta_total
+                except Exception:
+                    pass
+            instance.applied_run_tokens += delta_total
 
     def _handle_state_instance_registered(self, event: Dict[str, Any]) -> None:
         """Handle state.instance_registered snapshot to populate strategy name early."""
@@ -1053,8 +1084,10 @@ class EventProcessor:
                 instance.usage_running_total, total_tokens
             )
             delta_total = total_tokens - post_usage_total
-            if self.state.current_run and delta_total > 0:
-                self.state.current_run.total_tokens += delta_total
+            if delta_total > 0:
+                if self.state.current_run:
+                    self.state.current_run.total_tokens += delta_total
+                instance.applied_run_tokens += delta_total
         else:
             delta_total = instance.total_tokens - prev_total
 
@@ -1157,11 +1190,13 @@ class EventProcessor:
             )
 
             delta_total = total_tokens - prev_total
-            if delta_total and self.state.current_run:
-                try:
-                    self.state.current_run.total_tokens += delta_total
-                except Exception:
-                    pass
+            if delta_total > 0:
+                if self.state.current_run:
+                    try:
+                        self.state.current_run.total_tokens += delta_total
+                    except Exception:
+                        pass
+                instance.applied_run_tokens += delta_total
 
             if instance.cost == 0.0:
                 try:
