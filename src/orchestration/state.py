@@ -858,7 +858,9 @@ class StateManager:
                             try:
                                 i.aggregated_cost = max(
                                     i.aggregated_cost,
-                                    float(i.result.metrics.get("total_cost", 0.0) or 0.0),
+                                    float(
+                                        i.result.metrics.get("total_cost", 0.0) or 0.0
+                                    ),
                                 )
                                 i.aggregated_tokens = max(
                                     i.aggregated_tokens,
