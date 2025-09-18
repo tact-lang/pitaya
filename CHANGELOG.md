@@ -16,6 +16,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - TUI: coordinated error handling and graceful teardown; surface friendly errors instead of plain crashes. ([#80](https://github.com/tact-lang/pitaya/pull/80))
 - Errors: propagate agent `final_message`/metrics on failures and show `error_type` + per‑instance log hint in the summary. ([#80](https://github.com/tact-lang/pitaya/pull/80))
+- Codex plugin: emit streaming token usage/errors so the TUI shows live progress and surfaces CLI auth failures. ([#87](https://github.com/tact-lang/pitaya/pull/87))
 
 ### Changed
 
