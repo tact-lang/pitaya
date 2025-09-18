@@ -81,11 +81,12 @@ Built‑ins: simple, scoring, best-of-n, iterative, bug-finding, doc-review
 - OpenRouter (Codex plugin) example:
 
   ```bash
+  export OPENROUTER_API_KEY=...
+  export OPENROUTER_BASE_URL=https://openrouter.ai/api/v1
+
   pitaya "Write the funniest and most original joke possible" \
     --plugin codex \
-    --model "openai/gpt-5" \
-    --api-key "$OPENROUTER_API_KEY" \
-    --base-url https://openrouter.ai/api/v1
+    --model "openai/gpt-5"
   ```
 
 ## Repository

@@ -22,6 +22,21 @@ __all__ = ["CodexPlugin"]
 
 _ENV_API_KEY = "OPENAI_API_KEY"
 _ENV_BASE_URL = "OPENAI_BASE_URL"
+_ENV_PROVIDER_OVERRIDE = "CODEX_ENV_KEY"
+_ENV_BASE_OVERRIDE = "CODEX_BASE_URL"
+_ENV_PROVIDER_NAME_OVERRIDE = "CODEX_MODEL_PROVIDER"
+
+_PROVIDER_ENV_CANDIDATES: Tuple[Tuple[str, str], ...] = (
+    ("OPENAI_API_KEY", "OPENAI_BASE_URL"),
+    ("OPENROUTER_API_KEY", "OPENROUTER_BASE_URL"),
+    ("AZURE_OPENAI_API_KEY", "AZURE_OPENAI_BASE_URL"),
+    ("GROQ_API_KEY", "GROQ_BASE_URL"),
+    ("MISTRAL_API_KEY", "MISTRAL_BASE_URL"),
+    ("GEMINI_API_KEY", "GEMINI_BASE_URL"),
+    ("DEEPSEEK_API_KEY", "DEEPSEEK_BASE_URL"),
+    ("OLLAMA_API_KEY", "OLLAMA_BASE_URL"),
+    ("ARCEEAI_API_KEY", "ARCEEAI_BASE_URL"),
+)
 _DEFAULT_IMAGE = "pitaya-agents:latest"
 _BASE_COMMAND = ["codex", "exec", "--json", "-C", "/workspace"]
 _SANDBOX_FLAGS = ["--skip-git-repo-check", "--dangerously-bypass-approvals-and-sandbox"]
@@ -57,15 +72,18 @@ class CodexPlugin(RunnerPlugin):
     async def validate_environment(
         self, auth_config: Optional[Dict[str, Any]] = None
     ) -> Tuple[bool, Optional[str]]:
-        """Validate Codex can run (auth optional)."""
-        # Codex supports multiple providers. For OpenAI, accept OPENAI_API_KEY via
-        # auth_config or environment; otherwise, proceed without hard requirement.
+        """Ensure a Codex API key is available before running."""
         if auth_config and auth_config.get("api_key"):
             return True, None
-        if os.environ.get(_ENV_API_KEY):
+        if _select_provider_env_key():
             return True, None
-        # No API key is still valid (OSS modes); runner will rely on container tooling
-        return True, None
+        return (
+            False,
+            (
+                "Missing Codex API key. Provide --api-key, set runner.api_key, "
+                "or export an environment variable like OPENAI_API_KEY."
+            ),
+        )
 
     async def prepare_environment(
         self,
@@ -102,21 +120,35 @@ class CodexPlugin(RunnerPlugin):
         if model:
             cmd += ["-m", model]
 
-        provider_base_url = kwargs.get("provider_base_url")
-        provider_env_key = kwargs.get("provider_env_key") or _ENV_API_KEY
-        if provider_base_url:
+        provider_env_key = kwargs.get("provider_env_key") or _select_provider_env_key()
+        provider_base_url = kwargs.get(
+            "provider_base_url"
+        ) or _select_provider_base_url(provider_env_key)
+
+        provider_name = kwargs.get("provider_name") or _select_provider_name(
+            provider_env_key
+        )
+
+        if provider_env_key and (
+            provider_env_key != _ENV_API_KEY or provider_base_url or provider_name
+        ):
             # Select a custom provider key and map model + provider config
-            cmd += ["-c", "model_provider=pitaya_custom"]
-            if model:
-                cmd += ["-c", f'model="{model}"']
-            # Brace escaping for f-string: double {{ }} to emit literal braces
+            provider_label = provider_name or "pitaya_env"
+            cmd += ["-c", f"model_provider={provider_label}"]
+            provider_display = provider_name or "PitayaProvider"
+            provider_parts = [f'name="{provider_display}"']
+            if provider_base_url:
+                provider_parts.append(f'base_url="{provider_base_url}"')
+            provider_parts.append(f'env_key="{provider_env_key}"')
             cmd += [
                 "-c",
                 (
-                    f"model_providers.pitaya_custom="
-                    f'{{ name="CustomProvider", base_url="{provider_base_url}", env_key="{provider_env_key}" }}'
+                    f"model_providers.{provider_label}="
+                    "{" + ", ".join(provider_parts) + "}"
                 ),
             ]
+            if model:
+                cmd += ["-c", f'model="{model}"']
 
         # Resume/reattach: experimental; accept session_id when provided
         # (Codex may expect a rollout path; we pass session id to be safe if supported)
@@ -240,9 +272,54 @@ def _collect_codex_env(auth_config: Optional[Dict[str, Any]]) -> Dict[str, str]:
         if auth_config.get("base_url"):
             env[_ENV_BASE_URL] = str(auth_config["base_url"])
 
-    if _ENV_API_KEY in os.environ:
-        env.setdefault(_ENV_API_KEY, os.environ[_ENV_API_KEY])
-    if _ENV_BASE_URL in os.environ:
-        env.setdefault(_ENV_BASE_URL, os.environ[_ENV_BASE_URL])
+    for env_key, base_key in _PROVIDER_ENV_CANDIDATES:
+        if env_key in os.environ:
+            env.setdefault(env_key, os.environ[env_key])
+        if base_key in os.environ:
+            env.setdefault(base_key, os.environ[base_key])
+
+    if _ENV_PROVIDER_OVERRIDE in os.environ:
+        override_env = os.environ[_ENV_PROVIDER_OVERRIDE]
+        if override_env and override_env in os.environ:
+            env.setdefault(override_env, os.environ[override_env])
+    if _ENV_BASE_OVERRIDE in os.environ:
+        env.setdefault(_ENV_BASE_URL, os.environ[_ENV_BASE_OVERRIDE])
 
     return env
+
+
+def _select_provider_env_key() -> Optional[str]:
+    override = os.environ.get(_ENV_PROVIDER_OVERRIDE)
+    if override:
+        return override
+    if _ENV_API_KEY in os.environ:
+        return _ENV_API_KEY
+    for env_key, _ in _PROVIDER_ENV_CANDIDATES:
+        if env_key in os.environ:
+            return env_key
+    return None
+
+
+def _select_provider_base_url(env_key: Optional[str]) -> Optional[str]:
+    if os.environ.get(_ENV_BASE_OVERRIDE):
+        return os.environ[_ENV_BASE_OVERRIDE]
+    if env_key:
+        for candidate_key, base_key in _PROVIDER_ENV_CANDIDATES:
+            if candidate_key == env_key and base_key in os.environ:
+                return os.environ[base_key]
+    if _ENV_BASE_URL in os.environ:
+        return os.environ[_ENV_BASE_URL]
+    return None
+
+
+def _select_provider_name(env_key: Optional[str]) -> Optional[str]:
+    if os.environ.get(_ENV_PROVIDER_NAME_OVERRIDE):
+        return os.environ[_ENV_PROVIDER_NAME_OVERRIDE]
+    if not env_key:
+        return None
+    if env_key == _ENV_API_KEY:
+        return None
+    prefix = env_key.lower().replace("_api_key", "")
+    if prefix:
+        return prefix
+    return None
