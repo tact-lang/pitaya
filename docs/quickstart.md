@@ -80,9 +80,9 @@ Choose a plugin and set credentials. By default Pitaya uses the Claude Code plug
 - Codex CLI (OpenAI‑compatible):
 
   ```bash
-  export OPENAI_API_KEY=…
+  export OPENAI_API_KEY=…          # or OPENROUTER_API_KEY, GROQ_API_KEY, etc.
   # optional
-  export OPENAI_BASE_URL=…
+  export OPENAI_BASE_URL=…         # provider-base overrides are auto-detected
   ```
 
 You can also pass `--api-key`, `--oauth-token`, and `--base-url` via CLI.

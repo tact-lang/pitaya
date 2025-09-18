@@ -61,8 +61,9 @@ logging:
   - `ANTHROPIC_API_KEY`
   - `ANTHROPIC_BASE_URL`
 - Codex CLI / OpenAI‑compatible:
-  - `OPENAI_API_KEY`
-  - `OPENAI_BASE_URL`
+  - Auto-detected API keys: `OPENAI_API_KEY`, `OPENROUTER_API_KEY`, `GROQ_API_KEY`, `AZURE_OPENAI_API_KEY`, etc.
+  - Optional base URLs: `OPENAI_BASE_URL`, `OPENROUTER_BASE_URL`, …
+  - Advanced overrides: `CODEX_ENV_KEY`, `CODEX_BASE_URL`, `CODEX_MODEL_PROVIDER`
 
 `.env` files are loaded as a separate layer (useful in development). Loading is best-effort: if `python-dotenv` is not installed, Pitaya skips this layer without raising. Secrets are redacted by default in `pitaya config print` unless `PITAYA_ALLOW_UNREDACTED=1` and `--redact false` are used.
 

@@ -57,7 +57,7 @@ Prefer a custom image? Use any base you like as long as it includes the required
 Authenticate:
 
 - Claude Code: set `CLAUDE_CODE_OAUTH_TOKEN` (subscription) or `ANTHROPIC_API_KEY`
-- Codex CLI: set `OPENAI_API_KEY` (and optionally `OPENAI_BASE_URL`)
+- Codex CLI: export the API key for your provider (`OPENAI_API_KEY`, `OPENROUTER_API_KEY`, `GROQ_API_KEY`, etc.). Optional base URLs (such as `OPENROUTER_BASE_URL`) are detected automatically.
 
 ## Quickstart
 

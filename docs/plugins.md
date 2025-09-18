@@ -45,20 +45,31 @@ export ANTHROPIC_BASE_URL=...
 Codex CLI / OpenAI‑compatible
 
 ```bash
+# Any of these work; the plugin auto-detects them
 export OPENAI_API_KEY=...
-# Optional custom endpoint
+export OPENROUTER_API_KEY=...
+export GROQ_API_KEY=...
+# Optional provider-specific base URLs
 export OPENAI_BASE_URL=...
+export OPENROUTER_BASE_URL=...
 ```
 
 OpenRouter example
 
 ```bash
+export OPENROUTER_API_KEY=...
+export OPENROUTER_BASE_URL=https://openrouter.ai/api/v1
+
 pitaya "Write the funniest and most original joke possible" \
   --plugin codex \
-  --model "openai/gpt-5" \
-  --api-key "$OPENROUTER_API_KEY" \
-  --base-url https://openrouter.ai/api/v1
+  --model "openai/gpt-5"
 ```
+
+Advanced overrides:
+
+- `CODEX_ENV_KEY`: force the env var name Codex should read (useful when your key lives under a non-standard name).
+- `CODEX_BASE_URL`: override the detected base URL for the current run.
+- `CODEX_MODEL_PROVIDER`: set the temporary `model_provider` identifier passed to Codex.
 
 ### Validation & errors
 
