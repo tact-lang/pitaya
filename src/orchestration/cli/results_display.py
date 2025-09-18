@@ -84,7 +84,9 @@ def _summary(console: Console, results: Iterable, state: Any | None) -> None:
 
     if state is not None:
         try:
-            if getattr(state, "started_at", None) and getattr(state, "completed_at", None):
+            if getattr(state, "started_at", None) and getattr(
+                state, "completed_at", None
+            ):
                 total_duration_seconds = max(
                     0.0,
                     (state.completed_at - state.started_at).total_seconds(),
@@ -98,9 +100,15 @@ def _summary(console: Console, results: Iterable, state: Any | None) -> None:
         try:
             inst_infos = list(getattr(state, "instances", {}).values())
             if inst_infos:
-                success_count = sum(1 for i in inst_infos if i.state == InstanceStatus.COMPLETED)
-                int_count = sum(1 for i in inst_infos if i.state == InstanceStatus.INTERRUPTED)
-                failed_count = sum(1 for i in inst_infos if i.state == InstanceStatus.FAILED)
+                success_count = sum(
+                    1 for i in inst_infos if i.state == InstanceStatus.COMPLETED
+                )
+                int_count = sum(
+                    1 for i in inst_infos if i.state == InstanceStatus.INTERRUPTED
+                )
+                failed_count = sum(
+                    1 for i in inst_infos if i.state == InstanceStatus.FAILED
+                )
                 total_count = len(inst_infos)
         except Exception:
             success_count = int_count = failed_count = total_count = None
@@ -121,13 +129,17 @@ def _summary(console: Console, results: Iterable, state: Any | None) -> None:
     if success_count is None:
         success_count = sum(1 for r in results_list if getattr(r, "success", False))
     if int_count is None:
-        int_count = sum(1 for r in results_list if getattr(r, "status", "") == "canceled")
+        int_count = sum(
+            1 for r in results_list if getattr(r, "status", "") == "canceled"
+        )
     if failed_count is None:
         failed_count = sum(
             1
             for r in results_list
-            if (not getattr(r, "success", False)
-                and getattr(r, "status", "") != "canceled")
+            if (
+                not getattr(r, "success", False)
+                and getattr(r, "status", "") != "canceled"
+            )
         )
     if total_count is None:
         total_count = len(results_list)

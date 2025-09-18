@@ -461,7 +461,9 @@ class AdaptiveDisplay:
                 except Exception:
                     pass
                 cost_disp = f"${inst.cost:.4f}" if inst.cost else "-"
-                rows.append((stat_str, inst_label, act, dur, tokens_disp, cost_disp, br))
+                rows.append(
+                    (stat_str, inst_label, act, dur, tokens_disp, cost_disp, br)
+                )
 
             # Fixed widths for consistency
             STATUS_W = 12

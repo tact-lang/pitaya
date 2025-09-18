@@ -359,7 +359,9 @@ class EventProcessor:
                     tt = metrics.get("total_tokens")
                     if isinstance(tt, (int, float)):
                         inst.total_tokens = int(tt)
-                        inst.usage_running_total = max(inst.usage_running_total, inst.total_tokens)
+                        inst.usage_running_total = max(
+                            inst.usage_running_total, inst.total_tokens
+                        )
                 except Exception:
                     pass
                 # Optional in/out tokens
@@ -368,10 +370,14 @@ class EventProcessor:
                     ot = metrics.get("output_tokens")
                     if isinstance(it, (int, float)):
                         inst.input_tokens = int(it)
-                        inst.usage_input_running_total = max(inst.usage_input_running_total, inst.input_tokens)
+                        inst.usage_input_running_total = max(
+                            inst.usage_input_running_total, inst.input_tokens
+                        )
                     if isinstance(ot, (int, float)):
                         inst.output_tokens = int(ot)
-                        inst.usage_output_running_total = max(inst.usage_output_running_total, inst.output_tokens)
+                        inst.usage_output_running_total = max(
+                            inst.usage_output_running_total, inst.output_tokens
+                        )
                 except Exception:
                     pass
                 try:
@@ -452,7 +458,11 @@ class EventProcessor:
         if isinstance(data, dict):
             usage_payload = data.get("usage")
             if isinstance(usage_payload, dict):
-                message_id = data.get("message_id") if isinstance(data.get("message_id"), str) else None
+                message_id = (
+                    data.get("message_id")
+                    if isinstance(data.get("message_id"), str)
+                    else None
+                )
                 self._apply_usage_metrics(inst, usage_payload, message_id)
         # Append progress message (phase/activity/tool)
         phase = data.get("phase")
@@ -823,11 +833,18 @@ class EventProcessor:
         if isinstance(data, dict):
             usage_payload = data.get("usage")
             if isinstance(usage_payload, dict):
-                message_id = data.get("message_id") if isinstance(data.get("message_id"), str) else None
+                message_id = (
+                    data.get("message_id")
+                    if isinstance(data.get("message_id"), str)
+                    else None
+                )
                 self._apply_usage_metrics(instance, usage_payload, message_id)
 
     def _apply_usage_metrics(
-        self, instance: InstanceDisplay, usage: Dict[str, Any], message_id: Optional[str] = None
+        self,
+        instance: InstanceDisplay,
+        usage: Dict[str, Any],
+        message_id: Optional[str] = None,
     ) -> None:
         """Incrementally apply token usage to an instance and run totals."""
         if message_id and message_id in instance.usage_message_ids:
@@ -1077,24 +1094,39 @@ class EventProcessor:
         if metrics:
             prev_total = instance.total_tokens
             try:
-                total_tokens = int(metrics.get("total_tokens", instance.total_tokens) or instance.total_tokens)
+                total_tokens = int(
+                    metrics.get("total_tokens", instance.total_tokens)
+                    or instance.total_tokens
+                )
             except Exception:
                 total_tokens = instance.total_tokens
             try:
-                input_tokens = int(metrics.get("input_tokens", instance.input_tokens) or instance.input_tokens)
+                input_tokens = int(
+                    metrics.get("input_tokens", instance.input_tokens)
+                    or instance.input_tokens
+                )
             except Exception:
                 input_tokens = instance.input_tokens
             try:
-                output_tokens = int(metrics.get("output_tokens", instance.output_tokens) or instance.output_tokens)
+                output_tokens = int(
+                    metrics.get("output_tokens", instance.output_tokens)
+                    or instance.output_tokens
+                )
             except Exception:
                 output_tokens = instance.output_tokens
 
             instance.total_tokens = total_tokens
             instance.input_tokens = input_tokens
             instance.output_tokens = output_tokens
-            instance.usage_running_total = max(instance.usage_running_total, total_tokens)
-            instance.usage_input_running_total = max(instance.usage_input_running_total, input_tokens)
-            instance.usage_output_running_total = max(instance.usage_output_running_total, output_tokens)
+            instance.usage_running_total = max(
+                instance.usage_running_total, total_tokens
+            )
+            instance.usage_input_running_total = max(
+                instance.usage_input_running_total, input_tokens
+            )
+            instance.usage_output_running_total = max(
+                instance.usage_output_running_total, output_tokens
+            )
 
             delta_total = total_tokens - prev_total
             if delta_total and self.state.current_run:

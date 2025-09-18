@@ -1517,7 +1517,9 @@ class Orchestrator:
                         if "input_tokens" in tm:
                             usage["input_tokens"] = int(tm.get("input_tokens", 0) or 0)
                         if "output_tokens" in tm:
-                            usage["output_tokens"] = int(tm.get("output_tokens", 0) or 0)
+                            usage["output_tokens"] = int(
+                                tm.get("output_tokens", 0) or 0
+                            )
                         extras.setdefault("usage", usage)
 
                 if phase and task_key:
