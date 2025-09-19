@@ -203,8 +203,13 @@ class PRReviewStrategy(Strategy):
             "LOW": 0,
             "INFO": 0,
         }
+        any_invalid_json = False
+        invalid_indices: List[int] = []
         for i, vres in validated:
-            verdict, counts = _extract_summary(vres.final_message or "")
+            verdict, counts, valid_json = _extract_summary(vres.final_message or "")
+            if not valid_json:
+                any_invalid_json = True
+                invalid_indices.append(i)
             if verdict and verdict.upper() in ("NEEDS_CHANGES", "FAIL"):
                 should_fail = True
             for sev in cfg.fail_on or []:
@@ -216,6 +221,10 @@ class PRReviewStrategy(Strategy):
                     agg_counts[k.upper()] = agg_counts.get(k.upper(), 0) + int(v)
                 except Exception:
                     continue
+
+        # Missing/invalid summary JSON forces failure under default policy
+        if any_invalid_json:
+            should_fail = True
 
         # Apply CI failure policy
         policy = str(cfg.ci_fail_policy)
@@ -242,6 +251,7 @@ class PRReviewStrategy(Strategy):
                 comp_res.metadata["pr_review"] = {
                     "role": "composer",
                     "reviewers": int(cfg.reviewers),
+                    "invalid_validator_trailers": invalid_indices,
                 }
             except Exception:
                 pass
@@ -249,10 +259,21 @@ class PRReviewStrategy(Strategy):
                 try:
                     comp_res.success = False
                     comp_res.status = "failed"
-                    comp_res.error_type = "review_needs_changes"
+                    comp_res.error_type = (
+                        "review_invalid_summary"
+                        if any_invalid_json
+                        else "review_needs_changes"
+                    )
                     comp_res.error = (
-                        "PR review verdict is NEEDS_CHANGES; failing per policy. "
-                        f"Counts: {agg_counts}"
+                        (
+                            "One or more validator summaries missing/invalid JSON trailer; failing. "
+                            f"Invalid indices: {invalid_indices}"
+                        )
+                        if any_invalid_json
+                        else (
+                            "PR review verdict is NEEDS_CHANGES; failing per policy. "
+                            f"Counts: {agg_counts}"
+                        )
                     )
                 except Exception:
                     pass
@@ -290,20 +311,19 @@ def _compute_diff(repo: Path, base_branch: str, max_chars: int = 120_000) -> str
     return "(diff unavailable; provide high-level feedback based on repo context)"
 
 
-def _extract_summary(md_text: str) -> Tuple[Optional[str], Dict[str, int]]:
-    """Extract a JSON trailer from the validator report.
+def _extract_summary(md_text: str) -> Tuple[Optional[str], Dict[str, int], bool]:
+    """Extract validator summary JSON. Returns (verdict, counts, is_valid_json).
 
-    Expect a fenced block at the end:
-
-    ```json
-    {"verdict":"NEEDS_CHANGES","counts":{"BLOCKER":1,"HIGH":0,"MEDIUM":2,"LOW":1,"INFO":0}}
-    ```
+    A valid trailer must be a fenced JSON block at the end with fields:
+    - verdict: "PASS" or "NEEDS_CHANGES"
+    - counts: dict of severities → integer counts
     """
-    verdict = None
+    verdict: Optional[str] = None
     counts: Dict[str, int] = {}
+    valid = False
     if not md_text:
-        return verdict, counts
-    # Try JSON fenced code block
+        return verdict, counts, valid
+    # Strict: require a JSON fenced block
     m = re.search(
         r"```json\s*(\{[\s\S]*?\})\s*```\s*$",
         md_text,
@@ -314,27 +334,34 @@ def _extract_summary(md_text: str) -> Tuple[Optional[str], Dict[str, int]]:
             obj = json.loads(m.group(1))
             if isinstance(obj, dict):
                 v = obj.get("verdict")
-                if isinstance(v, str):
-                    verdict = v
                 c = obj.get("counts")
-                if isinstance(c, dict):
-                    for k, v in c.items():
+                if (
+                    isinstance(v, str)
+                    and v.upper() in ("PASS", "NEEDS_CHANGES")
+                    and isinstance(c, dict)
+                ):
+                    verdict = v
+                    for k, vv in c.items():
                         try:
-                            counts[str(k).upper()] = int(v)
+                            counts[str(k).upper()] = int(vv)
                         except Exception:
-                            continue
+                            # Non-integer value -> invalid
+                            valid = False
+                            break
+                    else:
+                        valid = True
         except Exception:
-            pass
-    # Fallback: scan for a Verdict line
-    if not verdict:
+            valid = False
+    # Fallback: read a human verdict for display only (still invalid JSON)
+    if not valid:
         vm = re.search(
             r"^\s*Overall Verdict\s*:\s*(.+)$",
             md_text,
             flags=re.IGNORECASE | re.MULTILINE,
         )
-        if vm:
+        if vm and not verdict:
             verdict = vm.group(1).strip()
-    return verdict, counts
+    return verdict, counts, valid
 
 
 def _build_reviewer_prompt(
