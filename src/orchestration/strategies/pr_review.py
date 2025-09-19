@@ -41,7 +41,9 @@ class PRReviewConfig(StrategyConfig):
     validator_max_retries: int = 1
     report_dir: str = "reports/pr-review"
     base_branch: str = "origin/main"
-    fail_on: List[str] = field(default_factory=lambda: ["BLOCKER", "HIGH"])  # severities
+    fail_on: List[str] = field(
+        default_factory=lambda: ["BLOCKER", "HIGH"]
+    )  # severities
     composer_model: Optional[str] = None  # default to `model` if None
     # Optional custom instruction hooks. Either provide long text directly or via *_path.
     review_instructions: Optional[str] = None
@@ -98,7 +100,9 @@ class PRReviewStrategy(Strategy):
             attempts = cfg.reviewer_max_retries + 1
             last: Optional[InstanceResult] = None
             for attempt in range(attempts):
-                key = ctx.key("r", idx, "review", f"attempt-{attempt}" if attempt else "initial")
+                key = ctx.key(
+                    "r", idx, "review", f"attempt-{attempt}" if attempt else "initial"
+                )
                 task = {
                     "prompt": _build_reviewer_prompt(
                         base_branch=(cfg.base_branch or base_branch),
@@ -115,18 +119,26 @@ class PRReviewStrategy(Strategy):
                     res = None
                 if res:
                     last = res
-                    if res.success and _git_show_ok(repo_path, res.branch_name, rel_path):
+                    if res.success and _git_show_ok(
+                        repo_path, res.branch_name, rel_path
+                    ):
                         return res
             return last if (last and last.success) else None
 
-        async def _run_validator_with_retries(idx: int, reviewer_branch: str) -> Optional[InstanceResult]:
+        async def _run_validator_with_retries(
+            idx: int, reviewer_branch: str
+        ) -> Optional[InstanceResult]:
             rel_path = f"{cfg.report_dir}/raw/review_r{idx}.md"
             attempts = cfg.validator_max_retries + 1
             last: Optional[InstanceResult] = None
             for attempt in range(attempts):
-                key = ctx.key("r", idx, "validate", f"attempt-{attempt}" if attempt else "initial")
+                key = ctx.key(
+                    "r", idx, "validate", f"attempt-{attempt}" if attempt else "initial"
+                )
                 task = {
-                    "prompt": _build_validator_prompt(report_path=rel_path, extra_instructions=validator_extra),
+                    "prompt": _build_validator_prompt(
+                        report_path=rel_path, extra_instructions=validator_extra
+                    ),
                     "base_branch": reviewer_branch,
                     "model": cfg.model,
                 }
@@ -137,12 +149,16 @@ class PRReviewStrategy(Strategy):
                     res = None
                 if res:
                     last = res
-                    if res.success and _git_show_ok(repo_path, res.branch_name, rel_path):
+                    if res.success and _git_show_ok(
+                        repo_path, res.branch_name, rel_path
+                    ):
                         return res
             return last if (last and last.success) else None
 
         # Stage 1+2: reviewers and validators
-        async def _review_then_validate(idx: int) -> Optional[Tuple[int, InstanceResult]]:
+        async def _review_then_validate(
+            idx: int,
+        ) -> Optional[Tuple[int, InstanceResult]]:
             rres = await _run_reviewer_with_retries(idx)
             if not (rres and rres.success and rres.branch_name):
                 return None
@@ -151,7 +167,10 @@ class PRReviewStrategy(Strategy):
                 return None
             return (idx, vres)
 
-        rv_tasks = [asyncio.create_task(_review_then_validate(i)) for i in range(1, int(cfg.reviewers) + 1)]
+        rv_tasks = [
+            asyncio.create_task(_review_then_validate(i))
+            for i in range(1, int(cfg.reviewers) + 1)
+        ]
         validated: List[Tuple[int, InstanceResult]] = []
         done = await asyncio.gather(*rv_tasks, return_exceptions=True)
         for item in done:
@@ -165,7 +184,9 @@ class PRReviewStrategy(Strategy):
         comp_task = {
             "prompt": _build_composer_prompt(
                 base_branch=(cfg.base_branch or base_branch),
-                report_paths=[f"{cfg.report_dir}/raw/review_r{i}.md" for i, _ in validated],
+                report_paths=[
+                    f"{cfg.report_dir}/raw/review_r{i}.md" for i, _ in validated
+                ],
                 output_path=summary_rel,
                 extra_instructions=composer_extra,
             ),
@@ -178,15 +199,23 @@ class PRReviewStrategy(Strategy):
 
         # Evaluate severities from validator outputs (prefer JSON trailer if present)
         should_fail = False
-        agg_counts: Dict[str, int] = {"BLOCKER": 0, "HIGH": 0, "MEDIUM": 0, "LOW": 0, "INFO": 0}
+        agg_counts: Dict[str, int] = {
+            "BLOCKER": 0,
+            "HIGH": 0,
+            "MEDIUM": 0,
+            "LOW": 0,
+            "INFO": 0,
+        }
         for i, vres in validated:
             if not vres.branch_name:
                 continue
-            text = _git_show_text(repo_path, vres.branch_name, f"{cfg.report_dir}/raw/review_r{i}.md")
+            text = _git_show_text(
+                repo_path, vres.branch_name, f"{cfg.report_dir}/raw/review_r{i}.md"
+            )
             verdict, counts = _extract_summary(text)
             if verdict and verdict.upper() in ("NEEDS_CHANGES", "FAIL"):
                 should_fail = True
-            for sev in (cfg.fail_on or []):
+            for sev in cfg.fail_on or []:
                 c = counts.get(sev.upper(), 0)
                 if isinstance(c, (int, float)) and c > 0:
                     should_fail = True
@@ -204,7 +233,9 @@ class PRReviewStrategy(Strategy):
                 if comp_res.metrics is None:
                     comp_res.metrics = {}
                 comp_res.metrics["pr_review_should_fail"] = bool(should_fail)
-                comp_res.metrics["pr_review_verdict"] = "NEEDS_CHANGES" if should_fail else "PASS"
+                comp_res.metrics["pr_review_verdict"] = (
+                    "NEEDS_CHANGES" if should_fail else "PASS"
+                )
                 comp_res.metrics["pr_review_counts"] = agg_counts
                 comp_res.metadata = comp_res.metadata or {}
                 comp_res.metadata["pr_review"] = {
@@ -229,7 +260,11 @@ def _git_show_ok(repo: Path, branch: Optional[str], rel_path: str) -> bool:
     if not branch:
         return False
     try:
-        r = subprocess.run(["git", "-C", str(repo), "show", f"{branch}:{rel_path}"], capture_output=True, text=True)
+        r = subprocess.run(
+            ["git", "-C", str(repo), "show", f"{branch}:{rel_path}"],
+            capture_output=True,
+            text=True,
+        )
         return r.returncode == 0 and bool(r.stdout)
     except Exception:
         return False
@@ -239,7 +274,11 @@ def _git_show_text(repo: Path, branch: Optional[str], rel_path: str) -> str:
     if not branch:
         return ""
     try:
-        r = subprocess.run(["git", "-C", str(repo), "show", f"{branch}:{rel_path}"], capture_output=True, text=True)
+        r = subprocess.run(
+            ["git", "-C", str(repo), "show", f"{branch}:{rel_path}"],
+            capture_output=True,
+            text=True,
+        )
         return r.stdout if r.returncode == 0 else ""
     except Exception:
         return ""
@@ -259,7 +298,11 @@ def _extract_summary(md_text: str) -> Tuple[Optional[str], Dict[str, int]]:
     if not md_text:
         return verdict, counts
     # Try JSON fenced code block
-    m = re.search(r"```json\s*(\{[\s\S]*?\})\s*```\s*$", md_text, flags=re.IGNORECASE | re.MULTILINE)
+    m = re.search(
+        r"```json\s*(\{[\s\S]*?\})\s*```\s*$",
+        md_text,
+        flags=re.IGNORECASE | re.MULTILINE,
+    )
     if m:
         try:
             obj = json.loads(m.group(1))
@@ -278,13 +321,19 @@ def _extract_summary(md_text: str) -> Tuple[Optional[str], Dict[str, int]]:
             pass
     # Fallback: scan for a Verdict line
     if not verdict:
-        vm = re.search(r"^\s*Overall Verdict\s*:\s*(.+)$", md_text, flags=re.IGNORECASE | re.MULTILINE)
+        vm = re.search(
+            r"^\s*Overall Verdict\s*:\s*(.+)$",
+            md_text,
+            flags=re.IGNORECASE | re.MULTILINE,
+        )
         if vm:
             verdict = vm.group(1).strip()
     return verdict, counts
 
 
-def _build_reviewer_prompt(*, base_branch: str, report_path: str, extra_instructions: str = "") -> str:
+def _build_reviewer_prompt(
+    *, base_branch: str, report_path: str, extra_instructions: str = ""
+) -> str:
     parts: List[str] = []
     parts += [
         "<role>",
@@ -306,7 +355,12 @@ def _build_reviewer_prompt(*, base_branch: str, report_path: str, extra_instruct
         "",
     ]
     if extra_instructions:
-        parts += ["<integrator_instructions>", extra_instructions, "</integrator_instructions>", ""]
+        parts += [
+            "<integrator_instructions>",
+            extra_instructions,
+            "</integrator_instructions>",
+            "",
+        ]
     parts += [
         "<output_format>",
         "# PR Review Report",
@@ -341,18 +395,29 @@ def _build_validator_prompt(*, report_path: str, extra_instructions: str = "") -
         "",
     ]
     if extra_instructions:
-        parts += ["<integrator_instructions>", extra_instructions, "</integrator_instructions>", ""]
+        parts += [
+            "<integrator_instructions>",
+            extra_instructions,
+            "</integrator_instructions>",
+            "",
+        ]
     parts += [
         "<json_trailer>",
         "```json",
-        "{\n  \"verdict\": \"PASS|NEEDS_CHANGES\",\n  \"counts\": {\n    \"BLOCKER\": 0, \"HIGH\": 0, \"MEDIUM\": 0, \"LOW\": 0, \"INFO\": 0\n  }\n}",
+        '{\n  "verdict": "PASS|NEEDS_CHANGES",\n  "counts": {\n    "BLOCKER": 0, "HIGH": 0, "MEDIUM": 0, "LOW": 0, "INFO": 0\n  }\n}',
         "```",
         "</json_trailer>",
     ]
     return "\n".join(parts) + "\n"
 
 
-def _build_composer_prompt(*, base_branch: str, report_paths: List[str], output_path: str, extra_instructions: str = "") -> str:
+def _build_composer_prompt(
+    *,
+    base_branch: str,
+    report_paths: List[str],
+    output_path: str,
+    extra_instructions: str = "",
+) -> str:
     joined = "\n".join(f"- {p}" for p in report_paths)
     parts: List[str] = []
     parts += [
@@ -373,11 +438,17 @@ def _build_composer_prompt(*, base_branch: str, report_paths: List[str], output_
         "",
     ]
     if extra_instructions:
-        parts += ["<integrator_instructions>", extra_instructions, "</integrator_instructions>"]
+        parts += [
+            "<integrator_instructions>",
+            extra_instructions,
+            "</integrator_instructions>",
+        ]
     return "\n".join(parts) + "\n"
 
 
-def _resolve_instructions(text: Optional[str], path: Optional[str], default: str = "") -> str:
+def _resolve_instructions(
+    text: Optional[str], path: Optional[str], default: str = ""
+) -> str:
     if text and str(text).strip():
         return str(text)
     if path and str(path).strip():
