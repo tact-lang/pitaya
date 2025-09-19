@@ -52,6 +52,8 @@ class PRReviewConfig(StrategyConfig):
     validator_instructions_path: Optional[str] = None
     composer_instructions: Optional[str] = None
     composer_instructions_path: Optional[str] = None
+    # CI failure policy: 'needs_changes' (default), 'always', or 'never'
+    ci_fail_policy: str = "needs_changes"
 
     def validate(self) -> None:  # type: ignore[override]
         super().validate()
@@ -59,6 +61,8 @@ class PRReviewConfig(StrategyConfig):
             raise ValueError("reviewers must be at least 1")
         if self.reviewer_max_retries < 0 or self.validator_max_retries < 0:
             raise ValueError("max retries must be >= 0")
+        if str(self.ci_fail_policy) not in ("needs_changes", "always", "never"):
+            raise ValueError("ci_fail_policy must be one of: needs_changes, always, never")
 
 
 class PRReviewStrategy(Strategy):
@@ -208,14 +212,23 @@ class PRReviewStrategy(Strategy):
                 except Exception:
                     continue
 
-        # If composer succeeded, annotate its result as the strategy result; flip success on fail conditions
+        # Apply CI failure policy
+        policy = str(cfg.ci_fail_policy)
+        if policy == "always":
+            should_fail_final = True
+        elif policy == "never":
+            should_fail_final = False
+        else:
+            should_fail_final = should_fail
+
+        # If composer succeeded, annotate its result as the strategy result; flip success on policy
         results: List[InstanceResult] = []
         if comp_res:
             try:
                 # annotate metrics and metadata for publishers
                 if comp_res.metrics is None:
                     comp_res.metrics = {}
-                comp_res.metrics["pr_review_should_fail"] = bool(should_fail)
+                comp_res.metrics["pr_review_should_fail"] = bool(should_fail_final)
                 comp_res.metrics["pr_review_verdict"] = (
                     "NEEDS_CHANGES" if should_fail else "PASS"
                 )
@@ -224,7 +237,7 @@ class PRReviewStrategy(Strategy):
                 comp_res.metadata["pr_review"] = {"role": "composer", "reviewers": int(cfg.reviewers)}
             except Exception:
                 pass
-            if should_fail:
+            if should_fail_final:
                 try:
                     comp_res.success = False
                     comp_res.status = "failed"
