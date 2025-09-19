@@ -39,7 +39,6 @@ class PRReviewConfig(StrategyConfig):
     reviewers: int = 3
     reviewer_max_retries: int = 0
     validator_max_retries: int = 1
-    report_dir: str = "reports/pr-review"
     base_branch: str = "origin/main"
     fail_on: List[str] = field(
         default_factory=lambda: ["BLOCKER", "HIGH"]
@@ -62,7 +61,9 @@ class PRReviewConfig(StrategyConfig):
         if self.reviewer_max_retries < 0 or self.validator_max_retries < 0:
             raise ValueError("max retries must be >= 0")
         if str(self.ci_fail_policy) not in ("needs_changes", "always", "never"):
-            raise ValueError("ci_fail_policy must be one of: needs_changes, always, never")
+            raise ValueError(
+                "ci_fail_policy must be one of: needs_changes, always, never"
+            )
 
 
 class PRReviewStrategy(Strategy):
@@ -94,7 +95,9 @@ class PRReviewStrategy(Strategy):
         )
 
         # Compute PR diff once from the host repo and pass to reviewers
-        diff_text = _compute_diff(repo_path, cfg.base_branch or base_branch, max_chars=120_000)
+        diff_text = _compute_diff(
+            repo_path, cfg.base_branch or base_branch, max_chars=120_000
+        )
 
         async def _run_reviewer_with_retries(idx: int) -> Optional[InstanceResult]:
             attempts = cfg.reviewer_max_retries + 1
@@ -179,7 +182,9 @@ class PRReviewStrategy(Strategy):
         comp_task = {
             "prompt": _build_composer_prompt(
                 base_branch=(cfg.base_branch or base_branch),
-                validated_reports=[(i, (vres.final_message or "")) for i, vres in validated],
+                validated_reports=[
+                    (i, (vres.final_message or "")) for i, vres in validated
+                ],
                 extra_instructions=composer_extra,
             ),
             "base_branch": base_branch,
@@ -234,7 +239,10 @@ class PRReviewStrategy(Strategy):
                 )
                 comp_res.metrics["pr_review_counts"] = agg_counts
                 comp_res.metadata = comp_res.metadata or {}
-                comp_res.metadata["pr_review"] = {"role": "composer", "reviewers": int(cfg.reviewers)}
+                comp_res.metadata["pr_review"] = {
+                    "role": "composer",
+                    "reviewers": int(cfg.reviewers),
+                }
             except Exception:
                 pass
             if should_fail_final:
@@ -274,7 +282,9 @@ def _compute_diff(repo: Path, base_branch: str, max_chars: int = 120_000) -> str
         )
         if r.returncode == 0 and r.stdout:
             txt = r.stdout
-            return txt[:max_chars] + ("\n...\n[diff truncated]" if len(txt) > max_chars else "")
+            return txt[:max_chars] + (
+                "\n...\n[diff truncated]" if len(txt) > max_chars else ""
+            )
     except Exception:
         pass
     return "(diff unavailable; provide high-level feedback based on repo context)"
@@ -375,7 +385,9 @@ def _build_reviewer_prompt(
     return "\n".join(parts) + "\n"
 
 
-def _build_validator_prompt(*, reviewer_report: str, extra_instructions: str = "") -> str:
+def _build_validator_prompt(
+    *, reviewer_report: str, extra_instructions: str = ""
+) -> str:
     parts: List[str] = []
     parts += [
         "<role>",
@@ -408,7 +420,10 @@ def _build_validator_prompt(*, reviewer_report: str, extra_instructions: str = "
 
 
 def _build_composer_prompt(
-    *, base_branch: str, validated_reports: List[Tuple[int, str]], extra_instructions: str = ""
+    *,
+    base_branch: str,
+    validated_reports: List[Tuple[int, str]],
+    extra_instructions: str = "",
 ) -> str:
     joined = "\n".join(f"- Reviewer #{i}:\n{msg}\n" for i, msg in validated_reports)
     parts: List[str] = []

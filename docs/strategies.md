@@ -163,16 +163,17 @@ Lightweight PR review orchestration for CI: run N reviewers, validate each, and 
 
 Flow
 
-- Reviewers (N total): each reviews the whole PR (diff vs `base_branch`) and writes `reports/pr-review/raw/review_r{n}.md`.
-- Validators (1 per reviewer): refine, dedupe, correct severities, and append a fenced JSON trailer with verdict/counts.
-- Composer: aggregates validated reports into `reports/pr-review/summary.md` and sets the overall verdict (PASS or NEEDS_CHANGES).
+- Reviewers (N total): each reviews the whole PR (diff vs `base_branch`) and returns a Markdown report in the final message.
+- Validators (1 per reviewer): refine, dedupe, correct severities, and append a fenced JSON trailer with verdict/counts in their final message.
+- Composer: aggregates validated reviewer messages and returns a consolidated review in its final message; sets an overall verdict (PASS or NEEDS_CHANGES).
 
 Key options
 
 - `reviewers` (default 3)
 - `reviewer_max_retries` (default 0), `validator_max_retries` (default 1)
-- `base_branch` (default `origin/main`), `report_dir` (default `reports/pr-review`)
+- `base_branch` (default `origin/main`)
 - `fail_on` severities that should fail CI (default `BLOCKER,HIGH`)
+- `ci_fail_policy` (default `needs_changes`; options: `needs_changes`, `always`, `never`)
 - Long-form instructions: `review_instructions{,_path}`, `validator_instructions{,_path}`, `composer_instructions{,_path}`
 
 Examples
@@ -190,5 +191,4 @@ pitaya "Review this PR" --strategy pr-review \
 
 CI integration
 
-- Run Pitaya headless in your PR workflow; the composer emits a consolidated markdown at `reports/pr-review/summary.md` and annotates results metadata for tooling. You can post that content to your code host using your existing CI step or bot of choice.
-- Composer metadata lives under `results/<run_id>/instances/*.json` as `metadata.pr_review.summary_path` and verdict metrics under `metrics.pr_review_verdict`/`metrics.pr_review_counts`.
+- Run Pitaya headless in your PR workflow and post the composer’s final_message as the review body. Verdict and counts are also present under `metrics.pr_review_verdict` / `metrics.pr_review_counts` in the composer instance JSON (results/<run_id>/instances/*.json).
