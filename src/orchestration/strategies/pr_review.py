@@ -1,18 +1,16 @@
 """
-Pull Request Review Strategy (simple, clean, CI‑friendly).
+Pull Request Review Strategy (simple, clean, CI‑friendly) — message‑only.
 
-Flow:
-- N parallel reviewers (no file splitting). Each reviews the whole PR relative to
-  a base branch and writes a Markdown report under reports/pr-review/raw/.
-- One validator per reviewer refines and sanity‑checks the report in place.
-- A final composer aggregates validated reports into a single summary Markdown.
+Flow (no repo writes):
+- N reviewers read a diff excerpt and return a Markdown report in final_message.
+- One validator per reviewer refines the message and appends a JSON trailer
+  {"verdict":"PASS|NEEDS_CHANGES","counts":{...}}.
+- Composer aggregates validated messages into a single final_message.
 
 CI behavior:
-- Parse validator reports for a compact JSON summary (verdict + severity counts).
-- If any validator returns a severity in fail_on (e.g., BLOCKER/HIGH), the
-  strategy marks the final result as failed so headless mode exits non‑zero.
-
-Configuration aims to stay minimal and predictable.
+- Parses the validators’ JSON trailers for verdict and severity counts.
+- Missing/invalid trailers cause failure under the default policy.
+- Failing conditions are controlled by ci_fail_policy.
 """
 
 from __future__ import annotations
@@ -396,15 +394,14 @@ def _build_reviewer_prompt(
     parts += ["<diff>", diff_excerpt, "</diff>", ""]
     parts += [
         "<output_format>",
-        "# PR Review Report",
+        "# PR Review",
         "",
         "## Summary",
-        "One concise paragraph.",
+        "Write in clear, simple language (no fancy words). One short paragraph.",
         "",
-        "## Findings",
-        "| Area | Severity | Description | Suggested change |",
-        "| ---- | -------- | ----------- | ---------------- |",
-        "(Add one row per distinct finding)",
+        "## Findings (checkbox list)",
+        "- [ ] [SEVERITY] Area — concise description — Suggested change",
+        "(One checkbox per finding; keep each line short and actionable)",
         "",
         "## Overall Verdict: PASS or NEEDS_CHANGES",
         "</output_format>",
@@ -423,7 +420,8 @@ def _build_validator_prompt(
         "",
         "<task>",
         "Validate the reviewer report below: drop duplicates, merge overlapping items, ",
-        "correct severities, and refine suggestions to be minimal and clear. Keep the same format.",
+        "correct severities, and refine suggestions to be minimal and clear.",
+        "Ensure the Findings section is a checkbox list (one - [ ] item per finding).",
         "Return the validated report as your final message and append a fenced JSON block with counts per severity and a verdict.",
         "</task>",
         "",
@@ -467,7 +465,8 @@ def _build_composer_prompt(
         "<task>",
         "Compose a final review message (do NOT write files). Deduplicate and group findings, ",
         "preserve severities, and include an Overall Verdict (PASS or NEEDS_CHANGES).",
-        "Include a short top-level summary and a compact checklist if useful.",
+        "Write in simple, plain language (no fancy words); short, direct sentences.",
+        "Use a checkbox list for Findings (- [ ] [SEVERITY] Area — description — suggested change).",
         "</task>",
         "",
     ]
