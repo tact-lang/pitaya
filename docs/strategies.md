@@ -156,3 +156,39 @@ Tips
 
 - Prefer `-S` for simple numeric/boolean settings; put more complex lists (e.g., diversity hints) into `pitaya.yaml` under `strategies:`.
 - Strategies create branches only when there are changes to import (default policy). You can adjust import behavior in configuration if needed.
+
+## pr-review
+
+Lightweight PR review orchestration for CI: run N reviewers, validate each, and compose a final summary suitable for posting to a pull request.
+
+Flow
+
+- Reviewers (N total): each reviews the whole PR (diff vs `base_branch`) and returns a Markdown report in the final message.
+- Validators (1 per reviewer): refine, dedupe, correct severities, and append a fenced JSON trailer with verdict/counts in their final message.
+- Composer: aggregates validated reviewer messages and returns a consolidated review in its final message; sets an overall verdict (PASS or NEEDS_CHANGES).
+
+Key options
+
+- `reviewers` (default 3)
+- `reviewer_max_retries` (default 0), `validator_max_retries` (default 1)
+- `base_branch` (default `origin/main`)
+- `fail_on` severities that should fail CI (default `BLOCKER,HIGH`)
+- `ci_fail_policy` (default `needs_changes`; options: `needs_changes`, `always`, `never`)
+- Long-form instructions: `review_instructions{,_path}`, `validator_instructions{,_path}`, `composer_instructions{,_path}`
+
+Examples
+
+```bash
+# Basic
+pitaya "Review this PR" --strategy pr-review -S reviewers=3
+
+# Provide long custom guidance from files
+pitaya "Review this PR" --strategy pr-review \
+  -S review_instructions_path=.ci/reviewer.md \
+  -S validator_instructions_path=.ci/validator.md \
+  -S composer_instructions_path=.ci/composer.md
+```
+
+CI integration
+
+- Run Pitaya headless in your PR workflow and post the composer’s final_message as the review body. Verdict and counts are also present under `metrics.pr_review_verdict` / `metrics.pr_review_counts` in the composer instance JSON (results/<run_id>/instances/*.json).

@@ -5,8 +5,9 @@ Validates credentials early so runs fail fast with clear guidance.
 
 from __future__ import annotations
 
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 import argparse
+import os
 
 from ...config import (
     get_default_config,
@@ -67,6 +68,13 @@ def get_auth_config(
     if plugin_name == "codex":
         api_key = runner_cfg.get("api_key") or runner_cfg.get("openai_api_key")
         base_url = runner_cfg.get("base_url") or runner_cfg.get("openai_base_url")
+        # Fallback: detect provider-specific env vars (OpenRouter, Groq, etc.)
+        if not api_key:
+            _env_key, _api, _url = _detect_codex_api_from_env()
+            if _api:
+                api_key = _api
+                if not base_url and _url:
+                    base_url = _url
         oauth_token = None
     else:
         oauth_token = runner_cfg.get("oauth_token")
@@ -79,7 +87,7 @@ def get_auth_config(
         # API mode requires an API key
         if plugin_name == "codex":
             raise ValueError(
-                "missing API key for OpenAI‑compatible provider; set OPENAI_API_KEY or use --api-key"
+                "missing API key for Codex; set a provider key (e.g., OPENAI_API_KEY/OPENROUTER_API_KEY) or use --api-key"
             )
         raise ValueError("missing API key; set ANTHROPIC_API_KEY (or use --api-key)")
     if mode == "subscription" and not oauth_token:
@@ -90,9 +98,51 @@ def get_auth_config(
         # Auto-detect mode: require at least one credential depending on plugin
         if plugin_name == "codex":
             raise ValueError(
-                "no credentials found; set OPENAI_API_KEY (and optional OPENAI_BASE_URL) or pass --api-key"
+                "no Codex credentials found; set a provider API key (e.g., OPENAI_API_KEY/OPENROUTER_API_KEY) or pass --api-key"
             )
         raise ValueError(
             "no credentials found; set CLAUDE_CODE_OAUTH_TOKEN or ANTHROPIC_API_KEY"
         )
     return AuthConfig(oauth_token=oauth_token, api_key=api_key, base_url=base_url)
+
+
+# Known OpenAI-compatible provider env pairs
+_PROVIDER_ENV_CANDIDATES: Tuple[Tuple[str, str], ...] = (
+    ("OPENAI_API_KEY", "OPENAI_BASE_URL"),
+    ("OPENROUTER_API_KEY", "OPENROUTER_BASE_URL"),
+    ("AZURE_OPENAI_API_KEY", "AZURE_OPENAI_BASE_URL"),
+    ("GROQ_API_KEY", "GROQ_BASE_URL"),
+    ("MISTRAL_API_KEY", "MISTRAL_BASE_URL"),
+    ("GEMINI_API_KEY", "GEMINI_BASE_URL"),
+    ("DEEPSEEK_API_KEY", "DEEPSEEK_BASE_URL"),
+    ("OLLAMA_API_KEY", "OLLAMA_BASE_URL"),
+    ("ARCEEAI_API_KEY", "ARCEEAI_BASE_URL"),
+)
+
+
+def _detect_codex_api_from_env() -> Tuple[Optional[str], Optional[str], Optional[str]]:
+    """Detect a provider API key and base URL from environment variables.
+
+    Returns: (env_key_name, api_key, base_url) or (None, None, None).
+    Honors overrides via CODEX_ENV_KEY/CODEX_BASE_URL when set.
+    """
+    override = os.environ.get("CODEX_ENV_KEY")
+    if override:
+        api = os.environ.get(override)
+        base = os.environ.get("CODEX_BASE_URL")
+        if not base and override.endswith("_API_KEY"):
+            bkey = f"{override[:-7]}_BASE_URL"
+            base = os.environ.get(bkey)
+        if api:
+            return override, api, base
+    # Prefer OPENAI_API_KEY
+    if "OPENAI_API_KEY" in os.environ:
+        return (
+            "OPENAI_API_KEY",
+            os.environ.get("OPENAI_API_KEY"),
+            os.environ.get("OPENAI_BASE_URL"),
+        )
+    for k, b in _PROVIDER_ENV_CANDIDATES:
+        if k in os.environ:
+            return k, os.environ.get(k), os.environ.get(b)
+    return None, None, None
