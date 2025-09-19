@@ -78,12 +78,6 @@ class PRReviewStrategy(Strategy):
         cfg: PRReviewConfig = self.create_config()  # type: ignore
         repo_path: Path = getattr(ctx._orchestrator, "repo_path", Path.cwd())  # noqa
 
-        # Ensure report directories exist in the repo (helps agents discover paths)
-        try:
-            (repo_path / cfg.report_dir / "raw").mkdir(parents=True, exist_ok=True)
-        except Exception:
-            pass
-
         # Resolve optional long-form instruction text (file overrides inline)
         review_extra = _resolve_instructions(
             cfg.review_instructions, cfg.review_instructions_path, default=""
@@ -95,8 +89,10 @@ class PRReviewStrategy(Strategy):
             cfg.composer_instructions, cfg.composer_instructions_path, default=""
         )
 
+        # Compute PR diff once from the host repo and pass to reviewers
+        diff_text = _compute_diff(repo_path, cfg.base_branch or base_branch, max_chars=120_000)
+
         async def _run_reviewer_with_retries(idx: int) -> Optional[InstanceResult]:
-            rel_path = f"{cfg.report_dir}/raw/review_r{idx}.md"
             attempts = cfg.reviewer_max_retries + 1
             last: Optional[InstanceResult] = None
             for attempt in range(attempts):
@@ -106,7 +102,7 @@ class PRReviewStrategy(Strategy):
                 task = {
                     "prompt": _build_reviewer_prompt(
                         base_branch=(cfg.base_branch or base_branch),
-                        report_path=rel_path,
+                        diff_excerpt=diff_text,
                         extra_instructions=review_extra,
                     ),
                     "base_branch": base_branch,
@@ -119,16 +115,13 @@ class PRReviewStrategy(Strategy):
                     res = None
                 if res:
                     last = res
-                    if res.success and _git_show_ok(
-                        repo_path, res.branch_name, rel_path
-                    ):
+                    if res.success and (res.final_message or "").strip():
                         return res
             return last if (last and last.success) else None
 
         async def _run_validator_with_retries(
-            idx: int, reviewer_branch: str
+            idx: int, reviewer_report_text: str
         ) -> Optional[InstanceResult]:
-            rel_path = f"{cfg.report_dir}/raw/review_r{idx}.md"
             attempts = cfg.validator_max_retries + 1
             last: Optional[InstanceResult] = None
             for attempt in range(attempts):
@@ -137,9 +130,10 @@ class PRReviewStrategy(Strategy):
                 )
                 task = {
                     "prompt": _build_validator_prompt(
-                        report_path=rel_path, extra_instructions=validator_extra
+                        reviewer_report=reviewer_report_text,
+                        extra_instructions=validator_extra,
                     ),
-                    "base_branch": reviewer_branch,
+                    "base_branch": base_branch,
                     "model": cfg.model,
                 }
                 try:
@@ -149,9 +143,7 @@ class PRReviewStrategy(Strategy):
                     res = None
                 if res:
                     last = res
-                    if res.success and _git_show_ok(
-                        repo_path, res.branch_name, rel_path
-                    ):
+                    if res.success and (res.final_message or "").strip():
                         return res
             return last if (last and last.success) else None
 
@@ -160,10 +152,10 @@ class PRReviewStrategy(Strategy):
             idx: int,
         ) -> Optional[Tuple[int, InstanceResult]]:
             rres = await _run_reviewer_with_retries(idx)
-            if not (rres and rres.success and rres.branch_name):
+            if not (rres and rres.success and (rres.final_message or "").strip()):
                 return None
-            vres = await _run_validator_with_retries(idx, rres.branch_name)
-            if not (vres and vres.success and vres.branch_name):
+            vres = await _run_validator_with_retries(idx, rres.final_message or "")
+            if not (vres and vres.success and (vres.final_message or "").strip()):
                 return None
             return (idx, vres)
 
@@ -177,17 +169,13 @@ class PRReviewStrategy(Strategy):
             if isinstance(item, tuple) and len(item) == 2:
                 validated.append(item)
 
-        # Stage 3: composer
-        summary_rel = f"{cfg.report_dir}/summary.md"
+        # Stage 3: composer (message-only aggregation)
         composer_model = cfg.composer_model or cfg.model
         key_comp = ctx.key("compose", "final")
         comp_task = {
             "prompt": _build_composer_prompt(
                 base_branch=(cfg.base_branch or base_branch),
-                report_paths=[
-                    f"{cfg.report_dir}/raw/review_r{i}.md" for i, _ in validated
-                ],
-                output_path=summary_rel,
+                validated_reports=[(i, (vres.final_message or "")) for i, vres in validated],
                 extra_instructions=composer_extra,
             ),
             "base_branch": base_branch,
@@ -207,12 +195,7 @@ class PRReviewStrategy(Strategy):
             "INFO": 0,
         }
         for i, vres in validated:
-            if not vres.branch_name:
-                continue
-            text = _git_show_text(
-                repo_path, vres.branch_name, f"{cfg.report_dir}/raw/review_r{i}.md"
-            )
-            verdict, counts = _extract_summary(text)
+            verdict, counts = _extract_summary(vres.final_message or "")
             if verdict and verdict.upper() in ("NEEDS_CHANGES", "FAIL"):
                 should_fail = True
             for sev in cfg.fail_on or []:
@@ -238,11 +221,7 @@ class PRReviewStrategy(Strategy):
                 )
                 comp_res.metrics["pr_review_counts"] = agg_counts
                 comp_res.metadata = comp_res.metadata or {}
-                comp_res.metadata["pr_review"] = {
-                    "role": "composer",
-                    "summary_path": summary_rel,
-                    "reviewers": int(cfg.reviewers),
-                }
+                comp_res.metadata["pr_review"] = {"role": "composer", "reviewers": int(cfg.reviewers)}
             except Exception:
                 pass
             if should_fail:
@@ -256,32 +235,31 @@ class PRReviewStrategy(Strategy):
         return results
 
 
-def _git_show_ok(repo: Path, branch: Optional[str], rel_path: str) -> bool:
-    if not branch:
-        return False
+def _compute_diff(repo: Path, base_branch: str, max_chars: int = 120_000) -> str:
+    """Return a unified diff between base_branch and HEAD from the host repo.
+
+    Truncates to max_chars to keep prompts bounded in CI.
+    """
     try:
         r = subprocess.run(
-            ["git", "-C", str(repo), "show", f"{branch}:{rel_path}"],
+            [
+                "git",
+                "-C",
+                str(repo),
+                "diff",
+                f"{base_branch}...HEAD",
+                "--unified=0",
+                "--no-color",
+            ],
             capture_output=True,
             text=True,
         )
-        return r.returncode == 0 and bool(r.stdout)
+        if r.returncode == 0 and r.stdout:
+            txt = r.stdout
+            return txt[:max_chars] + ("\n...\n[diff truncated]" if len(txt) > max_chars else "")
     except Exception:
-        return False
-
-
-def _git_show_text(repo: Path, branch: Optional[str], rel_path: str) -> str:
-    if not branch:
-        return ""
-    try:
-        r = subprocess.run(
-            ["git", "-C", str(repo), "show", f"{branch}:{rel_path}"],
-            capture_output=True,
-            text=True,
-        )
-        return r.stdout if r.returncode == 0 else ""
-    except Exception:
-        return ""
+        pass
+    return "(diff unavailable; provide high-level feedback based on repo context)"
 
 
 def _extract_summary(md_text: str) -> Tuple[Optional[str], Dict[str, int]]:
@@ -332,7 +310,7 @@ def _extract_summary(md_text: str) -> Tuple[Optional[str], Dict[str, int]]:
 
 
 def _build_reviewer_prompt(
-    *, base_branch: str, report_path: str, extra_instructions: str = ""
+    *, base_branch: str, diff_excerpt: str, extra_instructions: str = ""
 ) -> str:
     parts: List[str] = []
     parts += [
@@ -341,9 +319,8 @@ def _build_reviewer_prompt(
         "</role>",
         "",
         "<task>",
-        f"Review the current changes in this repository relative to {base_branch}.",
-        f"Use git to inspect the diff (e.g., git diff {base_branch}...HEAD --unified=0).",
-        f"Write your review to {report_path} and commit it.",
+        f"Review the current PR changes relative to {base_branch}.",
+        "Use the provided unified diff excerpt (do NOT attempt to write files).",
         "</task>",
         "",
         "<requirements>",
@@ -361,6 +338,7 @@ def _build_reviewer_prompt(
             "</integrator_instructions>",
             "",
         ]
+    parts += ["<diff>", diff_excerpt, "</diff>", ""]
     parts += [
         "<output_format>",
         "# PR Review Report",
@@ -379,7 +357,7 @@ def _build_reviewer_prompt(
     return "\n".join(parts) + "\n"
 
 
-def _build_validator_prompt(*, report_path: str, extra_instructions: str = "") -> str:
+def _build_validator_prompt(*, reviewer_report: str, extra_instructions: str = "") -> str:
     parts: List[str] = []
     parts += [
         "<role>",
@@ -387,10 +365,9 @@ def _build_validator_prompt(*, report_path: str, extra_instructions: str = "") -
         "</role>",
         "",
         "<task>",
-        f"Open {report_path}. Validate each finding: drop duplicates, merge overlapping items, ",
+        "Validate the reviewer report below: drop duplicates, merge overlapping items, ",
         "correct severities, and refine suggestions to be minimal and clear. Keep the same format.",
-        f"Overwrite {report_path} and commit.",
-        "Append a final fenced JSON block with counts per severity and a verdict.",
+        "Return the validated report as your final message and append a fenced JSON block with counts per severity and a verdict.",
         "</task>",
         "",
     ]
@@ -401,6 +378,7 @@ def _build_validator_prompt(*, report_path: str, extra_instructions: str = "") -
             "</integrator_instructions>",
             "",
         ]
+    parts += ["<reviewer_report>", reviewer_report, "</reviewer_report>", ""]
     parts += [
         "<json_trailer>",
         "```json",
@@ -412,13 +390,9 @@ def _build_validator_prompt(*, report_path: str, extra_instructions: str = "") -
 
 
 def _build_composer_prompt(
-    *,
-    base_branch: str,
-    report_paths: List[str],
-    output_path: str,
-    extra_instructions: str = "",
+    *, base_branch: str, validated_reports: List[Tuple[int, str]], extra_instructions: str = ""
 ) -> str:
-    joined = "\n".join(f"- {p}" for p in report_paths)
+    joined = "\n".join(f"- Reviewer #{i}:\n{msg}\n" for i, msg in validated_reports)
     parts: List[str] = []
     parts += [
         "<role>",
@@ -426,12 +400,12 @@ def _build_composer_prompt(
         "</role>",
         "",
         "<inputs>",
-        "Validated report files (read and aggregate):",
+        "Validated reviewer reports (read and aggregate):",
         joined,
         "</inputs>",
         "",
         "<task>",
-        f"Compose a final review at {output_path} and commit it. Deduplicate and group findings, ",
+        "Compose a final review message (do NOT write files). Deduplicate and group findings, ",
         "preserve severities, and include an Overall Verdict (PASS or NEEDS_CHANGES).",
         "Include a short top-level summary and a compact checklist if useful.",
         "</task>",
