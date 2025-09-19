@@ -3064,6 +3064,7 @@ class Orchestrator:
                         "status": result.status,
                         "success": result.success,
                         "branch_name": result.branch_name,
+                        "final_message": getattr(result, "final_message", None),
                         "metadata": getattr(result, "metadata", None) or {},
                         "duration_seconds": result.duration_seconds,
                         "metrics": result.metrics or {},
