@@ -156,3 +156,39 @@ Tips
 
 - Prefer `-S` for simple numeric/boolean settings; put more complex lists (e.g., diversity hints) into `pitaya.yaml` under `strategies:`.
 - Strategies create branches only when there are changes to import (default policy). You can adjust import behavior in configuration if needed.
+
+## pr-review
+
+Lightweight PR review orchestration for CI: run N reviewers, validate each, and compose a final summary suitable for posting to a pull request.
+
+Flow
+
+- Reviewers (N total): each reviews the whole PR (diff vs `base_branch`) and writes `reports/pr-review/raw/review_r{n}.md`.
+- Validators (1 per reviewer): refine, dedupe, correct severities, and append a fenced JSON trailer with verdict/counts.
+- Composer: aggregates validated reports into `reports/pr-review/summary.md` and sets the overall verdict (PASS or NEEDS_CHANGES).
+
+Key options
+
+- `reviewers` (default 3)
+- `reviewer_max_retries` (default 0), `validator_max_retries` (default 1)
+- `base_branch` (default `origin/main`), `report_dir` (default `reports/pr-review`)
+- `fail_on` severities that should fail CI (default `BLOCKER,HIGH`)
+- Long-form instructions: `review_instructions{,_path}`, `validator_instructions{,_path}`, `composer_instructions{,_path}`
+
+Examples
+
+```bash
+# Basic
+pitaya "Review this PR" --strategy pr-review -S reviewers=3
+
+# Provide long custom guidance from files
+pitaya "Review this PR" --strategy pr-review \
+  -S review_instructions_path=.ci/reviewer.md \
+  -S validator_instructions_path=.ci/validator.md \
+  -S composer_instructions_path=.ci/composer.md
+```
+
+CI integration
+
+- Run Pitaya headless in your PR workflow; the composer emits a consolidated markdown at `reports/pr-review/summary.md` and annotates results metadata for tooling. You can post that content to your code host using your existing CI step or bot of choice.
+- Composer metadata lives under `results/<run_id>/instances/*.json` as `metadata.pr_review.summary_path` and verdict metrics under `metrics.pr_review_verdict`/`metrics.pr_review_counts`.
