@@ -228,6 +228,11 @@ class PRReviewStrategy(Strategy):
                 try:
                     comp_res.success = False
                     comp_res.status = "failed"
+                    comp_res.error_type = "review_needs_changes"
+                    comp_res.error = (
+                        "PR review verdict is NEEDS_CHANGES; failing per policy. "
+                        f"Counts: {agg_counts}"
+                    )
                 except Exception:
                     pass
             results.append(comp_res)
