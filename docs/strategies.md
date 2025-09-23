@@ -173,7 +173,7 @@ Key options
 - `reviewer_max_retries` (default 0), `validator_max_retries` (default 1)
 - `base_branch` (default `main`)
 - `include_branches` (list of unqualified branch names to make available read‑only in the workspace; use `pitaya.yaml`)
-- `fail_on` severities that should fail CI (default `BLOCKER,HIGH`)
+- `fail_on` severities that should fail CI (default `HIGH`)
 - `ci_fail_policy` (default `needs_changes`; options: `needs_changes`, `always`, `never`)
 - Long-form instructions: `review_instructions{,_path}`, `validator_instructions{,_path}`, `composer_instructions{,_path}`
 

@@ -30,6 +30,53 @@ if TYPE_CHECKING:
     from ..strategy_context import StrategyContext
 
 
+# Shared internal findings output format for reviewer and validator prompts
+INTERNAL_FINDINGS_OUTPUT_FORMAT: List[str] = [
+    "<output_format>",
+    "## Findings",
+    "",
+    "Repeat the following section for each distinct issue:",
+    "",
+    "### [SEVERITY] <Short Title>",
+    "- Severity: HIGH|MEDIUM|LOW",
+    "- Location: <path>?plain=1#L<start>-L<end> (GitHub preview link)",
+    "Description:",
+    "Write 2–4 sentences explaining the problem and its impact.",
+    "",
+    "Suggestion:",
+    "Provide a minimal, concrete fix. Include a short code block when helpful.",
+    "",
+    "Notes:",
+    "- Use relative repo paths and ?plain=1#L.. anchors so GitHub renders a preview.",
+    "- Normalize/merge duplicates; reference files/lines precisely; avoid repetition.",
+    "- Do NOT include a summary or verdict in this message (verdict goes to JSON only).",
+    "</output_format>",
+    "",
+    "<example>",
+    "### [HIGH] SQL query uses unsanitized user input",
+    "- Severity: HIGH",
+    "- Location: api/search.py?plain=1#L42-L58",
+    "Description:",
+    "The search endpoint builds an SQL string using f-strings with the raw `q` parameter. An attacker can inject SQL via crafted input, risking data exposure or corruption.",
+    "",
+    "Suggestion:",
+    "Use a parameterized query with placeholders and bind variables.",
+    "",
+    "```python",
+    "cursor.execute(\"SELECT id, name FROM items WHERE name LIKE %s\", (pattern,))",
+    "```",
+    "",
+    "### [MEDIUM] Inefficient loop for JSON serialization",
+    "- Severity: MEDIUM",
+    "- Location: utils/encode.py?plain=1#L15-L28",
+    "Description:",
+    "The code repeatedly calls `json.dumps` inside a loop, causing N small allocations and string concatenations.",
+    "",
+    "Suggestion:",
+    "Build a list and serialize once, or use a generator with `join` to reduce allocations.",
+    "</example>",
+]
+
 @dataclass
 class PRReviewConfig(StrategyConfig):
     """Configuration for PR review strategy."""
@@ -39,8 +86,8 @@ class PRReviewConfig(StrategyConfig):
     validator_max_retries: int = 1
     base_branch: str = "main"
     fail_on: List[str] = field(
-        default_factory=lambda: ["BLOCKER", "HIGH"]
-    )  # severities
+        default_factory=lambda: ["HIGH"]
+    )  # severities considered CI-failing
     composer_model: Optional[str] = None  # default to `model` if None
     # Optional custom instruction hooks. Either provide long text directly or via *_path.
     review_instructions: Optional[str] = None
@@ -224,11 +271,9 @@ class PRReviewStrategy(Strategy):
         # Evaluate severities from validator outputs (prefer JSON trailer if present)
         should_fail = False
         agg_counts: Dict[str, int] = {
-            "BLOCKER": 0,
             "HIGH": 0,
             "MEDIUM": 0,
             "LOW": 0,
-            "INFO": 0,
         }
         any_invalid_json = False
         invalid_indices: List[int] = []
@@ -400,7 +445,15 @@ def _build_reviewer_prompt(
         "<requirements>",
         "- Focus on correctness, security, performance, maintainability, API stability, and tests.",
         "- Propose minimal, concrete fixes (filenames, lines, snippets).",
-        "- Use severities: BLOCKER, HIGH, MEDIUM, LOW, INFO.",
+        "- Use severities: HIGH, MEDIUM, LOW.",
+        "- For every finding, VALIDATE the Location line range against the actual file content.",
+        "  Do not guess line numbers.",
+        "  Use non-destructive commands to inspect content at a branch/ref, e.g:",
+        "    git show <branch>:<path> | nl -ba | sed -n '<start>,<end>p'",
+        "  If the snippet does not match your description, correct the Location (or the finding) before outputting.",
+        "- When referring to exact text (e.g., replace X with Y), use fenced code blocks, not quoted prose.",
+        "  Prefer short before/after blocks or unified diff snippets for clarity.",
+        "- Do not offer to perform further actions (e.g., 'I can draft the exact changes'); provide the concrete suggestion instead.",
         "- Keep total length reasonable; avoid repetition.",
         "</requirements>",
         "",
@@ -412,20 +465,7 @@ def _build_reviewer_prompt(
             "</integrator_instructions>",
             "",
         ]
-    parts += [
-        "<output_format>",
-        "# PR Review",
-        "",
-        "## Summary",
-        "Write in clear, simple language (no fancy words). One short paragraph.",
-        "",
-        "## Findings (checkbox list)",
-        "- [ ] [SEVERITY] Area — concise description — Suggested change",
-        "(One checkbox per finding; keep each line short and actionable)",
-        "",
-        "## Overall Verdict: PASS or NEEDS_CHANGES",
-        "</output_format>",
-    ]
+    parts += INTERNAL_FINDINGS_OUTPUT_FORMAT
     return "\n".join(parts) + "\n"
 
 
@@ -441,7 +481,14 @@ def _build_validator_prompt(
         "<task>",
         "Validate the reviewer report below: drop duplicates, merge overlapping items, ",
         "correct severities, and refine suggestions to be minimal and clear.",
-        "Ensure the Findings section is a checkbox list (one - [ ] item per finding).",
+        "Ensure the Findings section follows the structured format in <output_format> (no checkboxes).",
+        "",
+        "Critically: re-validate every Location line range and link before output.",
+        "- Do not rely on the reviewer’s numbers; check them again.",
+        "- Use read-only commands to inspect the exact blob content, for example:",
+        "    git show <branch>:<path> | nl -ba | sed -n '<start>,<end>p'",
+        "- If the snippet does not match the Description, fix the Location (or adjust the finding).",
+        "- Do NOT add new findings at this stage; your goal is to validate, filter, merge, and adjust severity/wording/locations of the reviewer’s list only.",
         "Return the validated report as your final message and append a fenced JSON block with counts per severity and a verdict.",
         "</task>",
         "",
@@ -454,10 +501,11 @@ def _build_validator_prompt(
             "",
         ]
     parts += ["<reviewer_report>", reviewer_report, "</reviewer_report>", ""]
+    parts += INTERNAL_FINDINGS_OUTPUT_FORMAT
     parts += [
         "<json_trailer>",
         "```json",
-        '{\n  "verdict": "PASS|NEEDS_CHANGES",\n  "counts": {\n    "BLOCKER": 0, "HIGH": 0, "MEDIUM": 0, "LOW": 0, "INFO": 0\n  }\n}',
+        '{\n  "verdict": "PASS|NEEDS_CHANGES",\n  "counts": {\n    "HIGH": 0, "MEDIUM": 0, "LOW": 0\n  }\n}',
         "```",
         "</json_trailer>",
     ]
@@ -483,12 +531,95 @@ def _build_composer_prompt(
         "</inputs>",
         "",
         "<task>",
-        "Compose a final review message (do NOT write files). Deduplicate and group findings, ",
-        "preserve severities, and include an Overall Verdict (PASS or NEEDS_CHANGES).",
-        "Write in simple, plain language (no fancy words); short, direct sentences.",
-        "Use a checkbox list for Findings (- [ ] [SEVERITY] Area — description — suggested change).",
+        "Compose a user-facing final review (do NOT write files). Deduplicate and group findings, ",
+        "preserve severities, and begin with 2–3 friendly sentences summarizing the overall state (no 'Verdict:' label).",
+        "Do NOT discover new issues and do NOT re-validate content at this stage: you receive VALIDATED findings and can trust their severities, locations, and wording.",
+        "Use simple, plain language; short, direct sentences. Do NOT use the tokens PASS/NEEDS_CHANGES in prose.",
+        "Present HIGH and MEDIUM findings as expanded sections; put LOW findings inside a <details> spoiler.",
+        "If there are no findings, write a brief friendly note like 'Nice improvements overall — I didn’t spot any issues.'",
         "</task>",
         "",
+        "<output_format>",
+        "# PR Review",
+        "",
+        "(Opening 2–3 sentences; friendly and encouraging.)",
+        "",
+        "## Findings",
+        "",
+        "### High & Medium",
+        "Repeat this section per finding:",
+        "",
+        "#### [SEVERITY] <Short Title>",
+        "- Severity: HIGH|MEDIUM",
+        "- Location: <path>?plain=1#L<start>-L<end>",
+        "Description:",
+        "1–3 sentences tailored for readers.",
+        "",
+        "Suggestion:",
+        "Concrete change (use a fenced code block for exact text/diff when helpful).",
+        "",
+        "### Low (optional)",
+        "<details><summary>Show low-severity notes</summary>",
+        "",
+        "Repeat per finding:",
+        "",
+        "#### [LOW] <Short Title>",
+        "- Location: <path>?plain=1#L<start>-L<end>",
+        "Description:",
+        "1–2 sentences.",
+        "",
+        "Suggestion:",
+        "Brief, concrete nudge.",
+        "",
+        "</details>",
+        "",
+        "(No JSON blocks in this message.)",
+        "</output_format>",
+        "",
+        "<example>",
+        "# PR Review",
+        "",
+        "Thanks for the improvements — the UI feels snappier. I found a couple of issues to address before merging.",
+        "",
+        "## Findings",
+        "",
+        "### High & Medium",
+        "",
+        "#### [HIGH] SQL query uses unsanitized user input",
+        "- Severity: HIGH",
+        "- Location: api/search.py?plain=1#L42-L58",
+        "Description:",
+        "The search endpoint builds an SQL string using f-strings with the raw `q` parameter. An attacker can inject SQL via crafted input, risking data exposure or corruption.",
+        "",
+        "Suggestion:",
+        "Use a parameterized query with placeholders and bind variables.",
+        "",
+        "```python",
+        "cursor.execute(\"SELECT id, name FROM items WHERE name LIKE %s\", (pattern,))",
+        "```",
+        "",
+        "#### [MEDIUM] Inefficient loop for JSON serialization",
+        "- Severity: MEDIUM",
+        "- Location: utils/encode.py?plain=1#L15-L28",
+        "Description:",
+        "The code repeatedly calls `json.dumps` inside a loop, causing N small allocations and string concatenations.",
+        "",
+        "Suggestion:",
+        "Build a list and serialize once, or use a generator with `join`.",
+        "",
+        "### Low (optional)",
+        "<details><summary>Show low-severity notes</summary>",
+        "",
+        "#### [LOW] Typo in README",
+        "- Location: README.md?plain=1#L12-L12",
+        "Description:",
+        "The word 'teh' appears in the installation section.",
+        "",
+        "Suggestion:",
+        "Replace with 'the'.",
+        "",
+        "</details>",
+        "</example>",
     ]
     if extra_instructions:
         parts += [
