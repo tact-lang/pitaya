@@ -378,6 +378,17 @@ class StrategyContext:
             ),
         }
 
+        # Apply orchestrator defaults for include_branches when not explicitly set on the task
+        try:
+            if not _metadata.get("workspace_include_branches"):
+                default_inc = getattr(
+                    self._orchestrator, "default_workspace_include_branches", None
+                )
+                if default_inc:
+                    _metadata["workspace_include_branches"] = list(default_inc)
+        except Exception:
+            pass
+
         # Include default agent CLI passthrough args when configured
         try:
             _args = getattr(self._orchestrator, "default_agent_cli_args", [])

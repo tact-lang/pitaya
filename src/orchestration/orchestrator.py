@@ -99,6 +99,7 @@ class Orchestrator:
         force_commit: bool = False,
         randomize_queue_order: bool = False,
         explicit_max_parallel: bool = False,
+        default_workspace_include_branches: Optional[List[str]] = None,
     ):
         """
         Initialize orchestrator.
@@ -169,6 +170,13 @@ class Orchestrator:
         # Default plugin/model for strategy tasks (strategy-agnostic selection)
         self.default_plugin_name = str(default_plugin_name or "claude-code")
         self.default_model_alias = str(default_model_alias or "sonnet")
+        # Default workspace include branches applied to all tasks unless overridden
+        try:
+            self.default_workspace_include_branches: Optional[List[str]] = (
+                list(default_workspace_include_branches) if default_workspace_include_branches else None
+            )
+        except Exception:
+            self.default_workspace_include_branches = None
 
         # Multi-resource admission (CPU, memory, disk guard)
         self._admission_lock = asyncio.Lock()

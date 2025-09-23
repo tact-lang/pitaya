@@ -13,18 +13,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - CLI flags: `--override-config` and `--resume-key-policy {strict|suffix}` to control how resume applies overrides and durable key behavior. ([#81](https://github.com/tact-lang/pitaya/pull/81))
 - Persist the effective run configuration to `pitaya_state/<run_id>/config.json` and a redacted copy to `logs/<run_id>/config.json` to improve resume fidelity. ([#81](https://github.com/tact-lang/pitaya/pull/81))
 - Strategy: `pr-review` — N reviewers, validator per reviewer, and a composer; CI‑friendly with JSON trailer parsing and fail gating.
+- Workspace: Optional `--include-branches` (CSV/JSON) or config `runner.include_branches` to materialize extra read‑only branches in the isolated workspace for all strategies. Also supported per-task via `workspace_include_branches` metadata. ([#95](https://github.com/tact-lang/pitaya/pull/95))
 
 ### Changed
 
 - `.env` loading is now best-effort; if `python-dotenv` is missing Pitaya silently skips that layer. ([#82](https://github.com/tact-lang/pitaya/pull/82))
 - `TaskFailed` now groups metadata under `failure` (with `key`, `error_type`, `message`, `result`). Update custom strategies to inspect `exc.failure`. ([#83](https://github.com/tact-lang/pitaya/pull/83))
 - Codex plugin now requires an API key, auto-detects provider-specific env vars (OpenAI/OpenRouter/Groq/etc.), and emits matching `model_provider` wiring automatically. ([#89](https://github.com/tact-lang/pitaya/pull/89))
+- `pr-review`: No longer injects a unified diff into prompts; reviewers use local git to inspect `base...branch`. ([#95](https://github.com/tact-lang/pitaya/pull/95))
+- `pr-review`: Composer now produces a friendly intro (no "Verdict" line) and presents HIGH/MEDIUM findings expanded; LOW findings are collapsed under a GitHub `<details>` spoiler. ([#95](https://github.com/tact-lang/pitaya/pull/95))
+- `pr-review`: Findings are expanded into structured sections; one‑line checkbox output removed from reviewer/validator. ([#95](https://github.com/tact-lang/pitaya/pull/95))
+- `pr-review`: Severities reduced to HIGH, MEDIUM, LOW; default `fail_on` set to `HIGH`. Aggregation/validator JSON counts updated accordingly. ([#95](https://github.com/tact-lang/pitaya/pull/95))
+- `pr-review`: Prompts emphasize exact line‑range validation for links, use of fenced code for precise suggestions, and avoiding unverifiable assumptions. ([#95](https://github.com/tact-lang/pitaya/pull/95))
+- Preflight: disallow remote‑qualified base names (e.g., `origin/main`) to match runner’s strict workspace rules. ([#95](https://github.com/tact-lang/pitaya/pull/95))
+- Docs and `example.yml`: simplified composer instructions (now covered by base prompts), docs‑specific reviewer guidance, and posting composer output without an extra verdict line. ([#95](https://github.com/tact-lang/pitaya/pull/95))
 
 ### Fixed
 
 - TUI: coordinated error handling and graceful teardown; surface friendly errors instead of plain crashes. ([#80](https://github.com/tact-lang/pitaya/pull/80))
 - Errors: propagate agent `final_message`/metrics on failures and show `error_type` + per‑instance log hint in the summary. ([#80](https://github.com/tact-lang/pitaya/pull/80))
 - Token accounting: record streaming usage for Claude/Codex, feed it into the TUI so tokens/costs update live, and prevent completion-time double counting. ([#87](https://github.com/tact-lang/pitaya/pull/87))
+
+### Removed
+
+- `pr-review`: BLOCKER and INFO severities; embedded host diff injection helper. ([#95](https://github.com/tact-lang/pitaya/pull/95))
 
 ## [0.2.0] - 2025-08-29
 

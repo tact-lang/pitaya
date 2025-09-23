@@ -63,7 +63,7 @@ INTERNAL_FINDINGS_OUTPUT_FORMAT: List[str] = [
     "Use a parameterized query with placeholders and bind variables.",
     "",
     "```python",
-    "cursor.execute(\"SELECT id, name FROM items WHERE name LIKE %s\", (pattern,))",
+    'cursor.execute("SELECT id, name FROM items WHERE name LIKE %s", (pattern,))',
     "```",
     "",
     "### [MEDIUM] Inefficient loop for JSON serialization",
@@ -76,6 +76,7 @@ INTERNAL_FINDINGS_OUTPUT_FORMAT: List[str] = [
     "Build a list and serialize once, or use a generator with `join` to reduce allocations.",
     "</example>",
 ]
+
 
 @dataclass
 class PRReviewConfig(StrategyConfig):
@@ -154,20 +155,8 @@ class PRReviewStrategy(Strategy):
             cfg.composer_instructions, cfg.composer_instructions_path, default=""
         )
 
-        # Resolve host HEAD branch name (generic; not PR-specific)
-        host_head_branch, _ = _resolve_host_head(repo_path)
-        include_branches: List[str] = []
-        # Strategy config-specified includes (if any)
-        if cfg.include_branches:
-            include_branches.extend(list(cfg.include_branches))
-        # Also include the host HEAD branch when different from base
-        if host_head_branch and host_head_branch != (cfg.base_branch or base_branch):
-            include_branches.append(host_head_branch)
-        # Deduplicate while preserving order
-        seen = set()
-        include_branches = [
-            b for b in include_branches if not (b in seen or seen.add(b))
-        ]
+        # Include branches: provided only via strategy config (orchestrator defaults are applied later)
+        include_branches: List[str] = list(cfg.include_branches or [])
 
         async def _run_reviewer_with_retries(idx: int) -> Optional[InstanceResult]:
             attempts = cfg.reviewer_max_retries + 1
@@ -595,7 +584,7 @@ def _build_composer_prompt(
         "Use a parameterized query with placeholders and bind variables.",
         "",
         "```python",
-        "cursor.execute(\"SELECT id, name FROM items WHERE name LIKE %s\", (pattern,))",
+        'cursor.execute("SELECT id, name FROM items WHERE name LIKE %s", (pattern,))',
         "```",
         "",
         "#### [MEDIUM] Inefficient loop for JSON serialization",
@@ -634,29 +623,7 @@ def _build_composer_prompt(
     return "\n".join(parts) + "\n"
 
 
-def _resolve_host_head(repo: Path) -> Tuple[Optional[str], Optional[str]]:
-    """Return (branch_name, sha) for the host repository's current HEAD.
-
-    If HEAD is detached, branch_name will be None and sha will be set.
-    """
-    try:
-        b = subprocess.run(
-            ["git", "-C", str(repo), "rev-parse", "--abbrev-ref", "HEAD"],
-            capture_output=True,
-            text=True,
-        )
-        s = subprocess.run(
-            ["git", "-C", str(repo), "rev-parse", "HEAD"],
-            capture_output=True,
-            text=True,
-        )
-        branch = (b.stdout or "").strip()
-        sha = (s.stdout or "").strip()
-        if branch and branch != "HEAD":
-            return branch, sha
-        return None, sha if sha else None
-    except Exception:
-        return None, None
+# (No host HEAD auto-inclusion; include_branches must be provided by config/CLI.)
 
 
 def _resolve_instructions(
