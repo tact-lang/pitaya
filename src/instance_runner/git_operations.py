@@ -212,20 +212,7 @@ class GitOperations:
             base_branch_file.write_text(base_name)
             logger.info(f"Preserved base branch reference: {base_name}")
 
-            # Record base commit for idempotency checks (BASE_COMMIT)
-            try:
-                base_commit_cmd = [
-                    "git",
-                    "-C",
-                    str(workspace_dir),
-                    "rev-parse",
-                    "HEAD",
-                ]
-                rc, out = await self._run_command(base_commit_cmd)
-                if rc == 0:
-                    (workspace_dir / ".git" / "BASE_COMMIT").write_text(out.strip())
-            except Exception:
-                pass
+            # (BASE_COMMIT will be recorded after checking out the base branch below)
 
             # Optionally materialize additional branches so agents can diff locally.
             # Single path: checkout base branch from origin; error if absent
@@ -325,6 +312,21 @@ class GitOperations:
                     base_name,
                 ]
             )
+
+            # Record base commit for idempotency checks (BASE_COMMIT) — capture after checkout to base
+            try:
+                base_commit_cmd = [
+                    "git",
+                    "-C",
+                    str(workspace_dir),
+                    "rev-parse",
+                    "HEAD",
+                ]
+                rc, out = await self._run_command(base_commit_cmd)
+                if rc == 0:
+                    (workspace_dir / ".git" / "BASE_COMMIT").write_text(out.strip())
+            except Exception:
+                pass
 
             # Remove origin to complete isolation (prevents push; reviewers can still diff locally)
             remove_origin_cmd = [
