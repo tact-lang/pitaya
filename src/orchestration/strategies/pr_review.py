@@ -51,6 +51,8 @@ class PRReviewConfig(StrategyConfig):
     composer_instructions_path: Optional[str] = None
     # CI failure policy: 'needs_changes' (default), 'always', or 'never'
     ci_fail_policy: str = "needs_changes"
+    # Additional read-only branches to include in the workspace (unqualified names)
+    include_branches: Optional[List[str]] = None
 
     def validate(self) -> None:  # type: ignore[override]
         super().validate()
@@ -62,6 +64,19 @@ class PRReviewConfig(StrategyConfig):
             raise ValueError(
                 "ci_fail_policy must be one of: needs_changes, always, never"
             )
+        # Basic validation for branch names (unqualified)
+        if self.include_branches is not None:
+            for b in self.include_branches:
+                if (
+                    not isinstance(b, str)
+                    or not b.strip()
+                    or b.startswith("origin/")
+                    or b.startswith("refs/")
+                    or b.upper() == "HEAD"
+                ):
+                    raise ValueError(
+                        f"include_branches must contain unqualified branch names; got: {b!r}"
+                    )
 
 
 class PRReviewStrategy(Strategy):
@@ -95,8 +110,17 @@ class PRReviewStrategy(Strategy):
         # Resolve host HEAD branch name (generic; not PR-specific)
         host_head_branch, _ = _resolve_host_head(repo_path)
         include_branches: List[str] = []
+        # Strategy config-specified includes (if any)
+        if cfg.include_branches:
+            include_branches.extend(list(cfg.include_branches))
+        # Also include the host HEAD branch when different from base
         if host_head_branch and host_head_branch != (cfg.base_branch or base_branch):
             include_branches.append(host_head_branch)
+        # Deduplicate while preserving order
+        seen = set()
+        include_branches = [
+            b for b in include_branches if not (b in seen or seen.add(b))
+        ]
 
         async def _run_reviewer_with_retries(idx: int) -> Optional[InstanceResult]:
             attempts = cfg.reviewer_max_retries + 1

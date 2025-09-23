@@ -163,18 +163,25 @@ Lightweight PR review orchestration for CI: run N reviewers, validate each, and 
 
 Flow
 
-- Reviewers (N total): each reviews the whole PR (diff vs `base_branch`) and returns a Markdown report in the final message.
-- Validators (1 per reviewer): refine, dedupe, correct severities, and append a fenced JSON trailer with verdict/counts in their final message.
-- Composer: aggregates validated reviewer messages and returns a consolidated review in its final message; sets an overall verdict (PASS or NEEDS_CHANGES).
+- Reviewers (N total): each inspects changes with local git in the isolated workspace (e.g., `git diff <base_branch>...<branch>`) and returns a Markdown report.
+- Validators (1 per reviewer): refine, dedupe, correct severities, and append a fenced JSON trailer with verdict/counts.
+- Composer: aggregates validated reviewer messages and returns a consolidated review; sets an overall verdict (PASS or NEEDS_CHANGES).
 
 Key options
 
 - `reviewers` (default 3)
 - `reviewer_max_retries` (default 0), `validator_max_retries` (default 1)
-- `base_branch` (default `origin/main`)
+- `base_branch` (default `main`)
+- `include_branches` (list of unqualified branch names to make available read‑only in the workspace; use `pitaya.yaml`)
 - `fail_on` severities that should fail CI (default `BLOCKER,HIGH`)
 - `ci_fail_policy` (default `needs_changes`; options: `needs_changes`, `always`, `never`)
 - Long-form instructions: `review_instructions{,_path}`, `validator_instructions{,_path}`, `composer_instructions{,_path}`
+
+Branch availability in the workspace
+
+- The workspace always contains a local `base_branch` checked out from `origin/<base_branch>`.
+- Additional read‑only branches can be included via `include_branches` (must exist as `origin/<name>`). No remotes are available and push is disabled.
+- Pitaya also automatically includes the host repo’s current HEAD branch when it differs from `base_branch`.
 
 Examples
 
@@ -187,6 +194,26 @@ pitaya "Review this PR" --strategy pr-review \
   -S review_instructions_path=.ci/reviewer.md \
   -S validator_instructions_path=.ci/validator.md \
   -S composer_instructions_path=.ci/composer.md
+
+# Include branches via -S (CSV)
+pitaya "Review this PR" --strategy pr-review \
+  -S include_branches=feature/new-ui,release/1.2.0
+
+# Or as a JSON list
+pitaya "Review this PR" --strategy pr-review \
+  -S include_branches='["feature/new-ui","release/1.2.0"]'
+```
+
+pitaya.yaml example to include extra branches
+
+```yaml
+strategies:
+  pr-review:
+    reviewers: 3
+    base_branch: main
+    include_branches:
+      - feature/new-ui
+      - release/1.2.0
 ```
 
 CI integration
