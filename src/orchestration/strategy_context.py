@@ -367,8 +367,13 @@ class StrategyContext:
             ),
             # Workspace toggles (optional, strategy-specific)
             **(
-                {"workspace_include_branches": list(task.get("workspace_include_branches", []))}
-                if "workspace_include_branches" in task and task.get("workspace_include_branches") is not None
+                {
+                    "workspace_include_branches": list(
+                        task.get("workspace_include_branches", [])
+                    )
+                }
+                if "workspace_include_branches" in task
+                and task.get("workspace_include_branches") is not None
                 else {}
             ),
         }

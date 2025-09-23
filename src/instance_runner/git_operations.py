@@ -240,9 +240,7 @@ class GitOperations:
                 ]
             )
             if rc_base != 0:
-                raise GitError(
-                    f"Base branch not found in source repo: {base_name}"
-                )
+                raise GitError(f"Base branch not found in source repo: {base_name}")
             await self._run_command(
                 [
                     "git",

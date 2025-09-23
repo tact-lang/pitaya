@@ -285,7 +285,6 @@ class PRReviewStrategy(Strategy):
         return results
 
 
-
 def _extract_summary(md_text: str) -> Tuple[Optional[str], Dict[str, int], bool]:
     """Extract validator summary JSON. Returns (verdict, counts, is_valid_json).
 
@@ -340,7 +339,10 @@ def _extract_summary(md_text: str) -> Tuple[Optional[str], Dict[str, int], bool]
 
 
 def _build_reviewer_prompt(
-    *, base_branch: str, extra_instructions: str = "", include_branch_names: Optional[List[str]] = None
+    *,
+    base_branch: str,
+    extra_instructions: str = "",
+    include_branch_names: Optional[List[str]] = None,
 ) -> str:
     parts: List[str] = []
     parts += [
