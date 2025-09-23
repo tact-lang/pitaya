@@ -418,14 +418,8 @@ def _build_reviewer_prompt(
             if (include_branch_names or [])
             else ""
         ),
-        (
-            (
-                "You may run local diffs, e.g., 'git diff "
-                + f"{base_branch}...{(include_branch_names or [''])[0]}'"
-            )
-            if (include_branch_names or [])
-            else ""
-        ),
+        "List local branches with 'git branch --list'. Identify the non-base branch for this review, then run:",
+        f"  git diff {base_branch}...<target-branch>",
         "Do not push or modify branches.",
         "</task>",
         "",
