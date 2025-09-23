@@ -1628,6 +1628,9 @@ class Orchestrator:
                 allow_global_session_volume=self.allow_global_session_volume,
                 agent_cli_args=(info.metadata or {}).get("agent_cli_args"),
                 force_commit=self.force_commit,
+                workspace_include_branches=(info.metadata or {}).get(
+                    "workspace_include_branches"
+                ),
             )
             logger.info(
                 f"_execute_instance: run_instance finished iid={instance_id} success={result.success} status={getattr(result,'status',None)}"
@@ -2535,6 +2538,9 @@ class Orchestrator:
                 allow_global_session_volume=self.allow_global_session_volume,
                 agent_cli_args=(instance_info.metadata or {}).get("agent_cli_args"),
                 force_commit=self.force_commit,
+                workspace_include_branches=(instance_info.metadata or {}).get(
+                    "workspace_include_branches"
+                ),
             )
 
             # Update state

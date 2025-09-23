@@ -2,7 +2,7 @@
 Pull Request Review Strategy (simple, clean, CI‑friendly) — message‑only.
 
 Flow (no repo writes):
-- N reviewers read a diff excerpt and return a Markdown report in final_message.
+- N reviewers inspect changes using local git (e.g., `git diff <base>...<branch>`) and return a Markdown report in final_message.
 - One validator per reviewer refines the message and appends a JSON trailer
   {"verdict":"PASS|NEEDS_CHANGES","counts":{...}}.
 - Composer aggregates validated messages into a single final_message.
@@ -37,7 +37,7 @@ class PRReviewConfig(StrategyConfig):
     reviewers: int = 3
     reviewer_max_retries: int = 0
     validator_max_retries: int = 1
-    base_branch: str = "origin/main"
+    base_branch: str = "main"
     fail_on: List[str] = field(
         default_factory=lambda: ["BLOCKER", "HIGH"]
     )  # severities
@@ -92,10 +92,11 @@ class PRReviewStrategy(Strategy):
             cfg.composer_instructions, cfg.composer_instructions_path, default=""
         )
 
-        # Compute PR diff once from the host repo and pass to reviewers
-        diff_text = _compute_diff(
-            repo_path, cfg.base_branch or base_branch, max_chars=120_000
-        )
+        # Resolve host HEAD branch name (generic; not PR-specific)
+        host_head_branch, _ = _resolve_host_head(repo_path)
+        include_branches: List[str] = []
+        if host_head_branch and host_head_branch != (cfg.base_branch or base_branch):
+            include_branches.append(host_head_branch)
 
         async def _run_reviewer_with_retries(idx: int) -> Optional[InstanceResult]:
             attempts = cfg.reviewer_max_retries + 1
@@ -107,11 +108,13 @@ class PRReviewStrategy(Strategy):
                 task = {
                     "prompt": _build_reviewer_prompt(
                         base_branch=(cfg.base_branch or base_branch),
-                        diff_excerpt=diff_text,
                         extra_instructions=review_extra,
+                        include_branch_names=include_branches,
                     ),
                     "base_branch": base_branch,
                     "model": cfg.model,
+                    # Provide extra branches in workspace so agent can run local diffs if needed
+                    "workspace_include_branches": include_branches,
                 }
                 try:
                     h = await ctx.run(task, key=key)
@@ -140,6 +143,7 @@ class PRReviewStrategy(Strategy):
                     ),
                     "base_branch": base_branch,
                     "model": cfg.model,
+                    "workspace_include_branches": include_branches,
                 }
                 try:
                     h = await ctx.run(task, key=key)
@@ -187,6 +191,7 @@ class PRReviewStrategy(Strategy):
             ),
             "base_branch": base_branch,
             "model": composer_model,
+            "workspace_include_branches": include_branches,
         }
 
         comp_handle = await ctx.run(comp_task, key=key_comp)
@@ -280,34 +285,6 @@ class PRReviewStrategy(Strategy):
         return results
 
 
-def _compute_diff(repo: Path, base_branch: str, max_chars: int = 120_000) -> str:
-    """Return a unified diff between base_branch and HEAD from the host repo.
-
-    Truncates to max_chars to keep prompts bounded in CI.
-    """
-    try:
-        r = subprocess.run(
-            [
-                "git",
-                "-C",
-                str(repo),
-                "diff",
-                f"{base_branch}...HEAD",
-                "--unified=0",
-                "--no-color",
-            ],
-            capture_output=True,
-            text=True,
-        )
-        if r.returncode == 0 and r.stdout:
-            txt = r.stdout
-            return txt[:max_chars] + (
-                "\n...\n[diff truncated]" if len(txt) > max_chars else ""
-            )
-    except Exception:
-        pass
-    return "(diff unavailable; provide high-level feedback based on repo context)"
-
 
 def _extract_summary(md_text: str) -> Tuple[Optional[str], Dict[str, int], bool]:
     """Extract validator summary JSON. Returns (verdict, counts, is_valid_json).
@@ -363,7 +340,7 @@ def _extract_summary(md_text: str) -> Tuple[Optional[str], Dict[str, int], bool]
 
 
 def _build_reviewer_prompt(
-    *, base_branch: str, diff_excerpt: str, extra_instructions: str = ""
+    *, base_branch: str, extra_instructions: str = "", include_branch_names: Optional[List[str]] = None
 ) -> str:
     parts: List[str] = []
     parts += [
@@ -372,8 +349,26 @@ def _build_reviewer_prompt(
         "</role>",
         "",
         "<task>",
-        f"Review the current PR changes relative to {base_branch}.",
-        "Use the provided unified diff excerpt (do NOT attempt to write files).",
+        f"Review the current changes relative to {base_branch} using local git in the workspace.",
+        "Run git commands to inspect diffs (do NOT write files).",
+        (
+            (
+                "In the workspace, additional read-only branches are available: "
+                + ", ".join(sorted(set(include_branch_names or [])))
+                + "."
+            )
+            if (include_branch_names or [])
+            else ""
+        ),
+        (
+            (
+                "You may run local diffs, e.g., 'git diff "
+                + f"{base_branch}...{(include_branch_names or [''])[0]}'"
+            )
+            if (include_branch_names or [])
+            else ""
+        ),
+        "Do not push or modify branches.",
         "</task>",
         "",
         "<requirements>",
@@ -391,7 +386,6 @@ def _build_reviewer_prompt(
             "</integrator_instructions>",
             "",
         ]
-    parts += ["<diff>", diff_excerpt, "</diff>", ""]
     parts += [
         "<output_format>",
         "# PR Review",
@@ -477,6 +471,31 @@ def _build_composer_prompt(
             "</integrator_instructions>",
         ]
     return "\n".join(parts) + "\n"
+
+
+def _resolve_host_head(repo: Path) -> Tuple[Optional[str], Optional[str]]:
+    """Return (branch_name, sha) for the host repository's current HEAD.
+
+    If HEAD is detached, branch_name will be None and sha will be set.
+    """
+    try:
+        b = subprocess.run(
+            ["git", "-C", str(repo), "rev-parse", "--abbrev-ref", "HEAD"],
+            capture_output=True,
+            text=True,
+        )
+        s = subprocess.run(
+            ["git", "-C", str(repo), "rev-parse", "HEAD"],
+            capture_output=True,
+            text=True,
+        )
+        branch = (b.stdout or "").strip()
+        sha = (s.stdout or "").strip()
+        if branch and branch != "HEAD":
+            return branch, sha
+        return None, sha if sha else None
+    except Exception:
+        return None, None
 
 
 def _resolve_instructions(
