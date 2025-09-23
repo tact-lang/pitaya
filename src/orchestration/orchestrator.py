@@ -173,7 +173,9 @@ class Orchestrator:
         # Default workspace include branches applied to all tasks unless overridden
         try:
             self.default_workspace_include_branches: Optional[List[str]] = (
-                list(default_workspace_include_branches) if default_workspace_include_branches else None
+                list(default_workspace_include_branches)
+                if default_workspace_include_branches
+                else None
             )
         except Exception:
             self.default_workspace_include_branches = None

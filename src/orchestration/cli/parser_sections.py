@@ -96,7 +96,7 @@ def add_repo_args(parser: argparse.ArgumentParser) -> None:
         metavar="BRANCHES",
         help=(
             "Extra branches to include read-only in the workspace for all tasks. "
-            "CSV (a,b,c) or JSON list (e.g., '[\"a\",\"b\"]')."
+            'CSV (a,b,c) or JSON list (e.g., \'["a","b"]\').'
         ),
     )
     g.add_argument(
