@@ -541,6 +541,27 @@ class Orchestrator:
             base_branch=base_branch,
         )
 
+        # Ensure the branch under review is available in isolated workspaces by default.
+        # If the caller did not configure default_workspace_include_branches, include the host HEAD
+        # when it differs from the base branch. This keeps git-based review functional out of the box.
+        try:
+            if getattr(self, "default_workspace_include_branches", None) in (None, []):
+                import subprocess as _sp
+
+                _b = _sp.run(
+                    ["git", "-C", str(repo_path), "rev-parse", "--abbrev-ref", "HEAD"],
+                    capture_output=True,
+                    text=True,
+                )
+                head_branch = (_b.stdout or "").strip()
+                if head_branch and head_branch != "HEAD" and head_branch != base_branch:
+                    self.default_workspace_include_branches = [head_branch]
+                else:
+                    self.default_workspace_include_branches = None
+        except Exception:
+            # Fall back to no additional branches if detection fails
+            self.default_workspace_include_branches = None
+
         # Per-run force_import setting from strategy_config
         self._force_import = bool((strategy_config or {}).get("force_import", False))
 
