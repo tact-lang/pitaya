@@ -72,6 +72,22 @@ def build_cli_config(args) -> Dict[str, Any]:
         cfg["plugin_name"] = args.plugin
     if getattr(args, "docker_image", None):
         cfg.setdefault("runner", {})["docker_image"] = args.docker_image
+    # Parse include-branches (CSV or JSON list)
+    if getattr(args, "include_branches", None):
+        import json as _json
+
+        raw = str(args.include_branches)
+        parsed: list[str]
+        try:
+            if raw.strip().startswith("["):
+                val = _json.loads(raw)
+                parsed = [str(x).strip() for x in (val or []) if str(x).strip()]
+            else:
+                parsed = [s.strip() for s in raw.split(",") if s.strip()]
+        except Exception:
+            parsed = [s.strip() for s in raw.split(",") if s.strip()]
+        if parsed:
+            cfg.setdefault("runner", {})["include_branches"] = parsed
     if getattr(args, "strategy", None):
         cfg["strategy"] = args.strategy
     if getattr(args, "state_dir", None):

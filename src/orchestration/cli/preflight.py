@@ -38,6 +38,15 @@ def _check_repo(console: Console, repo_path: Path, base_branch: str) -> bool:
         console.print(f"[red]Error: Not a git repository: {repo_path}[/red]")
         console.print("Initialize with: git init")
         return False
+    # Disallow remote-qualified base names to match runner's strict rules
+    if str(base_branch).startswith("origin/") or str(base_branch).startswith("refs/"):
+        _hint(
+            console,
+            f"base branch must be an unqualified local name (got '{base_branch}')",
+            ["use 'main' not 'origin/main'", "git branch --list"],
+        )
+        return False
+
     rc = subprocess.run(
         ["git", "-C", str(repo_path), "rev-parse", "--verify", base_branch],
         capture_output=True,

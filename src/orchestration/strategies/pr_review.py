@@ -2,7 +2,7 @@
 Pull Request Review Strategy (simple, clean, CI‑friendly) — message‑only.
 
 Flow (no repo writes):
-- N reviewers read a diff excerpt and return a Markdown report in final_message.
+- N reviewers inspect changes using local git (e.g., `git diff <base>...<branch>`) and return a Markdown report in final_message.
 - One validator per reviewer refines the message and appends a JSON trailer
   {"verdict":"PASS|NEEDS_CHANGES","counts":{...}}.
 - Composer aggregates validated messages into a single final_message.
@@ -18,7 +18,6 @@ from __future__ import annotations
 import asyncio
 import json
 import re
-import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, TYPE_CHECKING
@@ -30,6 +29,53 @@ if TYPE_CHECKING:
     from ..strategy_context import StrategyContext
 
 
+# Shared internal findings output format for reviewer and validator prompts
+INTERNAL_FINDINGS_OUTPUT_FORMAT: List[str] = [
+    "<output_format>",
+    "## Findings",
+    "",
+    "Repeat the following section for each distinct issue:",
+    "",
+    "### [SEVERITY] <Short Title>",
+    "- Location: <path>?plain=1#L<start>-L<end> (GitHub preview link)",
+    "Description:",
+    "Write 2–4 sentences explaining the problem and its impact.",
+    "",
+    "Suggestion:",
+    "Provide a minimal, concrete fix. Include a short code block when helpful.",
+    "",
+    "Notes:",
+    "- Use relative repo paths and ?plain=1#L.. anchors so GitHub renders a preview.",
+    "- Normalize/merge duplicates; reference files/lines precisely; avoid repetition.",
+    "- Do NOT include a summary or verdict in this message (verdict goes to JSON only).",
+    "</output_format>",
+    "",
+    "<example>",
+    "### [HIGH] SQL query uses unsanitized user input",
+    "- Severity: HIGH",
+    "- Location: api/search.py?plain=1#L42-L58",
+    "Description:",
+    "The search endpoint builds an SQL string using f-strings with the raw `q` parameter. An attacker can inject SQL via crafted input, risking data exposure or corruption.",
+    "",
+    "Suggestion:",
+    "Use a parameterized query with placeholders and bind variables.",
+    "",
+    "```python",
+    'cursor.execute("SELECT id, name FROM items WHERE name LIKE %s", (pattern,))',
+    "```",
+    "",
+    "### [MEDIUM] Inefficient loop for JSON serialization",
+    "- Severity: MEDIUM",
+    "- Location: utils/encode.py?plain=1#L15-L28",
+    "Description:",
+    "The code repeatedly calls `json.dumps` inside a loop, causing N small allocations and string concatenations.",
+    "",
+    "Suggestion:",
+    "Build a list and serialize once, or use a generator with `join` to reduce allocations.",
+    "</example>",
+]
+
+
 @dataclass
 class PRReviewConfig(StrategyConfig):
     """Configuration for PR review strategy."""
@@ -37,10 +83,10 @@ class PRReviewConfig(StrategyConfig):
     reviewers: int = 3
     reviewer_max_retries: int = 0
     validator_max_retries: int = 1
-    base_branch: str = "origin/main"
+    base_branch: str = "main"
     fail_on: List[str] = field(
-        default_factory=lambda: ["BLOCKER", "HIGH"]
-    )  # severities
+        default_factory=lambda: ["HIGH"]
+    )  # severities considered CI-failing
     composer_model: Optional[str] = None  # default to `model` if None
     # Optional custom instruction hooks. Either provide long text directly or via *_path.
     review_instructions: Optional[str] = None
@@ -51,6 +97,8 @@ class PRReviewConfig(StrategyConfig):
     composer_instructions_path: Optional[str] = None
     # CI failure policy: 'needs_changes' (default), 'always', or 'never'
     ci_fail_policy: str = "needs_changes"
+    # Additional read-only branches to include in the workspace (unqualified names)
+    include_branches: Optional[List[str]] = None
 
     def validate(self) -> None:  # type: ignore[override]
         super().validate()
@@ -62,6 +110,19 @@ class PRReviewConfig(StrategyConfig):
             raise ValueError(
                 "ci_fail_policy must be one of: needs_changes, always, never"
             )
+        # Basic validation for branch names (unqualified)
+        if self.include_branches is not None:
+            for b in self.include_branches:
+                if (
+                    not isinstance(b, str)
+                    or not b.strip()
+                    or b.startswith("origin/")
+                    or b.startswith("refs/")
+                    or b.upper() == "HEAD"
+                ):
+                    raise ValueError(
+                        f"include_branches must contain unqualified branch names; got: {b!r}"
+                    )
 
 
 class PRReviewStrategy(Strategy):
@@ -92,10 +153,8 @@ class PRReviewStrategy(Strategy):
             cfg.composer_instructions, cfg.composer_instructions_path, default=""
         )
 
-        # Compute PR diff once from the host repo and pass to reviewers
-        diff_text = _compute_diff(
-            repo_path, cfg.base_branch or base_branch, max_chars=120_000
-        )
+        # Include branches: provided only via strategy config (orchestrator defaults are applied later)
+        include_branches: List[str] = list(cfg.include_branches or [])
 
         async def _run_reviewer_with_retries(idx: int) -> Optional[InstanceResult]:
             attempts = cfg.reviewer_max_retries + 1
@@ -107,11 +166,13 @@ class PRReviewStrategy(Strategy):
                 task = {
                     "prompt": _build_reviewer_prompt(
                         base_branch=(cfg.base_branch or base_branch),
-                        diff_excerpt=diff_text,
                         extra_instructions=review_extra,
+                        include_branch_names=include_branches,
                     ),
                     "base_branch": base_branch,
                     "model": cfg.model,
+                    # Provide extra branches in workspace so agent can run local diffs if needed
+                    "workspace_include_branches": include_branches,
                 }
                 try:
                     h = await ctx.run(task, key=key)
@@ -140,6 +201,7 @@ class PRReviewStrategy(Strategy):
                     ),
                     "base_branch": base_branch,
                     "model": cfg.model,
+                    "workspace_include_branches": include_branches,
                 }
                 try:
                     h = await ctx.run(task, key=key)
@@ -187,6 +249,7 @@ class PRReviewStrategy(Strategy):
             ),
             "base_branch": base_branch,
             "model": composer_model,
+            "workspace_include_branches": include_branches,
         }
 
         comp_handle = await ctx.run(comp_task, key=key_comp)
@@ -195,11 +258,9 @@ class PRReviewStrategy(Strategy):
         # Evaluate severities from validator outputs (prefer JSON trailer if present)
         should_fail = False
         agg_counts: Dict[str, int] = {
-            "BLOCKER": 0,
             "HIGH": 0,
             "MEDIUM": 0,
             "LOW": 0,
-            "INFO": 0,
         }
         any_invalid_json = False
         invalid_indices: List[int] = []
@@ -280,35 +341,6 @@ class PRReviewStrategy(Strategy):
         return results
 
 
-def _compute_diff(repo: Path, base_branch: str, max_chars: int = 120_000) -> str:
-    """Return a unified diff between base_branch and HEAD from the host repo.
-
-    Truncates to max_chars to keep prompts bounded in CI.
-    """
-    try:
-        r = subprocess.run(
-            [
-                "git",
-                "-C",
-                str(repo),
-                "diff",
-                f"{base_branch}...HEAD",
-                "--unified=0",
-                "--no-color",
-            ],
-            capture_output=True,
-            text=True,
-        )
-        if r.returncode == 0 and r.stdout:
-            txt = r.stdout
-            return txt[:max_chars] + (
-                "\n...\n[diff truncated]" if len(txt) > max_chars else ""
-            )
-    except Exception:
-        pass
-    return "(diff unavailable; provide high-level feedback based on repo context)"
-
-
 def _extract_summary(md_text: str) -> Tuple[Optional[str], Dict[str, int], bool]:
     """Extract validator summary JSON. Returns (verdict, counts, is_valid_json).
 
@@ -363,7 +395,10 @@ def _extract_summary(md_text: str) -> Tuple[Optional[str], Dict[str, int], bool]
 
 
 def _build_reviewer_prompt(
-    *, base_branch: str, diff_excerpt: str, extra_instructions: str = ""
+    *,
+    base_branch: str,
+    extra_instructions: str = "",
+    include_branch_names: Optional[List[str]] = None,
 ) -> str:
     parts: List[str] = []
     parts += [
@@ -372,14 +407,42 @@ def _build_reviewer_prompt(
         "</role>",
         "",
         "<task>",
-        f"Review the current PR changes relative to {base_branch}.",
-        "Use the provided unified diff excerpt (do NOT attempt to write files).",
+        f"Review the current changes relative to {base_branch} using local git in the workspace.",
+        "Run git commands to inspect diffs (do NOT write files).",
+        (
+            (
+                "In the workspace, additional read-only branches are available: "
+                + ", ".join(sorted(set(include_branch_names or [])))
+                + "."
+            )
+            if (include_branch_names or [])
+            else ""
+        ),
+        "List local branches with 'git branch --list'. Identify the non-base branch for this review, then run:",
+        f"  git diff {base_branch}...<target-branch>",
+        "Do not push or modify branches.",
         "</task>",
         "",
         "<requirements>",
         "- Focus on correctness, security, performance, maintainability, API stability, and tests.",
         "- Propose minimal, concrete fixes (filenames, lines, snippets).",
-        "- Use severities: BLOCKER, HIGH, MEDIUM, LOW, INFO.",
+        "- Use severities: HIGH, MEDIUM, LOW.",
+        "  • HIGH: Likely to cause incorrect or harmful outcomes for readers/users/stakeholders; blocks intended use or materially misleads.",
+        "  • MEDIUM: Noticeably reduces clarity, effectiveness, or reliability; may confuse or mislead in some cases but does not block use.",
+        "  • LOW: Minor polish (style, wording, formatting, consistency) with no impact on meaning or function.",
+        "- For every finding, VALIDATE the Location line range against the actual file content.",
+        "  Do not guess line numbers.",
+        "  Use non-destructive commands to inspect content at a branch/ref, e.g:",
+        "    git show <branch>:<path> | nl -ba | sed -n '<start>,<end>p'",
+        "  If the snippet does not match your description, correct the Location (or the finding) before outputting.",
+        "- When referring to exact text (e.g., replace X with Y), use fenced code blocks, not quoted prose.",
+        "  Prefer short before/after blocks or unified diff snippets for clarity.",
+        "- Do not offer to perform further actions (e.g., 'I can draft the exact changes'); provide the concrete suggestion instead.",
+        "- Scope rule (STRICT): Only report issues introduced by the diff between the base branch and the review branch.",
+        "  You may read any files for context, but do not report pre‑existing, unrelated issues.",
+        "  If a problem manifests outside changed lines, include the changed line(s) that cause it and reference the external evidence in Description.",
+        "  The primary Location for each finding must point to lines within the diff.",
+        "- Report only verified issues observable from repository content. Do NOT include assumptions about behavior you cannot validate from files/configuration in this repository.",
         "- Keep total length reasonable; avoid repetition.",
         "</requirements>",
         "",
@@ -391,21 +454,7 @@ def _build_reviewer_prompt(
             "</integrator_instructions>",
             "",
         ]
-    parts += ["<diff>", diff_excerpt, "</diff>", ""]
-    parts += [
-        "<output_format>",
-        "# PR Review",
-        "",
-        "## Summary",
-        "Write in clear, simple language (no fancy words). One short paragraph.",
-        "",
-        "## Findings (checkbox list)",
-        "- [ ] [SEVERITY] Area — concise description — Suggested change",
-        "(One checkbox per finding; keep each line short and actionable)",
-        "",
-        "## Overall Verdict: PASS or NEEDS_CHANGES",
-        "</output_format>",
-    ]
+    parts += INTERNAL_FINDINGS_OUTPUT_FORMAT
     return "\n".join(parts) + "\n"
 
 
@@ -421,7 +470,21 @@ def _build_validator_prompt(
         "<task>",
         "Validate the reviewer report below: drop duplicates, merge overlapping items, ",
         "correct severities, and refine suggestions to be minimal and clear.",
-        "Ensure the Findings section is a checkbox list (one - [ ] item per finding).",
+        "Ensure the Findings section follows the structured format in <output_format> (no checkboxes).",
+        "",
+        "Critically: re-validate every Location line range and link before output.",
+        "- Do not rely on the reviewer’s numbers; check them again.",
+        "- Use read-only commands to inspect the exact blob content, for example:",
+        "    git show <branch>:<path> | nl -ba | sed -n '<start>,<end>p'",
+        "- If the snippet does not match the Description, fix the Location (or adjust the finding).",
+        "- Do NOT add new findings at this stage; your goal is to validate, filter, merge, and adjust severity/wording/locations of the reviewer’s list only.",
+        "- Normalize severities using these generic definitions:",
+        "  • HIGH: Likely to cause incorrect or harmful outcomes for readers/users/stakeholders; blocks intended use or materially misleads.",
+        "  • MEDIUM: Noticeably reduces clarity, effectiveness, or reliability; may confuse or mislead in some cases but does not block use.",
+        "  • LOW: Minor polish (style, wording, formatting, consistency) with no impact on meaning or function.",
+        "- Scope rule (STRICT): drop any findings not introduced by the diff; each finding’s primary Location must point to a changed line.",
+        "  If the reviewer cited only out‑of‑diff locations, rewrite the Location to the diff lines that cause the issue and keep the out‑of‑diff reference as explanatory text.",
+        "- Remove speculative or unverifiable claims. Only keep findings validated from repository content.",
         "Return the validated report as your final message and append a fenced JSON block with counts per severity and a verdict.",
         "</task>",
         "",
@@ -434,10 +497,11 @@ def _build_validator_prompt(
             "",
         ]
     parts += ["<reviewer_report>", reviewer_report, "</reviewer_report>", ""]
+    parts += INTERNAL_FINDINGS_OUTPUT_FORMAT
     parts += [
         "<json_trailer>",
         "```json",
-        '{\n  "verdict": "PASS|NEEDS_CHANGES",\n  "counts": {\n    "BLOCKER": 0, "HIGH": 0, "MEDIUM": 0, "LOW": 0, "INFO": 0\n  }\n}',
+        '{\n  "verdict": "PASS|NEEDS_CHANGES",\n  "counts": {\n    "HIGH": 0, "MEDIUM": 0, "LOW": 0\n  }\n}',
         "```",
         "</json_trailer>",
     ]
@@ -463,12 +527,113 @@ def _build_composer_prompt(
         "</inputs>",
         "",
         "<task>",
-        "Compose a final review message (do NOT write files). Deduplicate and group findings, ",
-        "preserve severities, and include an Overall Verdict (PASS or NEEDS_CHANGES).",
-        "Write in simple, plain language (no fancy words); short, direct sentences.",
-        "Use a checkbox list for Findings (- [ ] [SEVERITY] Area — description — suggested change).",
+        "Compose a user-facing final review (do NOT write files). Deduplicate and group findings, ",
+        "preserve severities, and begin with a short, author‑directed opening (1–2 sentences) with an encouraging, honest vibe.",
+        "The opening must be proportional to the change size (tiny changes → brief, neutral) and must not restate the PR or enumerate findings.",
+        "Avoid boilerplate or generic praise; be specific when appropriate, and keep it sincere.",
+        "If validated findings include HIGH items, state plainly that issues should be addressed before merging.",
+        "Do NOT include any 'Verdict', 'Status', or 'Outcome' line or heading.",
+        "Do NOT discover new issues and do NOT re-validate content at this stage: you receive VALIDATED findings and can trust their severities, locations, and wording.",
+        "Use simple, plain language; short, direct sentences. Do NOT use the tokens PASS/NEEDS_CHANGES in prose.",
+        "Do NOT promise actions you cannot perform (e.g., 'I can draft the exact changes'). Instead, provide concrete suggestions and fenced code blocks where helpful.",
+        "Present HIGH findings expanded; put MEDIUM and LOW findings inside separate <details> spoilers (even when no HIGH findings exist).",
+        "Compute and display counts: '## Findings (<total>)', 'Medium (<mcount>)', 'Low (<lcount>)'. Omit a spoiler entirely when its count is 0.",
+        "If there are no findings, do not include any Findings section; keep it to the opening sentences and state that you found no issues.",
         "</task>",
         "",
+        "<output_format>",
+        "(Opening: author-directed, encouraging, honest, proportional; no boilerplate; do not restate the PR or list findings.)",
+        "",
+        "## Findings (<total>)",
+        "",
+        "Repeat this section per HIGH finding (expanded):",
+        "",
+        "#### [HIGH] <Short Title>",
+        "- Location: <path>?plain=1#L<start>-L<end>",
+        "Description:",
+        "1–3 sentences tailored for readers.",
+        "",
+        "Suggestion:",
+        "Concrete change (use a fenced code block for exact text/diff when helpful).",
+        "",
+        "(Include a 'Medium' details section only if there are MEDIUM findings.)",
+        "<details><summary>Medium (<mcount>)</summary>",
+        "",
+        "Repeat per MEDIUM finding:",
+        "",
+        "#### [MEDIUM] <Short Title>",
+        "- Location: <path>?plain=1#L<start>-L<end>",
+        "Description:",
+        "1–3 sentences.",
+        "",
+        "Suggestion:",
+        "Concrete, minimal change.",
+        "",
+        "</details>",
+        "",
+        "(Include a 'Low' details section only if there are LOW findings.)",
+        "<details><summary>Low (<lcount>)</summary>",
+        "",
+        "Repeat per LOW finding:",
+        "",
+        "#### [LOW] <Short Title>",
+        "- Location: <path>?plain=1#L<start>-L<end>",
+        "Description:",
+        "1–2 sentences.",
+        "",
+        "Suggestion:",
+        "Brief, concrete nudge.",
+        "",
+        "</details>",
+        "",
+        "(No JSON blocks in this message.)",
+        "</output_format>",
+        "",
+        "<example>",
+        "Appreciate the focused update — a couple of items need attention before merging.",
+        "",
+        "## Findings (3)",
+        "",
+        "#### [HIGH] SQL query uses unsanitized user input",
+        "- Location: api/search.py?plain=1#L42-L58",
+        "Description:",
+        "The search endpoint builds an SQL string using f-strings with the raw `q` parameter. An attacker can inject SQL via crafted input, risking data exposure or corruption.",
+        "",
+        "Suggestion:",
+        "Use a parameterized query with placeholders and bind variables.",
+        "",
+        "```python",
+        'cursor.execute("SELECT id, name FROM items WHERE name LIKE %s", (pattern,))',
+        "```",
+        "",
+        "<details><summary>Medium (1)</summary>",
+        "",
+        "#### [MEDIUM] Inefficient loop for JSON serialization",
+        "- Location: utils/encode.py?plain=1#L15-L28",
+        "Description:",
+        "The code repeatedly calls `json.dumps` inside a loop, causing N small allocations and string concatenations.",
+        "",
+        "Suggestion:",
+        "Build a list and serialize once, or use a generator with `join`.",
+        "",
+        "</details>",
+        "",
+        "<details><summary>Low (1)</summary>",
+        "",
+        "#### [LOW] Typo in README",
+        "- Location: README.md?plain=1#L12-L12",
+        "Description:",
+        "The word 'teh' appears in the installation section.",
+        "",
+        "Suggestion:",
+        "Replace with 'the'.",
+        "",
+        "</details>",
+        "",
+        "(No-issues example)",
+        "",
+        "Looks tidy — no issues from my side.",
+        "</example>",
     ]
     if extra_instructions:
         parts += [
@@ -477,6 +642,9 @@ def _build_composer_prompt(
             "</integrator_instructions>",
         ]
     return "\n".join(parts) + "\n"
+
+
+# (No host HEAD auto-inclusion; include_branches must be provided by config/CLI.)
 
 
 def _resolve_instructions(

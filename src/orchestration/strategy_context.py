@@ -365,7 +365,29 @@ class StrategyContext:
                 if isinstance(_task_mem, (int, float))
                 else {}
             ),
+            # Workspace toggles (optional, strategy-specific)
+            **(
+                {
+                    "workspace_include_branches": list(
+                        task.get("workspace_include_branches", [])
+                    )
+                }
+                if "workspace_include_branches" in task
+                and task.get("workspace_include_branches") is not None
+                else {}
+            ),
         }
+
+        # Apply orchestrator defaults for include_branches when not explicitly set on the task
+        try:
+            if not _metadata.get("workspace_include_branches"):
+                default_inc = getattr(
+                    self._orchestrator, "default_workspace_include_branches", None
+                )
+                if default_inc:
+                    _metadata["workspace_include_branches"] = list(default_inc)
+        except Exception:
+            pass
 
         # Include default agent CLI passthrough args when configured
         try:

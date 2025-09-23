@@ -99,6 +99,7 @@ class Orchestrator:
         force_commit: bool = False,
         randomize_queue_order: bool = False,
         explicit_max_parallel: bool = False,
+        default_workspace_include_branches: Optional[List[str]] = None,
     ):
         """
         Initialize orchestrator.
@@ -169,6 +170,15 @@ class Orchestrator:
         # Default plugin/model for strategy tasks (strategy-agnostic selection)
         self.default_plugin_name = str(default_plugin_name or "claude-code")
         self.default_model_alias = str(default_model_alias or "sonnet")
+        # Default workspace include branches applied to all tasks unless overridden
+        try:
+            self.default_workspace_include_branches: Optional[List[str]] = (
+                list(default_workspace_include_branches)
+                if default_workspace_include_branches
+                else None
+            )
+        except Exception:
+            self.default_workspace_include_branches = None
 
         # Multi-resource admission (CPU, memory, disk guard)
         self._admission_lock = asyncio.Lock()
@@ -530,6 +540,27 @@ class Orchestrator:
             repo_path=repo_path,
             base_branch=base_branch,
         )
+
+        # Ensure the branch under review is available in isolated workspaces by default.
+        # If the caller did not configure default_workspace_include_branches, include the host HEAD
+        # when it differs from the base branch. This keeps git-based review functional out of the box.
+        try:
+            if getattr(self, "default_workspace_include_branches", None) in (None, []):
+                import subprocess as _sp
+
+                _b = _sp.run(
+                    ["git", "-C", str(repo_path), "rev-parse", "--abbrev-ref", "HEAD"],
+                    capture_output=True,
+                    text=True,
+                )
+                head_branch = (_b.stdout or "").strip()
+                if head_branch and head_branch != "HEAD" and head_branch != base_branch:
+                    self.default_workspace_include_branches = [head_branch]
+                else:
+                    self.default_workspace_include_branches = None
+        except Exception:
+            # Fall back to no additional branches if detection fails
+            self.default_workspace_include_branches = None
 
         # Per-run force_import setting from strategy_config
         self._force_import = bool((strategy_config or {}).get("force_import", False))
@@ -1628,6 +1659,9 @@ class Orchestrator:
                 allow_global_session_volume=self.allow_global_session_volume,
                 agent_cli_args=(info.metadata or {}).get("agent_cli_args"),
                 force_commit=self.force_commit,
+                workspace_include_branches=(info.metadata or {}).get(
+                    "workspace_include_branches"
+                ),
             )
             logger.info(
                 f"_execute_instance: run_instance finished iid={instance_id} success={result.success} status={getattr(result,'status',None)}"
@@ -2535,6 +2569,9 @@ class Orchestrator:
                 allow_global_session_volume=self.allow_global_session_volume,
                 agent_cli_args=(instance_info.metadata or {}).get("agent_cli_args"),
                 force_commit=self.force_commit,
+                workspace_include_branches=(instance_info.metadata or {}).get(
+                    "workspace_include_branches"
+                ),
             )
 
             # Update state

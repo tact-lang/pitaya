@@ -57,6 +57,8 @@ async def run_instance(
     allow_global_session_volume: bool = False,
     agent_cli_args: Optional[list[str]] = None,
     force_commit: bool = False,
+    # Workspace preparation options
+    workspace_include_branches: Optional[list[str]] = None,
 ) -> InstanceResult:
     """
     Execute a single AI coding instance in an isolated environment.
@@ -136,6 +138,7 @@ async def run_instance(
         allow_global_session_volume=allow_global_session_volume,
         agent_cli_args=agent_cli_args,
         force_commit=force_commit,
+        workspace_include_branches=workspace_include_branches,
     )
 
 

@@ -92,6 +92,14 @@ def add_repo_args(parser: argparse.ArgumentParser) -> None:
     g.add_argument("--repo", type=Path, default=Path.cwd(), help="Path to git repo")
     g.add_argument("--base-branch", default="main", help="Base branch to work from")
     g.add_argument(
+        "--include-branches",
+        metavar="BRANCHES",
+        help=(
+            "Extra branches to include read-only in the workspace for all tasks. "
+            'CSV (a,b,c) or JSON list (e.g., \'["a","b"]\').'
+        ),
+    )
+    g.add_argument(
         "--require-clean-wt", action="store_true", help="Fail if working tree is dirty"
     )
     g.add_argument(

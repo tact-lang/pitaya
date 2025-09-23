@@ -105,6 +105,8 @@ async def run_instance(
     allow_global_session_volume: bool = False,
     agent_cli_args: Optional[list[str]] = None,
     force_commit: bool = False,
+    # Workspace preparation options
+    workspace_include_branches: Optional[list[str]] = None,
 ) -> InstanceResult:
     """
     Execute a single AI coding instance in Docker.
@@ -235,6 +237,7 @@ async def run_instance(
             allow_global_session_volume=allow_global_session_volume,
             agent_cli_args=agent_cli_args,
             force_commit=force_commit,
+            workspace_include_branches=workspace_include_branches,
         )
 
         # Success or non-retryable error
@@ -343,6 +346,7 @@ async def _run_instance_attempt(
     allow_global_session_volume: bool = False,
     agent_cli_args: Optional[list[str]] = None,
     force_commit: bool = False,
+    workspace_include_branches: Optional[list[str]] = None,
 ) -> InstanceResult:
     """Single attempt at running an instance (internal helper for retry logic)."""
     start_time = time.time()
@@ -466,6 +470,7 @@ async def _run_instance_attempt(
                         strategy_execution_id=strategy_execution_id,
                         container_name=container_name,
                         reuse_if_exists=_reuse_ws,
+                        include_branches=workspace_include_branches,
                     )
             else:
                 emit_event("instance.workspace_preparing", {"base_branch": base_branch})
@@ -480,6 +485,7 @@ async def _run_instance_attempt(
                     strategy_execution_id=strategy_execution_id,
                     container_name=container_name,
                     reuse_if_exists=_reuse_ws,
+                    include_branches=workspace_include_branches,
                 )
             logger.info(f"Workspace prepared at: {workspace_dir}")
 

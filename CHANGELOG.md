@@ -13,12 +13,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - CLI flags: `--override-config` and `--resume-key-policy {strict|suffix}` to control how resume applies overrides and durable key behavior. ([#81](https://github.com/tact-lang/pitaya/pull/81))
 - Persist the effective run configuration to `pitaya_state/<run_id>/config.json` and a redacted copy to `logs/<run_id>/config.json` to improve resume fidelity. ([#81](https://github.com/tact-lang/pitaya/pull/81))
 - Strategy: `pr-review` — N reviewers, validator per reviewer, and a composer; CI‑friendly with JSON trailer parsing and fail gating.
+- Workspace: Optional `--include-branches` (CSV/JSON) or config `runner.include_branches` to materialize extra read‑only branches in the isolated workspace for all strategies. Also supported per-task via `workspace_include_branches` metadata. ([#95](https://github.com/tact-lang/pitaya/pull/95))
 
 ### Changed
 
 - `.env` loading is now best-effort; if `python-dotenv` is missing Pitaya silently skips that layer. ([#82](https://github.com/tact-lang/pitaya/pull/82))
 - `TaskFailed` now groups metadata under `failure` (with `key`, `error_type`, `message`, `result`). Update custom strategies to inspect `exc.failure`. ([#83](https://github.com/tact-lang/pitaya/pull/83))
 - Codex plugin now requires an API key, auto-detects provider-specific env vars (OpenAI/OpenRouter/Groq/etc.), and emits matching `model_provider` wiring automatically. ([#89](https://github.com/tact-lang/pitaya/pull/89))
+- Preflight: disallow remote‑qualified base names (e.g., `origin/main`) to match runner’s strict workspace rules. ([#95](https://github.com/tact-lang/pitaya/pull/95))
 
 ### Fixed
 

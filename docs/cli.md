@@ -25,6 +25,11 @@ pitaya "your prompt here"
   pitaya "task" --strategy best-of-n -S n=5 -S scorer_model=opus
   ```
 
+  Notes for list values:
+
+  - `-S include_branches=feature/a,release/1.2.0` (CSV)
+  - `-S include_branches='["feature/a","release/1.2.0"]'` (JSON list)
+
 - Multiple parallel executions of the selected strategy:
 
   ```bash

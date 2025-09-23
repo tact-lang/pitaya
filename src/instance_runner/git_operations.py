@@ -69,6 +69,8 @@ class GitOperations:
         strategy_execution_id: Optional[str] = None,
         container_name: Optional[str] = None,
         reuse_if_exists: bool = False,
+        *,
+        include_branches: Optional[list[str]] = None,
     ) -> Path:
         """
         Create isolated git workspace before container starts.
@@ -179,17 +181,23 @@ class GitOperations:
                 await asyncio.to_thread(shutil.rmtree, workspace_dir)
 
             logger.info(f"Creating isolated workspace at {workspace_dir}")
+            base_name = base_branch.strip()
+            if not _is_valid_branch_name(base_name):
+                raise GitError(f"Invalid base branch name: {base_branch}")
+            if base_name.startswith("origin/") or base_name.startswith("refs/"):
+                raise GitError(
+                    "base_branch must be an unqualified local branch name (e.g., 'main'), not 'origin/main' or 'refs/...'."
+                )
 
-            # Clone with complete isolation (optionally using shared reference)
-            # --branch: Start from specific branch
-            # --single-branch: Only clone that branch, no other refs
-            # --no-hardlinks: Force physical copy of all objects
+            # Clone policy:
+            # - Default: single-branch clone of base_branch for minimal size
+            # - When include_branches is provided: full clone (no --single-branch) so we can
+            #   materialize requested additional branches locally, then prune to only base_branch
+            #   plus the requested branches. Remote is removed to prevent pushes.
+            # Single path: always perform a full local clone; no single-branch mode.
             clone_cmd = [
                 "git",
                 "clone",
-                "--branch",
-                base_branch,
-                "--single-branch",
                 "--no-hardlinks",
                 str(repo_path),
                 str(workspace_dir),
@@ -201,10 +209,111 @@ class GitOperations:
 
             # Preserve base branch reference as per spec
             base_branch_file = workspace_dir / ".git" / "BASE_BRANCH"
-            base_branch_file.write_text(base_branch)
-            logger.info(f"Preserved base branch reference: {base_branch}")
+            base_branch_file.write_text(base_name)
+            logger.info(f"Preserved base branch reference: {base_name}")
 
-            # Record base commit for idempotency checks (BASE_COMMIT)
+            # (BASE_COMMIT will be recorded after checking out the base branch below)
+
+            # Optionally materialize additional branches so agents can diff locally.
+            # Single path: checkout base branch from origin; error if absent
+            rc_base, _ = await self._run_command(
+                [
+                    "git",
+                    "-C",
+                    str(workspace_dir),
+                    "rev-parse",
+                    "--verify",
+                    f"refs/remotes/origin/{base_name}",
+                ]
+            )
+            if rc_base != 0:
+                raise GitError(f"Base branch not found in source repo: {base_name}")
+            await self._run_command(
+                [
+                    "git",
+                    "-C",
+                    str(workspace_dir),
+                    "checkout",
+                    "-B",
+                    base_name,
+                    f"origin/{base_name}",
+                ]
+            )
+
+            # Materialize additional branches exactly as named; error if any missing
+            created_locals: list[str] = []
+            include_branches = list(include_branches or [])
+            for name in include_branches:
+                if not _is_valid_branch_name(name):
+                    raise GitError(f"Invalid include branch name: {name}")
+                if name.startswith("origin/") or name.startswith("refs/"):
+                    raise GitError(
+                        f"Include branch must be an unqualified branch name (got '{name}')"
+                    )
+                rc_chk, _ = await self._run_command(
+                    [
+                        "git",
+                        "-C",
+                        str(workspace_dir),
+                        "rev-parse",
+                        "--verify",
+                        f"refs/remotes/origin/{name}",
+                    ]
+                )
+                if rc_chk != 0:
+                    raise GitError(f"Include branch not found in source repo: {name}")
+                await self._run_command(
+                    [
+                        "git",
+                        "-C",
+                        str(workspace_dir),
+                        "checkout",
+                        "-B",
+                        name,
+                        f"origin/{name}",
+                    ]
+                )
+                created_locals.append(name)
+
+            # Prune local branches: keep only base and included
+            rc_ls, out_ls = await self._run_command(
+                [
+                    "git",
+                    "-C",
+                    str(workspace_dir),
+                    "for-each-ref",
+                    "--format=%(refname:short)",
+                    "refs/heads",
+                ]
+            )
+            if rc_ls == 0:
+                keep = {base_name, *created_locals}
+                for ref in (out_ls or "").splitlines():
+                    ref = ref.strip()
+                    if ref and ref not in keep:
+                        await self._run_command(
+                            [
+                                "git",
+                                "-C",
+                                str(workspace_dir),
+                                "branch",
+                                "-D",
+                                ref,
+                            ]
+                        )
+
+            # Ensure we end on base
+            await self._run_command(
+                [
+                    "git",
+                    "-C",
+                    str(workspace_dir),
+                    "checkout",
+                    base_name,
+                ]
+            )
+
+            # Record base commit for idempotency checks (BASE_COMMIT) — capture after checkout to base
             try:
                 base_commit_cmd = [
                     "git",
@@ -219,7 +328,7 @@ class GitOperations:
             except Exception:
                 pass
 
-            # Remove origin to complete isolation
+            # Remove origin to complete isolation (prevents push; reviewers can still diff locally)
             remove_origin_cmd = [
                 "git",
                 "-C",
@@ -232,6 +341,35 @@ class GitOperations:
             if result[0] != 0:
                 # This might fail if no origin exists, which is fine
                 logger.debug(f"Could not remove origin (may not exist): {result[1]}")
+
+            # Best-effort: remove remote-tracking refs so only local branches remain visible
+            try:
+                rc_r, out_r = await self._run_command(
+                    [
+                        "git",
+                        "-C",
+                        str(workspace_dir),
+                        "for-each-ref",
+                        "--format=%(refname)",
+                        "refs/remotes",
+                    ]
+                )
+                if rc_r == 0:
+                    for ref in (out_r or "").splitlines():
+                        ref = (ref or "").strip()
+                        if ref:
+                            await self._run_command(
+                                [
+                                    "git",
+                                    "-C",
+                                    str(workspace_dir),
+                                    "update-ref",
+                                    "-d",
+                                    ref,
+                                ]
+                            )
+            except Exception:
+                pass
 
             logger.info(f"Workspace prepared successfully at {workspace_dir}")
             return workspace_dir

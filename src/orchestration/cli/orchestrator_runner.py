@@ -131,6 +131,11 @@ def _build_orchestrator(
         default_agent_cli_args=agent_args,
         force_commit=bool(runr.get("force_commit", False)),
         randomize_queue_order=bool(orch.get("randomize_queue_order", False)),
+        default_workspace_include_branches=(
+            list(runr.get("include_branches"))
+            if isinstance(runr.get("include_branches"), list)
+            else None
+        ),
     )
 
 

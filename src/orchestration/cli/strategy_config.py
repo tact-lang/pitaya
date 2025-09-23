@@ -53,5 +53,23 @@ def get_strategy_config(
         if "=" not in param:
             raise ValueError(f"invalid strategy param: {param!r}; expected KEY=VALUE")
         key, value = param.split("=", 1)
-        cfg[key] = _parse_value(value)
+        parsed = _parse_value(value)
+        # Convenience: allow CSV or JSON list for include_branches via -S
+        if key == "include_branches":
+            import json as _json
+
+            if isinstance(parsed, str):
+                s = parsed.strip()
+                if s.startswith("[") and s.endswith("]"):
+                    try:
+                        parsed = _json.loads(s)
+                    except Exception:
+                        parsed = [
+                            p.strip() for p in s.strip("[]").split(",") if p.strip()
+                        ]
+                else:
+                    parsed = [p.strip() for p in s.split(",") if p.strip()]
+            cfg[key] = parsed
+        else:
+            cfg[key] = parsed
     return cfg
