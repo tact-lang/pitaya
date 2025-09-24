@@ -270,46 +270,59 @@ def _collect_codex_env(auth_config: Optional[Dict[str, Any]]) -> Dict[str, str]:
         if auth_config.get("api_key"):
             env[_ENV_API_KEY] = str(auth_config["api_key"])
         if auth_config.get("base_url"):
-            env[_ENV_BASE_URL] = str(auth_config["base_url"])
+            val = str(auth_config["base_url"]).strip()
+            if val:
+                env[_ENV_BASE_URL] = val
 
     for env_key, base_key in _PROVIDER_ENV_CANDIDATES:
-        if env_key in os.environ:
-            env.setdefault(env_key, os.environ[env_key])
-        if base_key in os.environ:
-            env.setdefault(base_key, os.environ[base_key])
+        val = os.environ.get(env_key)
+        if val:
+            env.setdefault(env_key, val)
+        bval = os.environ.get(base_key)
+        if bval:
+            env.setdefault(base_key, bval)
 
-    if _ENV_PROVIDER_OVERRIDE in os.environ:
-        override_env = os.environ[_ENV_PROVIDER_OVERRIDE]
-        if override_env and override_env in os.environ:
-            env.setdefault(override_env, os.environ[override_env])
-    if _ENV_BASE_OVERRIDE in os.environ:
-        env.setdefault(_ENV_BASE_URL, os.environ[_ENV_BASE_OVERRIDE])
+    override_env = os.environ.get(_ENV_PROVIDER_OVERRIDE)
+    if override_env and os.environ.get(override_env):
+        env.setdefault(override_env, os.environ.get(override_env))
+    base_override = os.environ.get(_ENV_BASE_OVERRIDE)
+    if base_override:
+        env.setdefault(_ENV_BASE_URL, base_override)
 
     return env
 
 
 def _select_provider_env_key() -> Optional[str]:
+    """Select which provider API key env to use, ignoring empty values.
+
+    Preference order:
+    1) CODEX_ENV_KEY override when it points to a non-empty env var
+    2) OPENAI_API_KEY when non-empty
+    3) First non-empty candidate in _PROVIDER_ENV_CANDIDATES (e.g., OPENROUTER_API_KEY)
+    """
     override = os.environ.get(_ENV_PROVIDER_OVERRIDE)
-    if override:
+    if override and os.environ.get(override):
         return override
-    if _ENV_API_KEY in os.environ:
+    if os.environ.get(_ENV_API_KEY):
         return _ENV_API_KEY
     for env_key, _ in _PROVIDER_ENV_CANDIDATES:
-        if env_key in os.environ:
+        if os.environ.get(env_key):
             return env_key
     return None
 
 
 def _select_provider_base_url(env_key: Optional[str]) -> Optional[str]:
-    if os.environ.get(_ENV_BASE_OVERRIDE):
-        return os.environ[_ENV_BASE_OVERRIDE]
+    base = os.environ.get(_ENV_BASE_OVERRIDE)
+    if base:
+        return base
     if env_key:
         for candidate_key, base_key in _PROVIDER_ENV_CANDIDATES:
-            if candidate_key == env_key and base_key in os.environ:
-                return os.environ[base_key]
-    if _ENV_BASE_URL in os.environ:
-        return os.environ[_ENV_BASE_URL]
-    return None
+            if candidate_key == env_key:
+                bval = os.environ.get(base_key)
+                if bval:
+                    return bval
+    b = os.environ.get(_ENV_BASE_URL)
+    return b if b else None
 
 
 def _select_provider_name(env_key: Optional[str]) -> Optional[str]:
