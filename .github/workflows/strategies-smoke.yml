@@ -61,6 +61,7 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: pitaya-agents-image
+          path: .
 
       - name: Load Docker image
         run: |
@@ -124,9 +125,7 @@ jobs:
 
           make_docs_repo() {
             echo -e "# Page\n\nIntro line.\n\n## Section\n\nSome text." > docs/page.mdx
-            cat > pages.json <<JSON
-            {"pages": [ {"title": "Page", "path": "docs/page.mdx"} ]}
-JSON
+            printf '%s\n' '{"pages": [{"title": "Page", "path": "docs/page.mdx"}]}' > pages.json
             git add -A && git commit -m "docs: add page and pages.json" >/dev/null
           }
 
@@ -139,10 +138,8 @@ JSON
           }
 
           make_bug_repo() {
-            cat > src/calc.py <<'PY'
-def div(a, b):
-    return a / b  # BUG: no zero-division guard
-PY
+            mkdir -p src
+            printf '%s\n' 'def div(a, b):' '    return a / b  # BUG: no zero-division guard' > src/calc.py
             echo 'from src.calc import div; print(div(4,2))' > run.py
             git add -A && git commit -m "bug: add calc with defect" >/dev/null
           }
