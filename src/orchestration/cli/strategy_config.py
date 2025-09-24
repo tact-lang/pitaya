@@ -10,17 +10,35 @@ __all__ = ["get_strategy_config"]
 
 
 def _parse_value(value: str) -> Any:
+    """Best-effort typed parsing for -S KEY=VALUE.
+
+    Order:
+    - int/float/bool
+    - JSON list/object when VALUE looks like JSON (starts with [ or {)
+    - raw string otherwise
+    """
     try:
         return int(value)
     except ValueError:
         try:
             return float(value)
         except ValueError:
-            lowered = value.lower()
+            lowered = value.lower().strip()
             if lowered in ("true", "yes", "1"):
                 return True
             if lowered in ("false", "no", "0"):
                 return False
+            # Lightweight JSON hint: list or object literals
+            s = value.strip()
+            if (s.startswith("[") and s.endswith("]")) or (
+                s.startswith("{") and s.endswith("}")
+            ):
+                try:
+                    import json as _json
+
+                    return _json.loads(s)
+                except Exception:
+                    pass
             return value
 
 
