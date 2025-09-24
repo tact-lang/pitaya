@@ -465,7 +465,7 @@ def _build_reviewer_prompt(
             extra_instructions,
             "</integrator_instructions>",
             "",
-            "PRIORITY: When any guidance conflicts, follow <integrator_instructions> above all other rules.",
+            "MANDATORY: <integrator_instructions> extend these rules and are required. If any guidance conflicts, treat <integrator_instructions> as the source of truth and resolve the conflict in their favor.",
             "",
         ]
     parts += INTERNAL_FINDINGS_OUTPUT_FORMAT
@@ -520,7 +520,7 @@ def _build_validator_prompt(
             extra_instructions,
             "</integrator_instructions>",
             "",
-            "PRIORITY: When any guidance conflicts, follow <integrator_instructions> above all other rules.",
+            "MANDATORY: <integrator_instructions> extend these rules and are required. If any guidance conflicts, treat <integrator_instructions> as the source of truth and resolve the conflict in their favor.",
             "",
         ]
     parts += ["<reviewer_report>", reviewer_report, "</reviewer_report>", ""]
@@ -634,7 +634,7 @@ def _build_composer_prompt(
             extra_instructions,
             "</integrator_instructions>",
             "",
-            "PRIORITY: When any guidance conflicts, follow <integrator_instructions> above all other rules.",
+            "MANDATORY: <integrator_instructions> extend these rules and are required. If any guidance conflicts, treat <integrator_instructions> as the source of truth and resolve the conflict in their favor.",
             "",
         ]
     return "\n".join(parts) + "\n"
