@@ -37,7 +37,7 @@ INTERNAL_FINDINGS_OUTPUT_FORMAT: List[str] = [
     "Repeat the following section for each distinct issue (deduplicated and merged):",
     "",
     "### [SEVERITY] <Short Title>",
-    "* Location: <relative/path>?plain=1#L<start>-L<end>  ← inclusive line range",
+    "Location: <relative/path>?plain=1#L<start>-L<end>  ← inclusive line range",
     "",
     "Description:",
     "Write 2–4 sentences explaining the problem and its impact. Reference any out‑of‑diff context as evidence, but the PRIMARY Location above MUST point to lines that are part of the diff.",
@@ -54,7 +54,7 @@ INTERNAL_FINDINGS_OUTPUT_FORMAT: List[str] = [
     "",
     "<example>",
     "### [HIGH] SQL query uses unsanitized user input",
-    "* Location: api/search.py?plain=1#L42-L58",
+    "Location: api/search.py?plain=1#L42-L58",
     "",
     "Description:",
     "The search endpoint constructs an SQL string with f‑strings using the raw `q` parameter. This allows crafted input to inject SQL, risking data exposure or corruption.",
@@ -68,7 +68,7 @@ INTERNAL_FINDINGS_OUTPUT_FORMAT: List[str] = [
     "",
     "### [MEDIUM] Inefficient loop for JSON serialization",
     "",
-    "* Location: utils/encode.py?plain=1#L15-L28",
+    "Location: utils/encode.py?plain=1#L15-L28",
     "",
     "Description:",
     "`json.dumps` is called inside a tight loop, causing many small allocations and concatenations.",
@@ -709,9 +709,16 @@ def _build_composer_prompt(
             )
             + ". Do not introduce issues outside that comparison."
         ),
+        (
+            "Before writing the friendly opening, you MAY perform read-only git commands to calibrate tone and context (do NOT change any findings):\n"
+            "  • Inspect scope: `git diff --stat {base_branch}...{(review_branches[0] if review_branches else 'HEAD')}"\
+            "` and `git diff --name-only {base_branch}...{(review_branches[0] if review_branches else 'HEAD')}`;\n"
+            "  • You may reference count of files changed, and name a few key paths or directories to orient the author;\n"
+            "  • Do NOT discover new issues; do NOT change severities or locations; this is for opening context only."
+        ),
         "Compose a user‑facing final review (message‑only). Deduplicate and group findings. Preserve severities.",
         "* Opening purpose: set a collaborative tone, orient the author, calibrate expectations, and acknowledge effort — without summarizing findings.",
-        "* Opening content: 1–2 sentences; a general message (not a findings summary); proportional to the diff size and to the number/severities of findings.",
+        "* Opening content: 1–2 sentences; make it contextual by lightly referencing the diff scope (e.g., files touched, primary docs areas) and proportional to the size/severity mix.",
         "* Opening tone: calm, constructive, and professional; appreciative without flattery; direct without harshness; avoid passive‑aggressive phrasing.",
         "* Use simple, plain language; short, direct sentences. No verdict words like PASS/NEEDS_CHANGES in prose.",
         "* Do NOT discover new issues and do NOT re‑validate content at this stage.",
@@ -734,7 +741,7 @@ def _build_composer_prompt(
         "",
         "#### [HIGH] <Short Title>",
         "",
-        "* Location: <path>?plain=1#L<start>-L<end>",
+        "Location: <path>?plain=1#L<start>-L<end>",
         "",
         "Description:",
         "1–3 sentences tailored for readers.",
@@ -751,7 +758,7 @@ def _build_composer_prompt(
         "",
         "#### [MEDIUM] <Short Title>",
         "",
-        "* Location: <path>?plain=1#L<start>-L<end>",
+        "Location: <path>?plain=1#L<start>-L<end>",
         "",
         "Description:",
         "1–3 sentences.",
@@ -770,7 +777,7 @@ def _build_composer_prompt(
         "",
         "#### [LOW] <Short Title>",
         "",
-        "* Location: <path>?plain=1#L<start>-L<end>",
+        "Location: <path>?plain=1#L<start>-L<end>",
         "",
         "Description:",
         "1–2 sentences.",
