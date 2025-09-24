@@ -182,13 +182,20 @@ class PRReviewStrategy(Strategy):
             if cfg.base_branch and cfg.base_branch.strip():
                 return cfg.base_branch.strip()
             for name in include_branches:
-                if isinstance(name, str) and name.strip() and name.strip() != workspace_branch:
+                if (
+                    isinstance(name, str)
+                    and name.strip()
+                    and name.strip() != workspace_branch
+                ):
                     return name.strip()
             return workspace_branch
 
         compare_branch = _resolve_compare_branch()
 
-        if compare_branch != workspace_branch and compare_branch not in include_branches:
+        if (
+            compare_branch != workspace_branch
+            and compare_branch not in include_branches
+        ):
             include_branches.append(compare_branch)
 
         async def _run_reviewer_with_retries(idx: int) -> Optional[InstanceResult]:
@@ -450,8 +457,10 @@ def _format_branch_context(
     ]
 
     review_branches: List[str] = []
-    if workspace_branch and workspace_branch.lower() != "head" and (
-        workspace_branch != compare_base
+    if (
+        workspace_branch
+        and workspace_branch.lower() != "head"
+        and (workspace_branch != compare_base)
     ):
         review_branches.append(workspace_branch)
 
@@ -711,7 +720,7 @@ def _build_composer_prompt(
         ),
         (
             "Before writing the friendly opening, you MAY perform read-only git commands to calibrate tone and context (do NOT change any findings):\n"
-            "  • Inspect scope: `git diff --stat {base_branch}...{(review_branches[0] if review_branches else 'HEAD')}"\
+            "  • Inspect scope: `git diff --stat {base_branch}...{(review_branches[0] if review_branches else 'HEAD')}"
             "` and `git diff --name-only {base_branch}...{(review_branches[0] if review_branches else 'HEAD')}`;\n"
             "  • You may reference count of files changed, and name a few key paths or directories to orient the author;\n"
             "  • Do NOT discover new issues; do NOT change severities or locations; this is for opening context only."
