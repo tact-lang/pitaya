@@ -453,6 +453,8 @@ def _build_reviewer_prompt(
             extra_instructions,
             "</integrator_instructions>",
             "",
+            "PRIORITY: When any guidance conflicts, follow <integrator_instructions> above all other rules.",
+            "",
         ]
     parts += INTERNAL_FINDINGS_OUTPUT_FORMAT
     return "\n".join(parts) + "\n"
@@ -494,6 +496,8 @@ def _build_validator_prompt(
             "<integrator_instructions>",
             extra_instructions,
             "</integrator_instructions>",
+            "",
+            "PRIORITY: When any guidance conflicts, follow <integrator_instructions> above all other rules.",
             "",
         ]
     parts += ["<reviewer_report>", reviewer_report, "</reviewer_report>", ""]
@@ -640,6 +644,9 @@ def _build_composer_prompt(
             "<integrator_instructions>",
             extra_instructions,
             "</integrator_instructions>",
+            "",
+            "PRIORITY: When any guidance conflicts, follow <integrator_instructions> above all other rules.",
+            "",
         ]
     return "\n".join(parts) + "\n"
 
@@ -650,13 +657,21 @@ def _build_composer_prompt(
 def _resolve_instructions(
     text: Optional[str], path: Optional[str], default: str = ""
 ) -> str:
-    if text and str(text).strip():
-        return str(text)
+    """Resolve long-form instruction text.
+
+    Precedence: file path (when provided and readable) overrides inline text.
+    """
+    # Prefer file path when provided
     if path and str(path).strip():
         p = Path(path)
         try:
             if p.exists():
-                return p.read_text(encoding="utf-8", errors="replace")
+                content = p.read_text(encoding="utf-8", errors="replace")
+                if str(content).strip():
+                    return content
         except Exception:
-            return default
+            pass
+    # Fall back to inline text
+    if text and str(text).strip():
+        return str(text)
     return default
