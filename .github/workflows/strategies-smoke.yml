@@ -165,8 +165,14 @@ jobs:
           OPENROUTER_BASE_URL: ${{ secrets.OPENROUTER_BASE_URL }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           OPENAI_BASE_URL: ${{ secrets.OPENAI_BASE_URL }}
+          # Force Codex provider selection to OpenRouter when available
+          CODEX_ENV_KEY: OPENROUTER_API_KEY
         run: |
           set -euo pipefail
+          # Ensure OpenRouter base URL default if not provided via secrets
+          if [ -n "${OPENROUTER_API_KEY:-}" ] && [ -z "${OPENROUTER_BASE_URL:-}" ]; then
+            export OPENROUTER_BASE_URL="https://openrouter.ai/api/v1"
+          fi
           PLUGIN="codex"
           MODEL="openai/gpt-5"
           BASE_ARGS=( --repo "$REPO" --base-branch main --plugin "$PLUGIN" --model "$MODEL" --no-tui )
@@ -229,6 +235,15 @@ jobs:
           echo "Instances:" >> $GITHUB_STEP_SUMMARY
           if command -v jq >/dev/null 2>&1; then
             jq -r '.instances | to_entries[] | "- \(.key): \(.value.state) (\(.value.model))"' "$RUN_DIR/state.json" >> $GITHUB_STEP_SUMMARY || true
+            total=$(jq -r '.instances | length' "$RUN_DIR/state.json")
+            failed=$(jq -r '[.instances[] | select(.state=="failed" or .state=="interrupted")] | length' "$RUN_DIR/state.json")
+            completed=$(jq -r '[.instances[] | select(.state=="completed")] | length' "$RUN_DIR/state.json")
+            echo "Summary: total=$total, completed=$completed, failed=$failed" >> $GITHUB_STEP_SUMMARY
+            if [ "$failed" -gt 0 ] || [ "$completed" -lt "$total" ]; then
+              echo "One or more instances did not complete successfully (failed=$failed, completed=$completed of total=$total)." >&2
+              exit 1
+            fi
           else
             ls -la "$RUN_DIR" >> $GITHUB_STEP_SUMMARY
+            # Without jq, be conservative and do not assert; rely on run step exit code
           fi
