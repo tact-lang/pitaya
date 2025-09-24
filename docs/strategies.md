@@ -163,7 +163,7 @@ Lightweight PR review orchestration for CI: run N reviewers, validate each, and 
 
 Flow
 
-- Reviewers (N total): each inspects changes with local git in the isolated workspace (e.g., `git diff <base_branch>...<branch>`) and returns a Markdown report.
+- Reviewers (N total): each inspects changes with local git in the isolated workspace (e.g., `git diff <compare_branch>...<workspace_branch>`) and returns a Markdown report.
 - Validators (1 per reviewer): refine, dedupe, correct severities, and append a fenced JSON trailer with verdict/counts.
 - Composer: aggregates validated reviewer messages and returns a consolidated review; sets an overall verdict (PASS or NEEDS_CHANGES).
 
@@ -171,7 +171,7 @@ Key options
 
 - `reviewers` (default 3)
 - `reviewer_max_retries` (default 0), `validator_max_retries` (default 1)
-- `base_branch` (default `main`)
+- `base_branch` (optional) — override the branch used as the diff baseline when different from the runner’s checkout branch.
 - `include_branches` (list of unqualified branch names to make available read‑only in the workspace; use `pitaya.yaml`)
 - `fail_on` severities that should fail CI (default `HIGH`)
 - `ci_fail_policy` (default `needs_changes`; options: `needs_changes`, `always`, `never`)
@@ -179,14 +179,15 @@ Key options
 
 Branch availability in the workspace
 
-- The workspace always contains a local `base_branch` checked out from `origin/<base_branch>`.
+- The workspace is checked out to whatever branch you pass to Pitaya’s `--base-branch` flag (for PRs we recommend `pr_head`).
+- The strategy compares against `base_branch` when provided; otherwise it picks the first branch listed in `include_branches` that differs from the checkout branch. If no such branch exists it falls back to the checkout branch.
 - Additional read‑only branches can be included via `include_branches` (must exist as `origin/<name>`). No remotes are available and push is disabled.
-- Pitaya also automatically includes the host repo’s current HEAD branch when it differs from `base_branch`.
+- Pitaya also automatically includes the host repository’s current HEAD branch when it differs from the checkout branch.
 
 Examples
 
 ```bash
-# Basic
+# Basic (default comparison logic)
 pitaya "Review this PR" --strategy pr-review -S reviewers=3
 
 # Provide long custom guidance from files
@@ -195,13 +196,20 @@ pitaya "Review this PR" --strategy pr-review \
   -S validator_instructions_path=.ci/validator.md \
   -S composer_instructions_path=.ci/composer.md
 
-# Include branches via -S (CSV)
+# Review a PR with the head checked out locally and diff against main
 pitaya "Review this PR" --strategy pr-review \
-  -S include_branches=feature/new-ui,release/1.2.0
+  --base-branch pr_head \
+  -S include_branches=main
+
+# Include additional branches via -S (CSV)
+pitaya "Review this PR" --strategy pr-review \
+  --base-branch feature/new-ui \
+  -S include_branches=main,release/1.2.0
 
 # Or as a JSON list
 pitaya "Review this PR" --strategy pr-review \
-  -S include_branches='["feature/new-ui","release/1.2.0"]'
+  --base-branch feature/new-ui \
+  -S include_branches='["main","release/1.2.0"]'
 ```
 
 pitaya.yaml example to include extra branches
@@ -210,9 +218,8 @@ pitaya.yaml example to include extra branches
 strategies:
   pr-review:
     reviewers: 3
-    base_branch: main
     include_branches:
-      - feature/new-ui
+      - main        # primary comparison branch
       - release/1.2.0
 ```
 
