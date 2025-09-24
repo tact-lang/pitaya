@@ -86,7 +86,7 @@ class PRReviewConfig(StrategyConfig):
     reviewers: int = 3
     reviewer_max_retries: int = 0
     validator_max_retries: int = 1
-    base_branch: str = "main"
+    base_branch: Optional[str] = None
     fail_on: List[str] = field(
         default_factory=lambda: ["HIGH"]
     )  # severities considered CI-failing
@@ -126,6 +126,9 @@ class PRReviewConfig(StrategyConfig):
                     raise ValueError(
                         f"include_branches must contain unqualified branch names; got: {b!r}"
                     )
+        if self.base_branch is not None:
+            if not isinstance(self.base_branch, str) or not self.base_branch.strip():
+                raise ValueError("base_branch must be a non-empty string when provided")
 
 
 class PRReviewStrategy(Strategy):
@@ -158,6 +161,35 @@ class PRReviewStrategy(Strategy):
 
         # Include branches: provided only via strategy config (orchestrator defaults are applied later)
         include_branches: List[str] = list(cfg.include_branches or [])
+        # Ensure the workspace contains the branch under review (e.g., PR head).
+        # When the orchestrator detects a non-base HEAD it exposes it via
+        # default_workspace_include_branches; merge that here so reviewers,
+        # validators, and the composer all see the same diff source.
+        try:
+            default_includes = getattr(
+                ctx._orchestrator, "default_workspace_include_branches", None  # type: ignore[attr-defined]
+            )
+        except Exception:
+            default_includes = None
+        if default_includes:
+            for name in default_includes:
+                if name and name not in include_branches:
+                    include_branches.append(name)
+
+        workspace_branch = base_branch
+
+        def _resolve_compare_branch() -> str:
+            if cfg.base_branch and cfg.base_branch.strip():
+                return cfg.base_branch.strip()
+            for name in include_branches:
+                if isinstance(name, str) and name.strip() and name.strip() != workspace_branch:
+                    return name.strip()
+            return workspace_branch
+
+        compare_branch = _resolve_compare_branch()
+
+        if compare_branch != workspace_branch and compare_branch not in include_branches:
+            include_branches.append(compare_branch)
 
         async def _run_reviewer_with_retries(idx: int) -> Optional[InstanceResult]:
             attempts = cfg.reviewer_max_retries + 1
@@ -168,7 +200,8 @@ class PRReviewStrategy(Strategy):
                 )
                 task = {
                     "prompt": _build_reviewer_prompt(
-                        base_branch=(cfg.base_branch or base_branch),
+                        base_branch=compare_branch,
+                        workspace_branch=workspace_branch,
                         extra_instructions=review_extra,
                         include_branch_names=include_branches,
                     ),
@@ -199,8 +232,11 @@ class PRReviewStrategy(Strategy):
                 )
                 task = {
                     "prompt": _build_validator_prompt(
+                        base_branch=compare_branch,
+                        workspace_branch=workspace_branch,
                         reviewer_report=reviewer_report_text,
                         extra_instructions=validator_extra,
+                        include_branch_names=include_branches,
                     ),
                     "base_branch": base_branch,
                     "model": cfg.model,
@@ -244,11 +280,13 @@ class PRReviewStrategy(Strategy):
         key_comp = ctx.key("compose", "final")
         comp_task = {
             "prompt": _build_composer_prompt(
-                base_branch=(cfg.base_branch or base_branch),
+                base_branch=compare_branch,
+                workspace_branch=workspace_branch,
                 validated_reports=[
                     (i, (vres.final_message or "")) for i, vres in validated
                 ],
                 extra_instructions=composer_extra,
+                include_branch_names=include_branches,
             ),
             "base_branch": base_branch,
             "model": composer_model,
@@ -397,13 +435,75 @@ def _extract_summary(md_text: str) -> Tuple[Optional[str], Dict[str, int], bool]
     return verdict, counts, valid
 
 
+def _format_branch_context(
+    *,
+    compare_base: str,
+    workspace_branch: str,
+    include_branch_names: Optional[List[str]] = None,
+) -> Tuple[List[str], List[str]]:
+    """Return prompt lines describing git context and ordered review branches."""
+
+    include_branch_names = [
+        b.strip()
+        for b in (include_branch_names or [])
+        if isinstance(b, str) and b.strip()
+    ]
+
+    review_branches: List[str] = []
+    if workspace_branch and workspace_branch.lower() != "head" and (
+        workspace_branch != compare_base
+    ):
+        review_branches.append(workspace_branch)
+
+    for name in include_branch_names:
+        if name.lower() == "head":
+            continue
+        if name != compare_base and name not in review_branches:
+            review_branches.append(name)
+
+    lines: List[str] = []
+    if workspace_branch == compare_base:
+        lines.append(
+            f"Workspace checkout starts on `{workspace_branch}`, which is also the diff base."
+        )
+    else:
+        lines += [
+            f"Workspace checkout starts on review branch `{workspace_branch}` (the PR head).",
+            f"Compare all changes against base branch `{compare_base}` using an explicit diff.",
+        ]
+
+    if review_branches:
+        joined = ", ".join(f"`{b}`" for b in review_branches)
+        lines += [
+            "Review branch candidates available locally:",
+            f"* {joined}",
+            (
+                "Use `git diff {compare_base}...<review-branch>` (default "
+                f"`{review_branches[0]}`) to inspect the PR changes."
+            ),
+        ]
+    else:
+        lines.append(
+            f"No alternate review branch detected; diff the working tree against `{compare_base}`."
+        )
+
+    return lines, review_branches
+
+
 def _build_reviewer_prompt(
     *,
     base_branch: str,
+    workspace_branch: str,
     extra_instructions: str = "",
     include_branch_names: Optional[List[str]] = None,
 ) -> str:
     parts: List[str] = []
+    branch_context_lines, review_branches = _format_branch_context(
+        compare_base=base_branch,
+        workspace_branch=workspace_branch,
+        include_branch_names=include_branch_names,
+    )
+
     parts += [
         "<role>",
         "Senior code reviewer. Be concise, specific, and actionable.",
@@ -411,17 +511,21 @@ def _build_reviewer_prompt(
         "",
         "<task>",
         f"Review the current changes relative to {base_branch} using **local git only**. Do not push.",
+        *branch_context_lines,
         (
-            (
-                "In the workspace, additional read-only branches are available: "
-                + ", ".join(sorted(set(include_branch_names or [])))
-                + "."
+            "List local branches (`git branch --list`), identify the review branch"
+            + (
+                f" (expected: {', '.join(f'`{b}`' for b in review_branches)})"
+                if review_branches
+                else ""
             )
-            if (include_branch_names or [])
-            else ""
+            + ", then inspect:"
         ),
-        "List local branches (`git branch --list`), identify the non-base review branch, then inspect:",
-        f"  git diff {base_branch}...<target-branch>",
+        (
+            f"  git diff {base_branch}...{review_branches[0]}"
+            if review_branches
+            else f"  git diff {base_branch}...<target-branch>"
+        ),
         "",
         "Audit every changed file and every diff hunk before finalizing. Read every single changed line in the diff (line‑by‑line); do not skip lines. If the diff is large, take at least two passes:",
         "",
@@ -442,7 +546,9 @@ def _build_reviewer_prompt(
         "  • You MAY cite out‑of‑diff lines as evidence in Description, but the PRIMARY Location MUST point into the diff.",
         "* **Location verification (MANDATORY)**:",
         "  • Validate every Location using read‑only commands, for example:",
-        "      git show <branch>:<path> | nl -ba | sed -n '<start>,<end>p'",
+        (
+            f"      git show {review_branches[0] if review_branches else workspace_branch}:<path> | nl -ba | sed -n '<start>,<end>p'"
+        ),
         "  • If content does not match your Description, correct the Location (or the finding) before outputting.",
         "* **Precision & duplication**:",
         "  • Normalize and merge duplicates; avoid repetition across findings.",
@@ -473,9 +579,20 @@ def _build_reviewer_prompt(
 
 
 def _build_validator_prompt(
-    *, reviewer_report: str, extra_instructions: str = ""
+    *,
+    base_branch: str,
+    workspace_branch: str,
+    reviewer_report: str,
+    extra_instructions: str = "",
+    include_branch_names: Optional[List[str]] = None,
 ) -> str:
     parts: List[str] = []
+    branch_context_lines, review_branches = _format_branch_context(
+        compare_base=base_branch,
+        workspace_branch=workspace_branch,
+        include_branch_names=include_branch_names,
+    )
+
     parts += [
         "<role>",
         "Gatekeeper validator. Confirm accuracy and appropriateness.",
@@ -483,6 +600,22 @@ def _build_validator_prompt(
         "",
         "<task>",
         "Validate the reviewer’s report below. Your goals, in order:",
+        *branch_context_lines,
+        (
+            "* Before verification, ensure the review branch is checked out (for example: "
+            + (
+                f"`git checkout {review_branches[0]}`"
+                if review_branches
+                else "`git checkout <review-branch>`"
+            )
+            + ") and diff against the base with "
+            + (
+                f"`git diff {base_branch}...{review_branches[0]}`"
+                if review_branches
+                else f"`git diff {base_branch}...<review-branch>`"
+            )
+            + "."
+        ),
         "1) Merge duplicates and overlapping items. Keep coverage complete.",
         "2) Re‑verify every Location (do not trust given numbers).",
         "3) Normalize severities using the same definitions as the reviewer.",
@@ -497,8 +630,12 @@ def _build_validator_prompt(
         "",
         "<verification>",
         "Before output:",
-        "* For each finding, run a read‑only check to confirm the Location lines match the described issue, for example:",
-        "    git show <branch>:<path> | nl -ba | sed -n '<start>,<end>p'",
+        "* For each finding, run a read‑only check to confirm the Location lines match the described issue. Prefer commands such as:",
+        (
+            f"    git show {review_branches[0]}:<path> | nl -ba | sed -n '<start>,<end>p'"
+            if review_branches
+            else "    git show <review-branch>:<path> | nl -ba | sed -n '<start>,<end>p'"
+        ),
         "* Fix mismatches or drop the finding if it cannot be supported.",
         "</verification>",
         "",
@@ -538,11 +675,18 @@ def _build_validator_prompt(
 def _build_composer_prompt(
     *,
     base_branch: str,
+    workspace_branch: str,
     validated_reports: List[Tuple[int, str]],
     extra_instructions: str = "",
+    include_branch_names: Optional[List[str]] = None,
 ) -> str:
     joined = "\n".join(f"* Reviewer #{i}:\n{msg}\n" for i, msg in validated_reports)
     parts: List[str] = []
+    branch_context_lines, review_branches = _format_branch_context(
+        compare_base=base_branch,
+        workspace_branch=workspace_branch,
+        include_branch_names=include_branch_names,
+    )
     parts += [
         "<role>",
         "Lead reviewer. Merge validated reviews into a single, polished PR comment.",
@@ -554,6 +698,17 @@ def _build_composer_prompt(
         "</inputs>",
         "",
         "<task>",
+        *branch_context_lines,
+        (
+            "When summarizing, keep findings tied to the diff between "
+            f"`{base_branch}` and "
+            + (
+                " and ".join(f"`{b}`" for b in review_branches)
+                if review_branches
+                else "the review branch"
+            )
+            + ". Do not introduce issues outside that comparison."
+        ),
         "Compose a user‑facing final review (message‑only). Deduplicate and group findings. Preserve severities.",
         "* Opening purpose: set a collaborative tone, orient the author, calibrate expectations, and acknowledge effort — without summarizing findings.",
         "* Opening content: 1–2 sentences; a general message (not a findings summary); proportional to the diff size and to the number/severities of findings.",
