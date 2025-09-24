@@ -432,7 +432,7 @@ def _build_reviewer_prompt(
         "</task>",
         "",
         "<requirements>",
-        "* Focus on correctness, security, performance, maintainability, API stability, and tests.",
+        "* Keep scope to the current diff: focus only on issues introduced by these changes.",
         "* Propose minimal, concrete fixes (filenames, line ranges, short snippets or unified diffs).",
         "* Severities (use in the heading only):",
         "  • HIGH: Likely to cause incorrect or harmful outcomes; blocks intended use or materially misleads.",
