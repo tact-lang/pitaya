@@ -24,6 +24,30 @@ logger = logging.getLogger(__name__)
 _BRANCH_RE = None
 
 
+def _relax_workspace_permissions(root: Path) -> None:
+    """Ensure the cloned workspace is writable by non-owner users."""
+    try:
+        if not root.exists():
+            return
+        # Directories need execute (+x) along with write so the container user can descend.
+        for dirpath, dirnames, filenames in os.walk(root):
+            dir_path = Path(dirpath)
+            try:
+                dir_path.chmod(0o777)
+            except Exception as exc:  # pragma: no cover - best effort only
+                logger.debug(f"chmod failed for directory {dir_path}: {exc}")
+            for name in filenames:
+                file_path = dir_path / name
+                try:
+                    if file_path.is_symlink():
+                        continue
+                    file_path.chmod(0o666)
+                except Exception as exc:  # pragma: no cover - best effort only
+                    logger.debug(f"chmod failed for file {file_path}: {exc}")
+    except Exception as exc:  # pragma: no cover - defensive catch
+        logger.debug(f"Failed to relax permissions under {root}: {exc}")
+
+
 def _is_valid_branch_name(name: str) -> bool:
     """Validate branch name against a strict regex and forbidden substrings.
 
@@ -371,6 +395,10 @@ class GitOperations:
             except Exception:
                 pass
 
+            try:
+                await asyncio.to_thread(_relax_workspace_permissions, workspace_dir)
+            except Exception as exc:  # Best-effort; do not fail preparation
+                logger.debug(f"Failed to relax workspace permissions: {exc}")
             logger.info(f"Workspace prepared successfully at {workspace_dir}")
             return workspace_dir
 
