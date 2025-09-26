@@ -231,19 +231,31 @@ jobs:
             echo "No results directory found" >&2
             exit 1
           fi
+          RUN_ID=$(basename "$RUN_DIR")
+          STATE_JSON="pitaya_state/$RUN_ID/state.json"
+
           echo "Results: $RUN_DIR" >> $GITHUB_STEP_SUMMARY
-          echo "Instances:" >> $GITHUB_STEP_SUMMARY
-          if command -v jq >/dev/null 2>&1; then
-            jq -r '.instances | to_entries[] | "- \(.key): \(.value.state) (\(.value.model))"' "$RUN_DIR/state.json" >> $GITHUB_STEP_SUMMARY || true
-            total=$(jq -r '.instances | length' "$RUN_DIR/state.json")
-            failed=$(jq -r '[.instances[] | select(.state=="failed" or .state=="interrupted")] | length' "$RUN_DIR/state.json")
-            completed=$(jq -r '[.instances[] | select(.state=="completed")] | length' "$RUN_DIR/state.json")
-            echo "Summary: total=$total, completed=$completed, failed=$failed" >> $GITHUB_STEP_SUMMARY
-            if [ "$failed" -gt 0 ] || [ "$completed" -lt "$total" ]; then
-              echo "One or more instances did not complete successfully (failed=$failed, completed=$completed of total=$total)." >&2
-              exit 1
-            fi
-          else
+          if [ ! -f "$STATE_JSON" ]; then
+            echo "state.json not found at $STATE_JSON" >> $GITHUB_STEP_SUMMARY
+            ls -la "$RUN_DIR" >> $GITHUB_STEP_SUMMARY
+            echo "state.json not found for $RUN_ID" >&2
+            exit 1
+          fi
+
+          if ! command -v jq >/dev/null 2>&1; then
+            echo "jq not available; skipping summary assertions" >> $GITHUB_STEP_SUMMARY
             ls -la "$RUN_DIR" >> $GITHUB_STEP_SUMMARY
             # Without jq, be conservative and do not assert; rely on run step exit code
+            exit 0
+          fi
+
+          echo "Instances:" >> $GITHUB_STEP_SUMMARY
+          jq -r '.instances | to_entries[] | "- \(.key): \(.value.state) (\(.value.metadata.model // .value.model // \"unknown\"))"' "$STATE_JSON" >> $GITHUB_STEP_SUMMARY || true
+          total=$(jq -r '.instances | length' "$STATE_JSON")
+          failed=$(jq -r '[.instances[] | select(.state=="failed" or .state=="interrupted")] | length' "$STATE_JSON")
+          completed=$(jq -r '[.instances[] | select(.state=="completed")] | length' "$STATE_JSON")
+          echo "Summary: total=$total, completed=$completed, failed=$failed" >> $GITHUB_STEP_SUMMARY
+          if [ "$failed" -gt 0 ] || [ "$completed" -lt "$total" ]; then
+            echo "One or more instances did not complete successfully (failed=$failed, completed=$completed of total=$total)." >&2
+            exit 1
           fi
