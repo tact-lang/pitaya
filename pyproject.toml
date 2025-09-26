@@ -1,6 +1,6 @@
 [project]
 name = "pitaya"
-version = "0.2.0"
+version = "0.3.0"
 description = "Pitaya — an orchestrator of AI coding agents (e.g., Claude Code, Codex CLI) with pluggable and custom strategies"
 readme = "README.md"
 requires-python = "==3.13.*"
