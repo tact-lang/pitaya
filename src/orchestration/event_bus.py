@@ -53,7 +53,9 @@ _PATTERNS = [
     _re.compile(r"(?i)Basic\s+[A-Za-z0-9+/=]{20,}"),
 ]
 
-_JWT_CANDIDATE_RE = _re.compile(r"(?<![A-Za-z0-9_-])([A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,})(?![A-Za-z0-9_-])")
+_JWT_CANDIDATE_RE = _re.compile(
+    r"(?<![A-Za-z0-9_-])([A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+)(?![A-Za-z0-9_-])"
+)
 
 
 def _redact_jwts(text: str) -> str:
