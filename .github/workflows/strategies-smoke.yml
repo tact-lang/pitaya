@@ -1,0 +1,261 @@
+name: Strategies Smoke
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+
+jobs:
+  build-image:
+    name: Build Docker Image
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build agent Docker image (pitaya-agents:latest)
+        run: docker build -t pitaya-agents:latest .
+
+      - name: Export image as artifact
+        run: |
+          set -euo pipefail
+          docker save pitaya-agents:latest | gzip -1 > pitaya-agents.tar.gz
+          ls -lh pitaya-agents.tar.gz
+        shell: bash
+
+      - name: Upload image artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: pitaya-agents-image
+          path: pitaya-agents.tar.gz
+          if-no-files-found: error
+
+  smoke:
+    name: "codex · ${{ matrix.strategy }}"
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    needs: build-image
+    strategy:
+      fail-fast: false
+      matrix:
+        strategy: [simple, iterative, scoring, best-of-n, doc-review, pr-review, bug-finding]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.13
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+
+      - name: Install Pitaya (from source)
+        run: uv sync
+
+      - name: Download image artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: pitaya-agents-image
+          path: .
+
+      - name: Load Docker image
+        run: |
+          set -euo pipefail
+          gzip -dc pitaya-agents.tar.gz | docker load
+
+      - name: Check provider secrets (Codex)
+        id: secrets_ok
+        env:
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          OPENROUTER_BASE_URL: ${{ secrets.OPENROUTER_BASE_URL }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          OPENAI_BASE_URL: ${{ secrets.OPENAI_BASE_URL }}
+        run: |
+          set -euo pipefail
+          ok=false
+          if [ -n "${OPENROUTER_API_KEY:-}" ] || [ -n "${OPENAI_API_KEY:-}" ]; then
+            ok=true
+          fi
+          echo "ok=$ok" >> "$GITHUB_OUTPUT"
+          if [ "$ok" != "true" ]; then
+            echo "Codex provider secrets not available; this matrix entry will be skipped." >> $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: Setup git identity
+        if: steps.secrets_ok.outputs.ok == 'true'
+        run: |
+          git config --global user.email "ci@example.invalid"
+          git config --global user.name "Pitaya CI Bot"
+
+      - name: Prepare dummy repo
+        id: prep
+        if: steps.secrets_ok.outputs.ok == 'true'
+        env:
+          STRATEGY: ${{ matrix.strategy }}
+        run: |
+          set -euo pipefail
+          ROOT="$RUNNER_TEMP/smoke/$STRATEGY"
+          mkdir -p "$ROOT" && cd "$ROOT"
+          repo_kind="code"
+          case "$STRATEGY" in
+            doc-review) repo_kind="docs" ;;
+            pr-review)  repo_kind="pr" ;;
+            bug-finding) repo_kind="bug" ;;
+          esac
+          echo "repo_kind=$repo_kind" >> "$GITHUB_OUTPUT"
+
+          init_repo() {
+            git init -b main >/dev/null
+            echo "# Smoke Repo" > README.md
+            mkdir -p src docs
+            git add .
+            git commit -m "init" >/dev/null
+          }
+
+          make_code_repo() {
+            echo 'def add(a,b): return a+b' > src/app.py
+            echo 'print(add(2,3))' > src/run.py
+            git add -A && git commit -m "code: add simple app" >/dev/null
+          }
+
+          make_docs_repo() {
+            echo -e "# Page\n\nIntro line.\n\n## Section\n\nSome text." > docs/page.mdx
+            printf '%s\n' '{"pages": [{"title": "Page", "path": "docs/page.mdx"}]}' > pages.json
+            git add -A && git commit -m "docs: add page and pages.json" >/dev/null
+          }
+
+          make_pr_repo() {
+            make_docs_repo
+            git checkout -b change-docs >/dev/null
+            echo -e "# Page\n\nIntro updated.\n\n## Section\n\nUpdated text." > docs/page.mdx
+            git add -A && git commit -m "docs: tweak page" >/dev/null
+            git checkout main >/dev/null
+          }
+
+          make_bug_repo() {
+            mkdir -p src
+            printf '%s\n' 'def div(a, b):' '    return a / b  # BUG: no zero-division guard' > src/calc.py
+            echo 'from src.calc import div; print(div(4,2))' > run.py
+            git add -A && git commit -m "bug: add calc with defect" >/dev/null
+          }
+
+          init_repo
+          case "$repo_kind" in
+            code) make_code_repo ;;
+            docs) make_docs_repo ;;
+            pr)   make_pr_repo ;;
+            bug)  make_bug_repo ;;
+          esac
+
+          echo "REPO=$ROOT" >> "$GITHUB_ENV"
+          echo "Prepared $repo_kind repo at $ROOT" >> $GITHUB_STEP_SUMMARY
+
+      - name: Run strategy (codex)
+        if: steps.secrets_ok.outputs.ok == 'true'
+        working-directory: .
+        env:
+          STRATEGY: ${{ matrix.strategy }}
+          REPO: ${{ env.REPO }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          OPENROUTER_BASE_URL: ${{ secrets.OPENROUTER_BASE_URL }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          OPENAI_BASE_URL: ${{ secrets.OPENAI_BASE_URL }}
+          # Force Codex provider selection to OpenRouter when available
+          CODEX_ENV_KEY: OPENROUTER_API_KEY
+        run: |
+          set -euo pipefail
+          # Ensure OpenRouter base URL default if not provided via secrets
+          if [ -n "${OPENROUTER_API_KEY:-}" ] && [ -z "${OPENROUTER_BASE_URL:-}" ]; then
+            export OPENROUTER_BASE_URL="https://openrouter.ai/api/v1"
+          fi
+          PLUGIN="codex"
+          MODEL="openai/gpt-5"
+          BASE_ARGS=( --repo "$REPO" --base-branch main --plugin "$PLUGIN" --model "$MODEL" --no-tui )
+
+          run_simple() {
+            uv run pitaya "Make a tiny, safe improvement to README." \
+              --strategy simple "${BASE_ARGS[@]}"
+          }
+
+          run_iterative() {
+            uv run pitaya "Refine the tiny app: add a docstring." \
+              --strategy iterative -S iterations=2 -S stop_on_no_changes=true "${BASE_ARGS[@]}"
+          }
+
+          run_scoring() {
+            uv run pitaya "Assess the tiny app quality and suggest fixes." \
+              --strategy scoring "${BASE_ARGS[@]}"
+          }
+
+          run_best_of_n() {
+            uv run pitaya "Propose two small alternative improvements to app." \
+              --strategy best-of-n -S n=2 -S diversity_hints='["functional style","OO style"]' "${BASE_ARGS[@]}"
+          }
+
+          run_doc_review() {
+            uv run pitaya "Review this documentation page for clarity and style." \
+              --strategy doc-review -S reviewers_per_page=1 -S pages_file="$REPO/pages.json" "${BASE_ARGS[@]}"
+          }
+
+          run_pr_review() {
+            uv run pitaya "Review this pull request" \
+              --strategy pr-review -S include_branches=change-docs -S ci_fail_policy=never "${BASE_ARGS[@]}"
+          }
+
+          run_bug_finding() {
+            uv run pitaya "Find and document one real bug in src." \
+              --strategy bug-finding -S target_area=src -S report_path=BUG_REPORT.md -S discovery_max_retries=0 -S validation_max_retries=0 "${BASE_ARGS[@]}"
+          }
+
+          case "$STRATEGY" in
+            simple)      run_simple ;;
+            iterative)   run_iterative ;;
+            scoring)     run_scoring ;;
+            best-of-n)   run_best_of_n ;;
+            doc-review)  run_doc_review ;;
+            pr-review)   run_pr_review ;;
+            bug-finding) run_bug_finding ;;
+          esac
+
+      - name: Summarize results
+        if: steps.secrets_ok.outputs.ok == 'true'
+        run: |
+          set -euo pipefail
+          RUN_DIR=$(ls -td results/run_* 2>/dev/null | head -n1 || true)
+          if [ -z "$RUN_DIR" ]; then
+            echo "No results directory found" >&2
+            exit 1
+          fi
+          RUN_ID=$(basename "$RUN_DIR")
+          STATE_JSON="pitaya_state/$RUN_ID/state.json"
+
+          echo "Results: $RUN_DIR" >> $GITHUB_STEP_SUMMARY
+          if [ ! -f "$STATE_JSON" ]; then
+            echo "state.json not found at $STATE_JSON" >> $GITHUB_STEP_SUMMARY
+            ls -la "$RUN_DIR" >> $GITHUB_STEP_SUMMARY
+            echo "state.json not found for $RUN_ID" >&2
+            exit 1
+          fi
+
+          if ! command -v jq >/dev/null 2>&1; then
+            echo "jq not available; skipping summary assertions" >> $GITHUB_STEP_SUMMARY
+            ls -la "$RUN_DIR" >> $GITHUB_STEP_SUMMARY
+            # Without jq, be conservative and do not assert; rely on run step exit code
+            exit 0
+          fi
+
+          echo "Instances:" >> $GITHUB_STEP_SUMMARY
+          jq -r '.instances | to_entries[] | "- \(.key): \(.value.state) (\(.value.metadata.model // .value.model // \"unknown\"))"' "$STATE_JSON" >> $GITHUB_STEP_SUMMARY || true
+          total=$(jq -r '.instances | length' "$STATE_JSON")
+          failed=$(jq -r '[.instances[] | select(.state=="failed" or .state=="interrupted")] | length' "$STATE_JSON")
+          completed=$(jq -r '[.instances[] | select(.state=="completed")] | length' "$STATE_JSON")
+          echo "Summary: total=$total, completed=$completed, failed=$failed" >> $GITHUB_STEP_SUMMARY
+          if [ "$failed" -gt 0 ] || [ "$completed" -lt "$total" ]; then
+            echo "One or more instances did not complete successfully (failed=$failed, completed=$completed of total=$total)." >&2
+            exit 1
+          fi

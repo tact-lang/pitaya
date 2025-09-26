@@ -31,6 +31,10 @@ _ENV_TO_CONFIG_KEY = {
     "ANTHROPIC_BASE_URL": "anthropic_base_url",
     "OPENAI_API_KEY": "openai_api_key",
     "OPENAI_BASE_URL": "openai_base_url",
+    # Allow OpenAI-compatible providers via OpenRouter to flow through config
+    # so CLI auth detection doesn't rely solely on runtime env probing.
+    "OPENROUTER_API_KEY": "api_key",
+    "OPENROUTER_BASE_URL": "base_url",
 }
 
 
