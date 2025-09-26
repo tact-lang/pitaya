@@ -7,6 +7,7 @@ buffer to prevent memory issues with long-running orchestrations.
 """
 
 import asyncio
+import base64
 import json
 import logging
 import os
@@ -48,10 +49,43 @@ _PATTERNS = [
     _re.compile(r"(?i)(authorization\s*:\s*Bearer)\s+[A-Za-z0-9._\-]+"),
     _re.compile(r"sk-[A-Za-z0-9]{16,}"),
     _re.compile(r"gh[opsu]_[A-Za-z0-9]{20,}"),  # ghp_, gho_, ghs_, gh u
-    _re.compile(r"[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+"),  # JWT-like
     _re.compile(r"(?i)(api[_-]?key|token)\s*[:=]\s*[A-Za-z0-9\-]{8,}"),
     _re.compile(r"(?i)Basic\s+[A-Za-z0-9+/=]{20,}"),
 ]
+
+_JWT_CANDIDATE_RE = _re.compile(
+    r"(?<![A-Za-z0-9_-])([A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+)(?![A-Za-z0-9_-])"
+)
+
+
+def _redact_jwts(text: str) -> str:
+    """Replace likely JWTs with a redaction marker without touching regular hostnames."""
+
+    def _maybe_redact(match: _re.Match[str]) -> str:
+        token = match.group(1)
+        parts = token.split(".")
+        if len(parts) != 3:
+            return token
+
+        def _decode(segment: str) -> bytes | None:
+            padding = "=" * (-len(segment) % 4)
+            try:
+                return base64.urlsafe_b64decode(segment + padding)
+            except Exception:
+                return None
+
+        header = _decode(parts[0])
+        payload = _decode(parts[1])
+        if not header or not payload:
+            return token
+        if not header.strip().startswith(b"{"):
+            return token
+        # Either a JSON payload or an encrypted blob—we only need to ensure it's non-empty
+        if not payload.strip():
+            return token
+        return "[REDACTED]"
+
+    return _JWT_CANDIDATE_RE.sub(_maybe_redact, text)
 
 
 class EventBus:
@@ -401,6 +435,7 @@ class EventBus:
                             s = pat.sub("[REDACTED]", s)
                     except Exception:
                         continue
+                s = _redact_jwts(s)
                 return s
             return obj
         except Exception:
