@@ -367,7 +367,11 @@ class PRReviewStrategy(Strategy):
                         invalid_indices.append(i)
                         any_invalid_json = True
                     prev_coords = seen_by_uid.get(uid)
-                    if prev_coords and prev_coords != coords and i not in invalid_indices:
+                    if (
+                        prev_coords
+                        and prev_coords != coords
+                        and i not in invalid_indices
+                    ):
                         invalid_indices.append(i)
                         any_invalid_json = True
                     seen_by_coords[coords] = uid
@@ -395,7 +399,9 @@ class PRReviewStrategy(Strategy):
             "prompt": _build_composer_prompt(
                 base_branch=compare_branch,
                 workspace_branch=workspace_branch,
-                validated_reports=[(i, (vres.final_message or "")) for i, vres in validated],
+                validated_reports=[
+                    (i, (vres.final_message or "")) for i, vres in validated
+                ],
                 candidates=candidates,
                 extra_instructions=composer_extra,
                 include_branch_names=include_branches,
@@ -535,7 +541,9 @@ class PRReviewStrategy(Strategy):
                     comp_res.success = False
                     comp_res.status = "failed"
                     comp_res.error_type = (
-                        "review_invalid_summary" if (any_invalid_json or composer_invalid) else "review_needs_changes"
+                        "review_invalid_summary"
+                        if (any_invalid_json or composer_invalid)
+                        else "review_needs_changes"
                     )
                     comp_res.error = (
                         (
@@ -842,8 +850,7 @@ def _build_reviewer_prompt(
         "* **Formatting**:",
         "  • Use the <output_format> exactly. No checkboxes or extra headings. No “Severity:” bullet. No JSON.",
         "  • Links: avoid bare links in parentheses.",
-        "    – Inline reference → use a Markdown link with text: `[file Ls](path?plain=1#Lx-Ly)`.
-        ",
+        "    – Inline reference → use a Markdown link with text: `[file Ls](path?plain=1#Lx-Ly)`.",
         "    – Absolute GitHub links (commit/branch) that create a rich preview must be placed on their own line, with no surrounding punctuation.",
         "  • For formatting-only or textual edits (docs, comments, strings, spacing), prefer a minimal unified diff snippet using +/− lines (fenced as diff) when the change fits in a few lines; include only 1–3 lines of context.",
         "  • For larger changes that don’t fit cleanly in a short diff or span multiple files/blocks, explain the intent and approach in words and reference precise files/lines.",
@@ -1098,12 +1105,18 @@ def _parse_block_detail(block: str) -> Tuple[str, str, str, Dict[str, str]]:
     if not block:
         return severity, title, desc, suggestion
     # Heading line
-    m_head = re.search(r"^###\s+\[(HIGH|MEDIUM|LOW)\]\s+(.*)$", block, flags=re.MULTILINE)
+    m_head = re.search(
+        r"^###\s+\[(HIGH|MEDIUM|LOW)\]\s+(.*)$", block, flags=re.MULTILINE
+    )
     if m_head:
         severity = m_head.group(1).upper().strip()
         title = m_head.group(2).strip()
     # Description section
-    m_desc = re.search(r"^Description:\s*\n([\s\S]*?)(?:\n\s*Suggestion:\s*\n|\Z)", block, flags=re.MULTILINE)
+    m_desc = re.search(
+        r"^Description:\s*\n([\s\S]*?)(?:\n\s*Suggestion:\s*\n|\Z)",
+        block,
+        flags=re.MULTILINE,
+    )
     if m_desc:
         desc = m_desc.group(1).strip()
     # Suggestion section
@@ -1111,7 +1124,9 @@ def _parse_block_detail(block: str) -> Tuple[str, str, str, Dict[str, str]]:
     sug_text = m_sug.group(1).strip() if m_sug else ""
     if sug_text:
         # Prefer explicit GitHub suggestion fence if present (no +/− allowed)
-        m_suggestion = re.search(r"```suggestion\n([\s\S]*?)\n```", sug_text, flags=re.IGNORECASE)
+        m_suggestion = re.search(
+            r"```suggestion\n([\s\S]*?)\n```", sug_text, flags=re.IGNORECASE
+        )
         if m_suggestion:
             code = m_suggestion.group(1).rstrip("\n")
             suggestion = {"kind": "gh", "code": code}
@@ -1122,7 +1137,10 @@ def _parse_block_detail(block: str) -> Tuple[str, str, str, Dict[str, str]]:
                 lang = (m_code.group(1) or "").lower()
                 # Preserve leading whitespace; only strip trailing newlines
                 code = m_code.group(2).rstrip("\n")
-                suggestion = {"kind": "diff" if lang == "diff" else "replacement", "code": code}
+                suggestion = {
+                    "kind": "diff" if lang == "diff" else "replacement",
+                    "code": code,
+                }
             else:
                 # No fence; keep raw text as code replacement if short
                 raw = sug_text.strip()
@@ -1161,6 +1179,7 @@ def _build_selected_details(
         opts = candidates.get(uid, [])
         if not opts:
             continue
+
         # Choose by severity (max), then earliest idx
         def _opt_key(t: Tuple[int, Dict[str, object], str]):
             _idx, _item, _block = t
