@@ -1294,7 +1294,7 @@ def _write_review_sidecar(
         out_path = base_dir / "index.json"
         out_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
         # Return path relative to run results dir
-        return f"review/index.json"
+        return "review/index.json"
     except Exception:
         return ""
 
