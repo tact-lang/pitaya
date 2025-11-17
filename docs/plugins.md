@@ -3,7 +3,7 @@
 Pitaya supports multiple agent tools via runner plugins. The two built‑ins are:
 
 - Claude Code (`--plugin claude-code`)
-- Codex CLI (`--plugin codex`) — works with OpenAI‑compatible providers like OpenRouter
+- Codex CLI (`--plugin codex`) — Pitaya runs `codex exec --json` from `@openai/codex@0.58.0` inside the agent container
 
 ## Models
 
@@ -45,7 +45,10 @@ export ANTHROPIC_BASE_URL=...
 Codex CLI / OpenAI‑compatible
 
 ```bash
-# Any of these work; the plugin auto-detects them
+# Preferred
+export CODEX_API_KEY=...
+
+# Additional env vars auto-detected when CODEX_API_KEY is unset
 export OPENAI_API_KEY=...
 export OPENROUTER_API_KEY=...
 export GROQ_API_KEY=...
@@ -70,6 +73,7 @@ Advanced overrides:
 - `CODEX_ENV_KEY`: force the env var name Codex should read (useful when your key lives under a non-standard name).
 - `CODEX_BASE_URL`: override the detected base URL for the current run.
 - `CODEX_MODEL_PROVIDER`: set the temporary `model_provider` identifier passed to Codex.
+- Pitaya always launches Codex as `codex exec --json -C /workspace --sandbox workspace-write --ask-for-approval never`; any CLI args you pass via `--cli-arg` are appended after these defaults.
 
 ### Validation & errors
 

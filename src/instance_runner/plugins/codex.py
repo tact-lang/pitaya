@@ -39,7 +39,14 @@ _PROVIDER_ENV_CANDIDATES: Tuple[Tuple[str, str], ...] = (
 )
 _DEFAULT_IMAGE = "pitaya-agents:latest"
 _BASE_COMMAND = ["codex", "exec", "--json", "-C", "/workspace"]
-_SANDBOX_FLAGS = ["--skip-git-repo-check", "--dangerously-bypass-approvals-and-sandbox"]
+_SANDBOX_FLAGS = [
+    "--skip-git-repo-check",
+    "--sandbox",
+    "workspace-write",
+    "--ask-for-approval",
+    "never",
+]
+_ENV_CODEX_API_KEY = "CODEX_API_KEY"
 
 
 class CodexPlugin(RunnerPlugin):
@@ -81,7 +88,7 @@ class CodexPlugin(RunnerPlugin):
             False,
             (
                 "Missing Codex API key. Provide --api-key, set runner.api_key, "
-                "or export an environment variable like OPENAI_API_KEY."
+                "or export an environment variable such as CODEX_API_KEY or OPENAI_API_KEY."
             ),
         )
 
@@ -150,17 +157,7 @@ class CodexPlugin(RunnerPlugin):
             if model:
                 cmd += ["-c", f'model="{model}"']
 
-        # Resume/reattach: experimental; accept session_id when provided
-        # (Codex may expect a rollout path; we pass session id to be safe if supported)
-        if session_id:
-            # Keep a conservative flag name to avoid hard dependency
-            # Callers can augment through kwargs if a specific flag is required later
-            cmd += ["--resume", session_id]
-
-        # System prompt injection not standardized for Codex; forward when present
-        system_prompt = kwargs.get("system_prompt")
-        if system_prompt:
-            cmd += ["--system-prompt", str(system_prompt)]
+        # Codex 0.58.0 resume flow is handled out-of-band; Pitaya does not pass session IDs.
 
         # Agent CLI passthrough args: insert before prompt
         extra_args = kwargs.get("agent_cli_args")
@@ -267,8 +264,10 @@ def _collect_codex_env(auth_config: Optional[Dict[str, Any]]) -> Dict[str, str]:
     env: Dict[str, str] = {}
 
     if auth_config:
-        if auth_config.get("api_key"):
-            env[_ENV_API_KEY] = str(auth_config["api_key"])
+        api_key = auth_config.get("api_key")
+        if api_key:
+            env[_ENV_CODEX_API_KEY] = str(api_key)
+            env.setdefault(_ENV_API_KEY, str(api_key))
         if auth_config.get("base_url"):
             val = str(auth_config["base_url"]).strip()
             if val:
