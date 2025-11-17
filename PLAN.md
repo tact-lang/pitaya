@@ -1,113 +1,299 @@
-# Pitaya → Codex 0.58.0 Migration Plan
+# Pitaya → Codex 0.58.0 Plan
 
-This document describes how to safely upgrade Pitaya from `@openai/codex@0.42.0` to `@openai/codex@0.58.0`, based on:
+Pitaya is still early‑stage, so we don’t need backwards compatibility with older Codex CLIs. The goal is for Pitaya’s Codex integration to look **as if it was designed for 0.58.0 from day one**:
 
-- The current Pitaya Codex integration (`src/instance_runner/plugins/codex.py`, `src/instance_runner/codex_parser.py`, `Dockerfile`).
-- Codex 0.58.0 sources under `~/Coding/codex` (notably `codex-rs/exec`, `codex-rs/cli`, and `docs/exec.md`).
-- Codex changelog entries from 0.44.0–0.58.0 (`tmp`).
-
-The goal is to keep the migration low‑risk and observable, with clear fallbacks.
+- Clean, single‑path integration with `codex exec` in JSON mode.
+- No legacy parsing, no feature flags, no conditional behavior for older versions.
+- CLI flags, sandboxing, and auth that match Codex 0.58.0 docs and internal types.
 
 ---
 
-## 1. Current Pitaya–Codex coupling
+## 1. Target architecture (post‑migration)
 
-### 1.1 How Pitaya invokes Codex
+This section defines the **end state** we want. The implementation steps in section 3 describe how to get there.
+
+### 1.1 How Pitaya should invoke Codex 0.58.0
 
 Relevant code:
 
 - `src/instance_runner/plugins/codex.py`
 - `Dockerfile`
 
-Key behaviors:
+Desired behavior:
 
-- Pitaya runs Codex via:
-  - Base command: `["codex", "exec", "--json", "-C", "/workspace"]`
-  - Sandbox/control flags: `["--skip-git-repo-check", "--dangerously-bypass-approvals-and-sandbox"]`
-  - Optional model: `-m <model>`
-  - Optional config overrides: `-c model_provider=…`, `-c model_providers.<label>={…}`, `-c model="<model>"`.
-  - Optional `--resume <session_id>` for session reuse.
-  - Optional `--system-prompt <prompt>`.
-  - Optional extra CLI args injected before the prompt (`agent_cli_args`).
-- Auth:
-  - Pitaya maps `AuthConfig.api_key`/`base_url` into `OPENAI_API_KEY`/`OPENAI_BASE_URL`.
-  - It also passes through any host‑set provider envs (OPENROUTER_API_KEY, AZURE_*_API_KEY, etc.) and supports overrides via `CODEX_ENV_KEY`, `CODEX_BASE_URL`, `CODEX_MODEL_PROVIDER`.
-- Docker:
-  - The `pitaya-agents:latest` image is built from `Dockerfile`.
-  - It currently installs `@openai/codex@0.42.0` globally with npm, uses `node` user, and sets `WORKDIR /workspace`.
+- **Invocation shape**
+  - Base command (fixed):
+    - `["codex", "exec", "--json", "-C", "/workspace"]`
+  - Sandbox / approvals (fixed for Pitaya):
+    - `["--skip-git-repo-check", "--sandbox", "workspace-write", "--ask-for-approval", "never"]`
+  - Model selection:
+    - `-m <model>` when Pitaya specifies a model.
+    - Optional `-c` config overrides to define `model_provider` and point at custom endpoints (e.g. OpenRouter).
+  - Prompt:
+    - Single positional `PROMPT` argument.
+    - No stdin prompts in the Pitaya integration (we always pass a prompt string).
+  - Resume:
+    - No Codex‑level resume wire‑up from Pitaya initially.
+    - Pitaya “resume runs” remains based on its own run IDs, logs, and state.
 
-### 1.2 How Pitaya parses Codex output
+- **Auth / configuration**
+  - Primary credential: `CODEX_API_KEY` inside the container.
+  - Backwards compatibility with the wider ecosystem via `OPENAI_API_KEY`:
+    - Pitaya maps `AuthConfig.api_key` → both `CODEX_API_KEY` **and** `OPENAI_API_KEY`.
+  - Base URL:
+    - Pitaya maps `AuthConfig.base_url` → `OPENAI_BASE_URL`.
+    - Advanced users can override via `CODEX_BASE_URL` (environment on the host).
+
+- **Sandbox posture**
+  - Pitaya assumes Docker is the outer sandbox, but Codex 0.58.0’s sandbox is still valuable for tool policy and approvals.
+  - We choose:
+    - `--sandbox workspace-write` (Codex may edit files under `/workspace`, matching Pitaya’s isolated clone).
+    - `--ask-for-approval never` (no interactive prompts inside the container).
+
+### 1.2 How Pitaya should parse Codex 0.58.0 JSONL
 
 Relevant code:
 
 - `src/instance_runner/codex_parser.py`
 - `CodexPlugin.parse_events` / `extract_result`
 
-Key expectations:
+Desired behavior:
 
-- Pitaya expects **JSONL** on stdout (one JSON object per line), matching `codex exec --json` semantics.
-- It supports both:
-  - Raw objects (`{"type": "...", ...}`), and
-  - Wrapped objects of the form `{"id": "...", "msg": { "type": "...", ... }}` (older Codex exec format).
-- It recognizes a loose set of `type` / `event` values:
-  - Session / config: `session_configured`, `session_started`, `session`.
-  - Usage: `token_count`, `tokens`, `usage` (with nested `info.total_token_usage` etc.).
-  - Assistant output: `agent_message`, `assistant_message`, `assistant`, `message`.
-  - Command execution: `exec_command_start`, `exec_command_begin`, `tool_start`, `exec_command_end`, `tool_end`.
-  - File edits: `patch_apply_start/end`, `file_edit_start/end`, `write_start/end`.
-  - Turn completion: `task_complete`, `complete`, `shutdown_complete`.
-  - Errors: `error`, `stream_error`.
-  - Any unknown `type` is mapped to a generic `assistant` event with the raw JSON snippet.
-- It accumulates a simple summary:
-  - `session_id`
-  - `final_message`
-  - `metrics.{input_tokens, output_tokens, total_tokens}`
+- Expect **only** Codex 0.58.0 `--json` output:
+  - JSON Lines, 1 event per line.
+  - Event schema defined by `codex-rs/exec/src/exec_events.rs`.
+- Supported top‑level `type` values:
+  - `thread.started`
+  - `turn.started`
+  - `turn.completed`
+  - `turn.failed`
+  - `item.started`
+  - `item.updated`
+  - `item.completed`
+  - `error`
+- Supported `item.details.type` values:
+  - `agent_message`
+  - `reasoning`
+  - `command_execution`
+  - `file_change`
+  - `mcp_tool_call`
+  - `web_search`
+  - `todo_list`
+  - `error`
 
-### 1.3 What Codex 0.58.0 actually does
+Internal mapping:
 
-From the 0.58.0 sources (`codex-rs/exec` and docs):
+- `thread.started`
+  - Capture `thread_id` as our `session_id`.
+  - Emit an internal “system/init” event for observability.
+- `turn.started`
+  - Optional “turn_started” event (used mainly for metrics and TUI).
+- `turn.completed`
+  - Emit an internal `"turn_complete"` event with metrics from `usage`:
+    - `input_tokens = usage.input_tokens + usage.cached_input_tokens`
+    - `output_tokens = usage.output_tokens`
+    - `total_tokens = input_tokens + output_tokens`
+  - Maintain running maxima so multiple turns aggregate sensibly.
+- `turn.failed`
+  - Emit an internal `"error"` event with the embedded `ThreadErrorEvent`.
+  - Record `last_error` for `extract_result()`.
+- `item.*`:
+  - `agent_message`:
+    - For `item.completed`, emit `"assistant"` events with `content = text`.
+    - Update `last_message` (used as `final_message`).
+  - `reasoning`:
+    - Emit `"assistant"` events with content prefixed, e.g. `[reasoning] …` (visible but non‑critical).
+  - `command_execution`:
+    - `item.started` → `"tool_use"` with `tool="bash"`, `command`.
+    - `item.completed` → `"tool_result"` with `success` (from status), `exit_code`, and truncated `aggregated_output`.
+  - `file_change`:
+    - `item.completed` → `"tool_result"` representing a batch edit (tool `"Edit"`, list of changed files).
+  - `mcp_tool_call`:
+    - Map to `"tool_use"` / `"tool_result"` for a generic `"mcp"` tool.
+    - Include server/tool identifiers and either `result` or `error`.
+  - `web_search`:
+    - Optional `"tool_use"` for `"web_search"` (can start as internal/no‑op if we don’t expose external search).
+  - `todo_list`:
+    - Optionally surface as “plan” events later; for now we can ignore them at the orchestrator level while leaving room to extend.
+  - `error`:
+    - Emit `"error"` events; they do not abort runs by themselves unless coupled with `turn.failed`.
+- `error` (top level):
+  - Emit an internal `"error"` event and set `last_error`.
 
-- CLI:
-  - `codex exec` is implemented in `codex-rs/exec`.
-  - Non‑interactive CLI struct: `codex-rs/exec/src/cli.rs` (`Cli`).
-  - `--json` is a boolean flag: in that mode, stdout must be valid JSONL and any other human‑oriented output goes to stderr.
-  - Default sandbox behavior and approvals are controlled by `--sandbox` / `--full-auto` / `--dangerously-bypass-approvals-and-sandbox` and approval policy in config.
-  - `--skip-git-repo-check` is still supported and disables the “must be in a git repo” constraint.
-  - `-C/--cd` sets working directory; `-m/--model` still selects the model.
-  - `codex exec resume` is implemented as a subcommand, not a `--resume` flag.
-- JSONL format:
-  - In `--json` mode, Codex emits **typed ThreadEvents** (see `codex-rs/exec/src/exec_events.rs`) with `type` strings such as:
-    - `thread.started`
-    - `turn.started`, `turn.completed`, `turn.failed`
-    - `item.started`, `item.updated`, `item.completed`
-    - `error`
-  - Each event includes a nested `item` with `details.type` for domain objects:
-    - `agent_message`, `reasoning`, `command_execution`, `file_change`, `mcp_tool_call`, `web_search`, `todo_list`, `error`.
-  - Token usage is surfaced via `turn.completed` with an embedded `usage` structure (`input_tokens`, `cached_input_tokens`, `output_tokens`).
-  - CODEx converts internal events (e.g., `ExecCommandBeginEvent`, `AgentMessageEvent`, `TaskCompleteEvent`) into these JSONL events via `EventProcessorWithJsonOutput` (`codex-rs/exec/src/event_processor_with_jsonl_output.rs`).
-- Docs (`docs/exec.md`) match this:
-  - Describe `--json` semantics as JSONL with `thread.started`, `turn.*`, `item.*`, `error`.
-  - Emphasize default output mode vs. `--json`.
-  - Confirm `codex exec resume <SESSION_ID>` and `codex exec resume --last` are the supported resume forms.
+Summary extraction:
 
-Conclusion: Pitaya’s parser currently speaks an **older internal event vocabulary**; Codex 0.58.0 speaks the **ThreadEvent JSONL schema**. The plugin’s CLI flags (`--json`, `-C`, `-m`, `--skip-git-repo-check`, `--dangerously-bypass-approvals-and-sandbox`) are all still valid, but session resume and JSON format semantics have evolved.
+- `session_id`:
+  - From `thread.started.thread_id` (last seen).
+- `final_message`:
+  - Last `agent_message` text from `item.completed`.
+- `metrics`:
+  - `input_tokens`, `output_tokens`, `total_tokens` from cumulative `turn.completed` usage.
+- `error`:
+  - If any `turn.failed` or top‑level `error` was seen, use its message.
+
+The parser does **not** need to support older Codex event formats; we assume Codex 0.58.0+ is always used.
 
 ---
 
-## 2. High‑level migration strategy
+## 2. Container and packaging
 
-We want to:
+Target state:
 
-1. Upgrade the container to Codex 0.58.0 (binary + node wrapper) without changing Pitaya behavior yet.
-2. Adapt the Codex plugin to:
-   - Use Codex 0.58.0’s `--json` ThreadEvent format explicitly.
-   - Map those events cleanly into Pitaya’s internal event bus (assistant/tool/result/turn metrics).
-   - Support resume via `codex exec resume` semantics instead of the old `--resume` flag.
-3. Preserve a conservative sandbox posture (Codex sandbox still enabled; Pitaya’s Docker remains “outer sandbox”).
-4. Make model family changes explicit (support gpt‑5‑codex, gpt‑5‑codex‑mini, gpt‑5.1 family) but **not** silently change Pitaya’s defaults unless configured.
-5. Roll out behind configuration and add regression tests to prevent format drift in the future.
+- `Dockerfile` installs **only** the current Codex version:
+  - `npm install -g @openai/codex@0.58.0`
+- The image contains:
+  - `codex` binary.
+  - `codex-linux-sandbox` (from the npm package) in PATH.
+  - System tools required by Codex for sandboxing and execution (bash, git, etc.).
+- Runtime user:
+  - `node` user owns `/workspace`.
+  - Directories are not world‑writable (avoids Codex sandbox warnings).
 
-Implementation will be staged to ensure we always have a working fallback.
+Checks to enforce:
+
+- `codex --version` prints `0.58.0`.
+- `codex exec --help` shows `--json`, `--sandbox`, `--ask-for-approval`, `--output-schema`, etc.
+- `codex exec --json -C /workspace "echo test"` runs non‑interactively and emits valid ThreadEvent JSONL.
+
+---
+
+## 3. Implementation steps
+
+This is an ordered list of concrete changes to make Pitaya match the target architecture above.
+
+### 3.1 Update Docker image
+
+1. In `Dockerfile`:
+   - Change `@openai/codex@0.42.0` → `@openai/codex@0.58.0`.
+   - Keep Claude Code as‑is.
+2. Rebuild `pitaya-agents:latest`.
+3. Manually validate Codex inside the container:
+   - `codex --version`
+   - `codex exec --json -C /workspace "echo ok"` (with `CODEX_API_KEY` set).
+
+### 3.2 Update Codex plugin CLI command
+
+Edit `src/instance_runner/plugins/codex.py`:
+
+1. **Base command & sandbox flags**
+   - Keep `_BASE_COMMAND = ["codex", "exec", "--json", "-C", "/workspace"]`.
+   - Replace `_SANDBOX_FLAGS` with:
+     - `["--skip-git-repo-check", "--sandbox", "workspace-write", "--ask-for-approval", "never"]`.
+2. **Remove legacy resume flag**
+   - Delete the `--resume` handling in `build_command`.
+   - If a `session_id` is provided today, ignore it in the Codex plugin (we can reintroduce Codex‑level resume later using the `resume` subcommand).
+3. **Refine system prompt handling**
+   - Remove hard‑coded `--system-prompt` unless we confirm Codex 0.58.0 supports it.
+   - If we want to influence “developer instructions” or similar, pass them via `-c` config overrides or `agent_cli_args` instead of undocumented flags.
+4. **Keep provider mapping**
+   - Keep `-c model_provider=…` and `model_providers.<label>={...}` overrides.
+   - Keep the provider env selection logic (`CODEX_ENV_KEY`, `OPENAI_API_KEY`, OPENROUTER, etc.).
+
+### 3.3 Update Codex environment preparation
+
+Edit `_collect_codex_env` in `src/instance_runner/plugins/codex.py`:
+
+1. For `auth_config.api_key`:
+   - Set both `CODEX_API_KEY` and `OPENAI_API_KEY` if not already present.
+2. For `auth_config.base_url`:
+   - Keep setting `OPENAI_BASE_URL`.
+3. Preserve host‑defined provider envs and overrides (OPENROUTER, AZURE, etc.).
+
+### 3.4 Rewrite `CodexOutputParser` for 0.58.0 ThreadEvents
+
+Edit `src/instance_runner/codex_parser.py`:
+
+1. **Simplify assumptions**
+   - Assume every JSON line is either:
+     - A valid ThreadEvent (preferred), or
+     - Malformed/noisy, which we ignore.
+   - We no longer parse older `{"msg": {"type": ...}}` internal events; the code can still be robust to an outer `{"id": ..., "msg": {...}}` envelope if it appears, but the “type” vocabulary is 100% ThreadEvents.
+2. **Event routing**
+   - Inspect `obj["type"]` to distinguish:
+     - `thread.started`, `turn.*`, `item.*`, `error`.
+   - For `item.*`, inspect `item["details"]["type"]` to map to one of the internal tool/assistant event types.
+3. **Metrics**
+   - Drop token parsing from ad‑hoc `token_count` events.
+   - Use only `turn.completed.usage` for `tokens_in` / `tokens_out` / `total_tokens`.
+4. **Final summary**
+   - Store:
+     - `session_id` from `thread.started`.
+     - `last_message` from the last `agent_message` item.
+     - Metrics from `turn.completed`.
+     - `last_error` from `turn.failed` or top‑level `error`.
+   - `get_summary()` should return this state directly; no legacy fields.
+5. **Internal event mapping**
+   - Map thread/turn/item events into the internal event bus shapes used by the instance runner (`assistant`, `tool_use`, `tool_result`, `turn_complete`, `error`), as described in section 1.2.
+
+### 3.5 Auth and error handling
+
+1. In `CodexPlugin.validate_environment`:
+   - Update the error message to mention `CODEX_API_KEY` explicitly.
+2. In `CodexPlugin.handle_error`:
+   - Keep the error classification logic (`timeout`, `auth`, `network`, `docker`, `codex`).
+   - Optionally add detection for “insufficient_quota” / rate‑limit messages if needed, but this is not required for a clean 0.58.0 integration.
+
+### 3.6 Strategy / docs updates
+
+1. **Docs**
+   - In `README.md` and `docs/plugins.md`:
+     - Update references to Codex to note that Pitaya targets Codex 0.58.0+.
+     - Show example commands using:
+       - `--plugin codex`
+       - `--model gpt-5-codex` or `gpt-5-codex-mini`.
+   - Mention that Pitaya runs Codex in non‑interactive JSON mode via `codex exec --json`.
+2. **No strategy‑level hacks**
+   - Strategies treat Codex like any other agent plugin; no Codex‑specific branches.
+   - All Codex‑specific behavior is isolated to `CodexPlugin` and `CodexOutputParser`.
+
+---
+
+## 4. Testing
+
+We only need to test against Codex 0.58.0; older versions are not supported.
+
+### 4.1 Unit tests for `CodexOutputParser`
+
+Add or extend tests under `tests/` to cover:
+
+- A successful run:
+  - Sample JSONL:
+    - `thread.started`
+    - `turn.started`
+    - `item.completed` with `reasoning`
+    - `item.started` + `item.completed` with `command_execution`
+    - `item.completed` with `agent_message`
+    - `turn.completed` with `usage`
+  - Assertions:
+    - `session_id` is set.
+    - `final_message` matches the last agent message.
+    - `metrics` match `usage`.
+- A failed run:
+  - JSONL includes `turn.failed` and/or `error`.
+  - `extract_result()` raises `AgentError` with the right message.
+
+### 4.2 Manual E2E runs
+
+After updating the image and plugin:
+
+- Run a simple read‑only task:
+  - `pitaya "List all Python files in this repo" --plugin codex --strategy simple`.
+- Run a write task:
+  - `pitaya "Create a HELLO_CODEX.txt file and commit it" --plugin codex --strategy simple`.
+- Inspect:
+  - `logs/<run_id>/` to ensure events look reasonable.
+  - `results/<run_id>/summary.json` to confirm metrics and final message.
+
+---
+
+## 5. Non‑goals
+
+To keep this upgrade focused and clean:
+
+- We do **not** support Codex < 0.58.0.
+- We do **not** add compatibility layers for legacy Codex `--json` formats.
+- We do **not** wire Codex’s own resume mechanism (`codex exec resume`) yet; Pitaya resume behavior continues to be based on its own run IDs and logs.
+- We do **not** attempt to expose every new Codex feature (ghost commits, cloud tasks, etc.) through Pitaya in this iteration.
 
 ---
 
@@ -413,4 +599,3 @@ To keep the migration focused and low‑risk, we will **not**:
 - Depend on Codex’s `history.jsonl` or internal rollout paths for run tracking (Pitaya keeps its own run state and logs).
 
 These can be considered in future work once the basic 0.58.0 upgrade is stable.
-
