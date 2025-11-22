@@ -42,7 +42,7 @@ uv tool install pitaya
 Pitaya runs agents inside Docker. You need a Docker image that contains the agent CLI(s) you plan to use:
 
 - `claude` (for `--plugin claude-code`)
-- `codex` (for `--plugin codex`)
+- `codex` (for `--plugin codex`, Pitaya bundles `@openai/codex@0.63.0` by default)
 
 You can build a ready‑to‑use image from this repository’s [Dockerfile](./Dockerfile):
 
@@ -57,7 +57,7 @@ Prefer a custom image? Use any base you like as long as it includes the required
 Authenticate:
 
 - Claude Code: set `CLAUDE_CODE_OAUTH_TOKEN` (subscription) or `ANTHROPIC_API_KEY`
-- Codex CLI: export the API key for your provider (`OPENAI_API_KEY`, `OPENROUTER_API_KEY`, `GROQ_API_KEY`, etc.). Optional base URLs (such as `OPENROUTER_BASE_URL`) are detected automatically.
+- Codex CLI: set `CODEX_API_KEY` (preferred). Pitaya also auto-detects `OPENAI_API_KEY`, `OPENROUTER_API_KEY`, `GROQ_API_KEY`, etc., plus optional base URLs such as `OPENROUTER_BASE_URL`.
 
 ## Quickstart
 
@@ -85,7 +85,7 @@ OpenRouter (Codex plugin) example:
 ```bash
 pitaya "Write the funniest and most original joke possible" \
   --plugin codex \
-  --model "openai/gpt-5" \
+  --model "gpt-5.1-codex" \
   --api-key "$OPENROUTER_API_KEY" \
   --base-url https://openrouter.ai/api/v1
 ```

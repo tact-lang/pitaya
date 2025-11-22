@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Codex plugin and agent image upgraded to `@openai/codex@0.63.0`. ([#113](https://github.com/tact-lang/pitaya/pull/113))
+- Event sanitizer now redacts JWT-like tokens more accurately while leaving normal URLs untouched. ([#107](https://github.com/tact-lang/pitaya/pull/107))
+
 ## [0.3.0] - 2025-09-26
 
 ### Added

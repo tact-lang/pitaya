@@ -58,10 +58,10 @@ Built‑ins: simple, scoring, best-of-n, iterative, bug-finding, doc-review
 
 - Choose model and plugin:
 
-  ```bash
-  pitaya "task" --model sonnet --plugin claude-code
-  pitaya "task" --model gpt-5 --plugin codex
-  ```
+```bash
+pitaya "task" --model sonnet --plugin claude-code
+pitaya "task" --model gpt-5.1-codex --plugin codex
+```
 
 - Override Docker image:
 
@@ -80,18 +80,19 @@ Built‑ins: simple, scoring, best-of-n, iterative, bug-finding, doc-review
 
   # One quoted list (preserves order)
   pitaya "task" --plugin codex \
-    --cli-args '-c model="gpt-5" --dry-run -v'
+    --cli-args '-c model="gpt-5.1-codex" --dry-run -v'
   ```
 
 - OpenRouter (Codex plugin) example:
 
   ```bash
+  export CODEX_API_KEY=...
   export OPENROUTER_API_KEY=...
   export OPENROUTER_BASE_URL=https://openrouter.ai/api/v1
 
   pitaya "Write the funniest and most original joke possible" \
     --plugin codex \
-    --model "openai/gpt-5"
+    --model "gpt-5.1-codex"
   ```
 
 ## Repository

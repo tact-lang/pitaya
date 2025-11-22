@@ -26,7 +26,17 @@ _ENV_PROVIDER_OVERRIDE = "CODEX_ENV_KEY"
 _ENV_BASE_OVERRIDE = "CODEX_BASE_URL"
 _ENV_PROVIDER_NAME_OVERRIDE = "CODEX_MODEL_PROVIDER"
 
+_DEFAULT_IMAGE = "pitaya-agents:latest"
+_BASE_COMMAND = ["codex", "exec", "--json", "-C", "/workspace"]
+_SANDBOX_FLAGS = [
+    "--skip-git-repo-check",
+    "--sandbox",
+    "workspace-write",
+]
+_ENV_CODEX_API_KEY = "CODEX_API_KEY"
+
 _PROVIDER_ENV_CANDIDATES: Tuple[Tuple[str, str], ...] = (
+    (_ENV_CODEX_API_KEY, _ENV_BASE_OVERRIDE),
     ("OPENAI_API_KEY", "OPENAI_BASE_URL"),
     ("OPENROUTER_API_KEY", "OPENROUTER_BASE_URL"),
     ("AZURE_OPENAI_API_KEY", "AZURE_OPENAI_BASE_URL"),
@@ -37,9 +47,6 @@ _PROVIDER_ENV_CANDIDATES: Tuple[Tuple[str, str], ...] = (
     ("OLLAMA_API_KEY", "OLLAMA_BASE_URL"),
     ("ARCEEAI_API_KEY", "ARCEEAI_BASE_URL"),
 )
-_DEFAULT_IMAGE = "pitaya-agents:latest"
-_BASE_COMMAND = ["codex", "exec", "--json", "-C", "/workspace"]
-_SANDBOX_FLAGS = ["--skip-git-repo-check", "--dangerously-bypass-approvals-and-sandbox"]
 
 
 class CodexPlugin(RunnerPlugin):
@@ -81,7 +88,7 @@ class CodexPlugin(RunnerPlugin):
             False,
             (
                 "Missing Codex API key. Provide --api-key, set runner.api_key, "
-                "or export an environment variable like OPENAI_API_KEY."
+                "or export an environment variable such as CODEX_API_KEY or OPENAI_API_KEY."
             ),
         )
 
@@ -150,31 +157,22 @@ class CodexPlugin(RunnerPlugin):
             if model:
                 cmd += ["-c", f'model="{model}"']
 
-        # Resume/reattach: experimental; accept session_id when provided
-        # (Codex may expect a rollout path; we pass session id to be safe if supported)
+        # Resume: use Codex's subcommand when a session_id is provided.
         if session_id:
-            # Keep a conservative flag name to avoid hard dependency
-            # Callers can augment through kwargs if a specific flag is required later
-            cmd += ["--resume", session_id]
-
-        # System prompt injection not standardized for Codex; forward when present
-        system_prompt = kwargs.get("system_prompt")
-        if system_prompt:
-            cmd += ["--system-prompt", str(system_prompt)]
+            cmd.append("resume")
+            cmd.append(session_id)
 
         # Agent CLI passthrough args: insert before prompt
         extra_args = kwargs.get("agent_cli_args")
         if isinstance(extra_args, (list, tuple)):
             cmd += [str(arg) for arg in extra_args if arg is not None]
 
-        # Final positional: the prompt
+        # Final positional: the prompt (optional for resume; required otherwise)
         if prompt:
             cmd.append(prompt)
-        elif session_id:
-            logger.debug(
-                "codex: omitted prompt (resume flow) session_id=%s",
-                str(session_id)[:16],
-            )
+        elif not session_id:
+            # Without a prompt or a session to resume, Codex will fail fast; log for clarity.
+            logger.debug("codex: no prompt provided and no session_id to resume")
 
         return cmd
 
@@ -267,8 +265,10 @@ def _collect_codex_env(auth_config: Optional[Dict[str, Any]]) -> Dict[str, str]:
     env: Dict[str, str] = {}
 
     if auth_config:
-        if auth_config.get("api_key"):
-            env[_ENV_API_KEY] = str(auth_config["api_key"])
+        api_key = auth_config.get("api_key")
+        if api_key:
+            env[_ENV_CODEX_API_KEY] = str(api_key)
+            env.setdefault(_ENV_API_KEY, str(api_key))
         if auth_config.get("base_url"):
             val = str(auth_config["base_url"]).strip()
             if val:
@@ -297,12 +297,15 @@ def _select_provider_env_key() -> Optional[str]:
 
     Preference order:
     1) CODEX_ENV_KEY override when it points to a non-empty env var
-    2) OPENAI_API_KEY when non-empty
-    3) First non-empty candidate in _PROVIDER_ENV_CANDIDATES (e.g., OPENROUTER_API_KEY)
+    2) CODEX_API_KEY when non-empty
+    3) OPENAI_API_KEY when non-empty
+    4) First non-empty candidate in _PROVIDER_ENV_CANDIDATES (e.g., OPENROUTER_API_KEY)
     """
     override = os.environ.get(_ENV_PROVIDER_OVERRIDE)
     if override and os.environ.get(override):
         return override
+    if os.environ.get(_ENV_CODEX_API_KEY):
+        return _ENV_CODEX_API_KEY
     if os.environ.get(_ENV_API_KEY):
         return _ENV_API_KEY
     for env_key, _ in _PROVIDER_ENV_CANDIDATES:
