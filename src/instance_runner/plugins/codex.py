@@ -32,8 +32,6 @@ _SANDBOX_FLAGS = [
     "--skip-git-repo-check",
     "--sandbox",
     "workspace-write",
-    "--ask-for-approval",
-    "never",
 ]
 _ENV_CODEX_API_KEY = "CODEX_API_KEY"
 

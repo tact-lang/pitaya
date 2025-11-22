@@ -41,3 +41,12 @@ def test_codex_parser_records_errors() -> None:
     parser.parse_line('{"type":"turn.failed","error":{"message":"quota exceeded"}}')
     summary = parser.get_summary()
     assert summary["error"] == "quota exceeded"
+
+
+def test_codex_parser_flattened_items() -> None:
+    parser = CodexOutputParser()
+    parser.parse_line(
+        '{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"flat message"}}'
+    )
+    summary = parser.get_summary()
+    assert summary["final_message"] == "flat message"

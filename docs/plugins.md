@@ -73,7 +73,7 @@ Advanced overrides:
 - `CODEX_ENV_KEY`: force the env var name Codex should read (useful when your key lives under a non-standard name).
 - `CODEX_BASE_URL`: override the detected base URL for the current run.
 - `CODEX_MODEL_PROVIDER`: set the temporary `model_provider` identifier passed to Codex.
-- Pitaya always launches Codex as `codex exec --json -C /workspace --sandbox workspace-write --ask-for-approval never`; any CLI args you pass via `--cli-arg` are appended after these defaults.
+- Pitaya launches Codex as `codex exec --json -C /workspace --sandbox workspace-write --skip-git-repo-check`; any CLI args you pass via `--cli-arg` are appended after these defaults.
 
 ### Validation & errors
 

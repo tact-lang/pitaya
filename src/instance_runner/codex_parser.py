@@ -142,9 +142,12 @@ class CodexOutputParser:
         if not isinstance(item, dict):
             return None
 
-        details = item.get("details")
-        if not isinstance(details, dict):
-            return None
+        # Codex emits either flattened fields (type/text/etc.) or nested details.
+        details: Dict[str, Any]
+        if isinstance(item.get("details"), dict):
+            details = item["details"]
+        else:
+            details = item
 
         detail_type = details.get("type")
         if not isinstance(detail_type, str):
