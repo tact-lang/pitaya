@@ -283,7 +283,6 @@ def _handle_completed(
 def _handle_failed(
     console: Console,
     prefix: Callable[[dict], str],
-    glyph: Callable[[str], str],
     ev: dict,
 ) -> None:
     data = ev.get("data", {})
