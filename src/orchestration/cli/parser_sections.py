@@ -135,7 +135,11 @@ def add_display_args(parser: argparse.ArgumentParser) -> None:
     g.add_argument(
         "--show-ids", choices=["short", "full"], default="short", help="ID verbosity"
     )
-    g.add_argument("--verbose", action="store_true", help="Verbose streaming logs")
+    g.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Headless only: show agent/tool steps on console",
+    )
 
 
 def add_auth_args(parser: argparse.ArgumentParser) -> None:

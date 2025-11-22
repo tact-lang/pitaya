@@ -41,6 +41,7 @@ logging:
   # JSONL component logs under logs/<run_id>/
   max_file_size: 10485760   # 10MB per component file before rotation
   retention_days: 7         # cleanup old run dirs (component logs)
+  console_verbose: false    # headless-only: surface agent/tool steps to console (same as --verbose)
   redaction:
     # Additional regexes applied to event payloads/logs (case-insensitive where needed)
     custom_patterns:

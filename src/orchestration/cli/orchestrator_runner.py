@@ -216,7 +216,7 @@ async def run(console: Console, args: argparse.Namespace) -> int:
         if not full_config:
             full_config = _merge_full_config(args)
 
-        # Structured logging and rotation setup (restored from pre-refactor behavior)
+        # Structured logging and rotation setup (files always DEBUG; console INFO in headless)
         try:
             from ...utils.structured_logging import setup_structured_logging
             from ...utils.log_rotation import cleanup_old_logs, setup_log_rotation_task
@@ -229,12 +229,19 @@ async def run(console: Console, args: argparse.Namespace) -> int:
                 getattr(args, "no_tui", False)
                 and getattr(args, "output", "") == "quiet"
             )
+            logging_cfg = full_config.get("logging", {}) or {}
+            if not getattr(args, "verbose", False) and logging_cfg.get(
+                "console_verbose", False
+            ):
+                args.verbose = True
+            # We surface human-facing events via streaming subscribers; suppress loggers to console.
+            console_enabled = False
             setup_structured_logging(
                 logs_dir=logs_dir,
                 run_id=run_id,
-                debug=True,
                 quiet=quiet,
                 no_tui=bool(getattr(args, "no_tui", False)),
+                enable_console=console_enabled,
             )
             try:
                 cleanup_old_logs(logs_dir)
