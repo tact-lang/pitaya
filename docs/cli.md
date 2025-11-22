@@ -60,7 +60,7 @@ Built‑ins: simple, scoring, best-of-n, iterative, bug-finding, doc-review
 
 ```bash
 pitaya "task" --model sonnet --plugin claude-code
-pitaya "task" --model gpt-5-codex --plugin codex
+pitaya "task" --model gpt-5.1-codex --plugin codex
 ```
 
 - Override Docker image:
@@ -80,7 +80,7 @@ pitaya "task" --model gpt-5-codex --plugin codex
 
   # One quoted list (preserves order)
   pitaya "task" --plugin codex \
-    --cli-args '-c model="gpt-5-codex" --dry-run -v'
+    --cli-args '-c model="gpt-5.1-codex" --dry-run -v'
   ```
 
 - OpenRouter (Codex plugin) example:
@@ -92,7 +92,7 @@ pitaya "task" --model gpt-5-codex --plugin codex
 
   pitaya "Write the funniest and most original joke possible" \
     --plugin codex \
-    --model "gpt-5-codex"
+    --model "gpt-5.1-codex"
   ```
 
 ## Repository

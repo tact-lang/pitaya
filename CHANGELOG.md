@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Codex plugin and agent image upgraded to `@openai/codex@0.63.0`
+
 ## [0.3.0] - 2025-09-26
 
 ### Added

@@ -22,7 +22,7 @@ async def test_build_command_resume_includes_subcommand() -> None:
     plugin = CodexPlugin()
     cmd = await plugin.build_command(
         prompt="",
-        model="gpt-5-codex",
+        model="gpt-5.1-codex",
         session_id="sess-123",
     )
     assert "resume" in cmd
@@ -37,7 +37,7 @@ async def test_build_command_resume_with_prompt() -> None:
     plugin = CodexPlugin()
     cmd = await plugin.build_command(
         prompt="do thing",
-        model="gpt-5-codex",
+        model="gpt-5.1-codex",
         session_id="sess-123",
     )
     assert cmd[-1] == "do thing"

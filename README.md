@@ -85,7 +85,7 @@ OpenRouter (Codex plugin) example:
 ```bash
 pitaya "Write the funniest and most original joke possible" \
   --plugin codex \
-  --model "gpt-5-codex" \
+  --model "gpt-5.1-codex" \
   --api-key "$OPENROUTER_API_KEY" \
   --base-url https://openrouter.ai/api/v1
 ```

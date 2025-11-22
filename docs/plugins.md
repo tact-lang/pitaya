@@ -16,7 +16,7 @@ Examples
 pitaya "task" --plugin claude-code --model sonnet
 
 # Codex CLI with an OpenAI‑compatible model ID
-pitaya "task" --plugin codex --model "openai/gpt-5"
+pitaya "task" --plugin codex --model "gpt-5.1-codex"
 ```
 
 ## Docker Images
@@ -65,7 +65,7 @@ export OPENROUTER_BASE_URL=https://openrouter.ai/api/v1
 
 pitaya "Write the funniest and most original joke possible" \
   --plugin codex \
-  --model "openai/gpt-5"
+  --model "gpt-5.1-codex"
 ```
 
 Advanced overrides:
