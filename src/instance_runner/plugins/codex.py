@@ -31,7 +31,7 @@ _BASE_COMMAND = ["codex", "exec", "--json", "-C", "/workspace"]
 _SANDBOX_FLAGS = [
     "--skip-git-repo-check",
     "--sandbox",
-    "danger-full-access",  # allow network/tools; outer Docker provides isolation
+    "danger-full-access",
 ]
 _ENV_CODEX_API_KEY = "CODEX_API_KEY"
 

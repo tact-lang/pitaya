@@ -284,7 +284,7 @@ class EventBus:
         # Notify subscribers
         self._notify_subscribers(event)
 
-        # Minimal debug logging only when logger configured for DEBUG externally
+        # Emit trace only at DEBUG to avoid console noise; files capture DEBUG.
         if logger.isEnabledFor(logging.DEBUG):
             try:
                 keys = (

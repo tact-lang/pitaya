@@ -140,12 +140,12 @@ pitaya "task" --model gpt-5.1-codex --plugin codex
   pitaya "task" --display auto|detailed|compact|dense
   ```
 
-- Streaming output tweaks:
+- Streaming output tweaks (headless):
 
   ```bash
-  pitaya "task" --no-emoji                 # strip emoji
-  pitaya "task" --show-ids full            # show full IDs in logs
-  pitaya "task" --verbose                  # more container/import detail
+  pitaya "task" --no-emoji        # strip emoji
+  pitaya "task" --show-ids full   # show full IDs in streaming lines
+  pitaya "task" --verbose         # show agent/tool steps; minimal shows lifecycle only
   ```
 
 ## Execution & Limits
