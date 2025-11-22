@@ -156,6 +156,12 @@ class CodexPlugin(RunnerPlugin):
             ]
             if model:
                 cmd += ["-c", f'model="{model}"']
+        elif model:
+            # No provider override; still allow plain model override.
+            cmd += ["-c", f'model="{model}"']
+
+        # Enable web search in exec mode (both legacy + new flags).
+        cmd += ["-c", "features.web_search_request=true"]
 
         # Resume: use Codex's subcommand when a session_id is provided.
         if session_id:
