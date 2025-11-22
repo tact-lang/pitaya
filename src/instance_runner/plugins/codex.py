@@ -26,17 +26,6 @@ _ENV_PROVIDER_OVERRIDE = "CODEX_ENV_KEY"
 _ENV_BASE_OVERRIDE = "CODEX_BASE_URL"
 _ENV_PROVIDER_NAME_OVERRIDE = "CODEX_MODEL_PROVIDER"
 
-_PROVIDER_ENV_CANDIDATES: Tuple[Tuple[str, str], ...] = (
-    ("OPENAI_API_KEY", "OPENAI_BASE_URL"),
-    ("OPENROUTER_API_KEY", "OPENROUTER_BASE_URL"),
-    ("AZURE_OPENAI_API_KEY", "AZURE_OPENAI_BASE_URL"),
-    ("GROQ_API_KEY", "GROQ_BASE_URL"),
-    ("MISTRAL_API_KEY", "MISTRAL_BASE_URL"),
-    ("GEMINI_API_KEY", "GEMINI_BASE_URL"),
-    ("DEEPSEEK_API_KEY", "DEEPSEEK_BASE_URL"),
-    ("OLLAMA_API_KEY", "OLLAMA_BASE_URL"),
-    ("ARCEEAI_API_KEY", "ARCEEAI_BASE_URL"),
-)
 _DEFAULT_IMAGE = "pitaya-agents:latest"
 _BASE_COMMAND = ["codex", "exec", "--json", "-C", "/workspace"]
 _SANDBOX_FLAGS = [
@@ -47,6 +36,19 @@ _SANDBOX_FLAGS = [
     "never",
 ]
 _ENV_CODEX_API_KEY = "CODEX_API_KEY"
+
+_PROVIDER_ENV_CANDIDATES: Tuple[Tuple[str, str], ...] = (
+    (_ENV_CODEX_API_KEY, _ENV_BASE_OVERRIDE),
+    ("OPENAI_API_KEY", "OPENAI_BASE_URL"),
+    ("OPENROUTER_API_KEY", "OPENROUTER_BASE_URL"),
+    ("AZURE_OPENAI_API_KEY", "AZURE_OPENAI_BASE_URL"),
+    ("GROQ_API_KEY", "GROQ_BASE_URL"),
+    ("MISTRAL_API_KEY", "MISTRAL_BASE_URL"),
+    ("GEMINI_API_KEY", "GEMINI_BASE_URL"),
+    ("DEEPSEEK_API_KEY", "DEEPSEEK_BASE_URL"),
+    ("OLLAMA_API_KEY", "OLLAMA_BASE_URL"),
+    ("ARCEEAI_API_KEY", "ARCEEAI_BASE_URL"),
+)
 
 
 class CodexPlugin(RunnerPlugin):
@@ -157,21 +159,22 @@ class CodexPlugin(RunnerPlugin):
             if model:
                 cmd += ["-c", f'model="{model}"']
 
-        # Codex 0.58.0 resume flow is handled out-of-band; Pitaya does not pass session IDs.
+        # Resume: use Codex's subcommand when a session_id is provided.
+        if session_id:
+            cmd.append("resume")
+            cmd.append(session_id)
 
         # Agent CLI passthrough args: insert before prompt
         extra_args = kwargs.get("agent_cli_args")
         if isinstance(extra_args, (list, tuple)):
             cmd += [str(arg) for arg in extra_args if arg is not None]
 
-        # Final positional: the prompt
+        # Final positional: the prompt (optional for resume; required otherwise)
         if prompt:
             cmd.append(prompt)
-        elif session_id:
-            logger.debug(
-                "codex: omitted prompt (resume flow) session_id=%s",
-                str(session_id)[:16],
-            )
+        elif not session_id:
+            # Without a prompt or a session to resume, Codex will fail fast; log for clarity.
+            logger.debug("codex: no prompt provided and no session_id to resume")
 
         return cmd
 
@@ -296,12 +299,15 @@ def _select_provider_env_key() -> Optional[str]:
 
     Preference order:
     1) CODEX_ENV_KEY override when it points to a non-empty env var
-    2) OPENAI_API_KEY when non-empty
-    3) First non-empty candidate in _PROVIDER_ENV_CANDIDATES (e.g., OPENROUTER_API_KEY)
+    2) CODEX_API_KEY when non-empty
+    3) OPENAI_API_KEY when non-empty
+    4) First non-empty candidate in _PROVIDER_ENV_CANDIDATES (e.g., OPENROUTER_API_KEY)
     """
     override = os.environ.get(_ENV_PROVIDER_OVERRIDE)
     if override and os.environ.get(override):
         return override
+    if os.environ.get(_ENV_CODEX_API_KEY):
+        return _ENV_CODEX_API_KEY
     if os.environ.get(_ENV_API_KEY):
         return _ENV_API_KEY
     for env_key, _ in _PROVIDER_ENV_CANDIDATES:

@@ -42,7 +42,7 @@ uv tool install pitaya
 Pitaya runs agents inside Docker. You need a Docker image that contains the agent CLI(s) you plan to use:
 
 - `claude` (for `--plugin claude-code`)
-- `codex` (for `--plugin codex`, Pitaya bundles `@openai/codex@0.58.0` by default)
+- `codex` (for `--plugin codex`, Pitaya bundles `@openai/codex@0.63.0` by default)
 
 You can build a ready‑to‑use image from this repository’s [Dockerfile](./Dockerfile):
 

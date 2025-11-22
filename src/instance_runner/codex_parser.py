@@ -114,7 +114,9 @@ class CodexOutputParser:
 
     def _handle_turn_failed(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         error_payload = payload.get("error") or {}
-        message = error_payload.get("message") or payload.get("message") or "unknown error"
+        message = (
+            error_payload.get("message") or payload.get("message") or "unknown error"
+        )
         self.last_error = str(message)
         return {
             "type": "error",

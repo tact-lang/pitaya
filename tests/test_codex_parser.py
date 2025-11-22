@@ -31,7 +31,9 @@ def test_codex_parser_handles_thread_and_turn_events() -> None:
 
     assistant_events = [e for e in events if e["type"] == "assistant"]
     assert any("Analyzing files" in e["content"] for e in assistant_events)
-    assert any(e.get("command") == "bash -lc ls" for e in events if e["type"] == "tool_result")
+    assert any(
+        e.get("command") == "bash -lc ls" for e in events if e["type"] == "tool_result"
+    )
 
 
 def test_codex_parser_records_errors() -> None:

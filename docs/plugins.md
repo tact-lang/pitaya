@@ -3,7 +3,7 @@
 Pitaya supports multiple agent tools via runner plugins. The two built‑ins are:
 
 - Claude Code (`--plugin claude-code`)
-- Codex CLI (`--plugin codex`) — Pitaya runs `codex exec --json` from `@openai/codex@0.58.0` inside the agent container
+- Codex CLI (`--plugin codex`) — Pitaya runs `codex exec --json` from `@openai/codex@0.63.0` inside the agent container
 
 ## Models
 

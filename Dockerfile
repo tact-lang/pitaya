@@ -15,7 +15,7 @@ RUN apt-get update && apt-get install -y \
 RUN mkdir -p /workspace && chown -R node:node /workspace
 
 # Install both agent CLIs globally so they are available regardless of volume mounts
-RUN npm install -g @anthropic-ai/claude-code@2.0.8 @openai/codex@0.58.0 \
+RUN npm install -g @anthropic-ai/claude-code@2.0.8 @openai/codex@0.63.0 \
     && npm cache clean --force
 
 # Switch to the non-root user expected by the runner and set defaults
