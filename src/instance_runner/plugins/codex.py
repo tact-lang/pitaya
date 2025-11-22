@@ -31,7 +31,7 @@ _BASE_COMMAND = ["codex", "exec", "--json", "-C", "/workspace"]
 _SANDBOX_FLAGS = [
     "--skip-git-repo-check",
     "--sandbox",
-    "workspace-write",
+    "danger-full-access",  # allow network/tools; outer Docker provides isolation
 ]
 _ENV_CODEX_API_KEY = "CODEX_API_KEY"
 
@@ -156,6 +156,12 @@ class CodexPlugin(RunnerPlugin):
             ]
             if model:
                 cmd += ["-c", f'model="{model}"']
+        elif model:
+            # No provider override; still allow plain model override.
+            cmd += ["-c", f'model="{model}"']
+
+        # Enable web search in exec mode (both legacy + new flags).
+        cmd += ["-c", "features.web_search_request=true"]
 
         # Resume: use Codex's subcommand when a session_id is provided.
         if session_id:
