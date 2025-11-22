@@ -173,6 +173,7 @@ def get_default_config() -> Dict[str, Any]:
             "level": "INFO",
             "max_file_size": 10_485_760,
             "retention_days": 7,
+            "console_verbose": False,
             "redaction": {"custom_patterns": []},
         },
     }

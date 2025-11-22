@@ -11,6 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Codex plugin and agent image upgraded to `@openai/codex@0.63.0`. ([#113](https://github.com/tact-lang/pitaya/pull/113))
 - Event sanitizer now redacts JWT-like tokens more accurately while leaving normal URLs untouched. ([#107](https://github.com/tact-lang/pitaya/pull/107))
+- Logging overhauled for headless runs: console shows clean lifecycle lines by default, `--verbose`/`logging.console_verbose` surface agent/tool steps, and all raw DEBUG stays in per-run files. ([#117](https://github.com/tact-lang/pitaya/pull/117))
 
 ## [0.3.0] - 2025-09-26
 

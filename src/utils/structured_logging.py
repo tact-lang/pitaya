@@ -77,17 +77,21 @@ _LOG_RECORD_IGNORED_FIELDS = {
 def setup_structured_logging(
     logs_dir: Path,
     run_id: str,
-    debug: bool = False,
+    *,
     quiet: bool = False,
     no_tui: bool = False,
+    enable_console: bool = True,
 ) -> None:
     """Configure JSONL logging for the current run."""
     run_logs_dir = _prepare_run_directory(logs_dir, run_id)
-    console_level = _determine_console_level(debug=debug, quiet=quiet)
     file_formatter = JSONFormatter()
 
     component_handlers = _build_component_handlers(run_logs_dir, file_formatter)
-    console_handlers = _build_console_handlers(no_tui, quiet, debug, console_level)
+    console_handlers = _build_console_handlers(
+        no_tui=no_tui,
+        quiet=quiet,
+        enable_console=enable_console,
+    )
 
     root_logger = logging.getLogger()
     root_logger.handlers.clear()
@@ -112,14 +116,6 @@ def _prepare_run_directory(logs_dir: Path, run_id: str) -> Path:
     return run_logs_dir
 
 
-def _determine_console_level(*, debug: bool, quiet: bool) -> int:
-    if quiet:
-        return logging.ERROR
-    if debug:
-        return logging.DEBUG
-    return logging.INFO
-
-
 def _build_component_handlers(
     run_logs_dir: Path, formatter: logging.Formatter
 ) -> Dict[str, logging.Handler]:
@@ -134,29 +130,21 @@ def _build_component_handlers(
 
 
 def _build_console_handlers(
+    *,
     no_tui: bool,
     quiet: bool,
-    debug: bool,
-    console_level: int,
+    enable_console: bool,
 ) -> List[logging.Handler]:
-    if not no_tui or quiet:
+    if not enable_console or not no_tui or quiet:
         return []
 
     console_handler = logging.StreamHandler(sys.stdout)
-    console_handler.setLevel(console_level)
+    console_handler.setLevel(logging.WARNING)
     console_handler.setFormatter(
         logging.Formatter("%(levelname)s %(name)s: %(message)s")
     )
 
-    handlers: List[logging.Handler] = [console_handler]
-    if debug:
-        debug_handler = logging.StreamHandler(sys.stderr)
-        debug_handler.setLevel(logging.DEBUG)
-        debug_handler.setFormatter(
-            logging.Formatter("%(levelname)s %(name)s: %(message)s")
-        )
-        handlers.append(debug_handler)
-    return handlers
+    return [console_handler]
 
 
 def _configure_existing_loggers(
