@@ -12,13 +12,16 @@ This base provides sensible defaults so custom strategies remain minimal:
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 import logging
-import re as _re
-from typing import Any, Dict, List, Optional, TYPE_CHECKING
+import re
+from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 from ...shared import InstanceResult
 
 if TYPE_CHECKING:
     from ..strategy_context import StrategyContext
+
+
+__all__ = ["Strategy", "StrategyConfig"]
 
 
 @dataclass
@@ -67,7 +70,7 @@ class Strategy(ABC):
         cname = self.__class__.__name__
         if cname.endswith("Strategy"):
             cname = cname[: -len("Strategy")]
-        parts = _re.findall(r"[A-Z]+(?=[A-Z][a-z]|\b)|[A-Z]?[a-z]+|\d+", cname)
+        parts = re.findall(r"[A-Z]+(?=[A-Z][a-z]|\b)|[A-Z]?[a-z]+|\d+", cname)
         derived = "-".join(p.lower() for p in parts if p)
         return derived or "custom"
 

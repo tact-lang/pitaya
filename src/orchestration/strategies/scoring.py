@@ -12,7 +12,7 @@ Intended for composition (e.g., Best‑of‑N) or standalone evaluation runs.
 
 import json
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Tuple, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
 from ...shared import InstanceResult
 from ...exceptions import StrategyError
@@ -20,6 +20,9 @@ from .base import Strategy, StrategyConfig
 
 if TYPE_CHECKING:
     from ..strategy_context import StrategyContext
+
+
+__all__ = ["ScoringConfig", "ScoringStrategy"]
 
 
 @dataclass

@@ -11,7 +11,7 @@ iteration to keep history concise. The review task does not modify files.
 """
 
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 from ...shared import InstanceResult
 from ...exceptions import StrategyError
@@ -19,6 +19,9 @@ from .base import Strategy, StrategyConfig
 
 if TYPE_CHECKING:
     from ..strategy_context import StrategyContext
+
+
+__all__ = ["IterativeConfig", "IterativeStrategy"]
 
 
 @dataclass

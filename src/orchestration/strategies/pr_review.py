@@ -20,16 +20,19 @@ from __future__ import annotations
 import asyncio
 import json
 import re
-from dataclasses import dataclass, field
 import subprocess
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple, TYPE_CHECKING
+from typing import TYPE_CHECKING, Dict, List, Optional, Tuple
 
 from ...shared import InstanceResult
 from .base import Strategy, StrategyConfig
 
 if TYPE_CHECKING:
     from ..strategy_context import StrategyContext
+
+
+__all__ = ["PRReviewConfig", "PRReviewStrategy"]
 
 
 # Shared internal findings output format for reviewer and validator prompts (strict)
