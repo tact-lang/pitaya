@@ -20,7 +20,9 @@ from .instance_events import (
 logger = logging.getLogger(__name__)
 
 
-def _emit_instance_started(orchestrator, info, instance_id: str, task_key: Optional[str]) -> None:
+def _emit_instance_started(
+    orchestrator, info, instance_id: str, task_key: Optional[str]
+) -> None:
     orchestrator.event_bus.emit(
         "instance.started",
         {
@@ -47,7 +49,9 @@ def _emit_instance_started(orchestrator, info, instance_id: str, task_key: Optio
     )
 
 
-def _emit_task_completed(orchestrator, info, instance_id: str, result, task_key: str) -> None:
+def _emit_task_completed(
+    orchestrator, info, instance_id: str, result, task_key: str
+) -> None:
     artifact = {
         "type": "branch",
         "branch_planned": info.branch_name,
@@ -79,7 +83,9 @@ def _emit_task_completed(orchestrator, info, instance_id: str, result, task_key:
     )
 
 
-def _emit_task_failed(orchestrator, info, instance_id: str, result, task_key: str) -> None:
+def _emit_task_failed(
+    orchestrator, info, instance_id: str, result, task_key: str
+) -> None:
     orchestrator.event_bus.emit_canonical(
         type="task.failed",
         run_id=orchestrator.state_manager.current_state.run_id,
@@ -98,11 +104,19 @@ def _emit_task_failed(orchestrator, info, instance_id: str, result, task_key: st
 def _prepare_run_kwargs(orchestrator, info, strategy_exec_id, task_key, startup_pool):
     eff_cpu = max(
         1,
-        int((info.metadata or {}).get("container_cpu", orchestrator.container_limits.cpu_count)),
+        int(
+            (info.metadata or {}).get(
+                "container_cpu", orchestrator.container_limits.cpu_count
+            )
+        ),
     )
     eff_mem = max(
         1,
-        int((info.metadata or {}).get("container_memory_gb", orchestrator.container_limits.memory_gb)),
+        int(
+            (info.metadata or {}).get(
+                "container_memory_gb", orchestrator.container_limits.memory_gb
+            )
+        ),
     )
     return dict(
         prompt=info.prompt,
@@ -120,13 +134,18 @@ def _prepare_run_kwargs(orchestrator, info, strategy_exec_id, task_key, startup_
         event_callback=None,  # placeholder set by caller
         startup_semaphore=startup_pool,
         timeout_seconds=orchestrator.runner_timeout_seconds,
-        container_limits=ContainerLimits(cpu_count=eff_cpu, memory_gb=eff_mem, memory_swap_gb=eff_mem),
+        container_limits=ContainerLimits(
+            cpu_count=eff_cpu, memory_gb=eff_mem, memory_swap_gb=eff_mem
+        ),
         auth_config=orchestrator.auth_config,
         retry_config=orchestrator.retry_config,
         plugin_name=(info.metadata or {}).get("plugin_name", "claude-code"),
-        docker_image=(info.metadata or {}).get("docker_image") or orchestrator.default_docker_image,
+        docker_image=(info.metadata or {}).get("docker_image")
+        or orchestrator.default_docker_image,
         import_policy=(info.metadata or {}).get("import_policy", "auto"),
-        import_conflict_policy=(info.metadata or {}).get("import_conflict_policy", "fail"),
+        import_conflict_policy=(info.metadata or {}).get(
+            "import_conflict_policy", "fail"
+        ),
         skip_empty_import=bool((info.metadata or {}).get("skip_empty_import", True)),
         network_egress=(info.metadata or {}).get("network_egress"),
         max_turns=(info.metadata or {}).get("max_turns"),
@@ -135,7 +154,9 @@ def _prepare_run_kwargs(orchestrator, info, strategy_exec_id, task_key, startup_
         allow_global_session_volume=orchestrator.allow_global_session_volume,
         agent_cli_args=(info.metadata or {}).get("agent_cli_args"),
         force_commit=orchestrator.force_commit,
-        workspace_include_branches=(info.metadata or {}).get("workspace_include_branches"),
+        workspace_include_branches=(info.metadata or {}).get(
+            "workspace_include_branches"
+        ),
     )
 
 
@@ -151,7 +172,10 @@ def _apply_result_metadata(result, info, strategy_exec_id) -> None:
 def _derive_state(result) -> InstanceStatus:
     if result.success:
         return InstanceStatus.COMPLETED
-    if getattr(result, "status", None) == "canceled" or getattr(result, "error_type", None) == "canceled":
+    if (
+        getattr(result, "status", None) == "canceled"
+        or getattr(result, "error_type", None) == "canceled"
+    ):
         return InstanceStatus.INTERRUPTED
     return InstanceStatus.FAILED
 
@@ -189,7 +213,9 @@ def _fail_instance(orchestrator, instance_id: str, futures, exc: Exception) -> N
     _set_future(futures, instance_id, error_result)
 
 
-def _unexpected_failure(orchestrator, instance_id: str, futures, exc: Exception) -> None:
+def _unexpected_failure(
+    orchestrator, instance_id: str, futures, exc: Exception
+) -> None:
     error_result = InstanceResult(
         success=False,
         error=str(exc),
@@ -226,12 +252,16 @@ async def execute_instance(
     event_callback = build_event_callback(orchestrator, instance_id, task_key)
     heartbeat_task: Optional[asyncio.Task] = None
     if orchestrator.event_bus:
-        heartbeat_task = asyncio.create_task(heartbeat_monitor(orchestrator, instance_id))
+        heartbeat_task = asyncio.create_task(
+            heartbeat_monitor(orchestrator, instance_id)
+        )
 
     strategy_exec_id = strategy_execution_id(orchestrator, instance_id)
 
     try:
-        kwargs = _prepare_run_kwargs(orchestrator, info, strategy_exec_id, task_key, startup_pool)
+        kwargs = _prepare_run_kwargs(
+            orchestrator, info, strategy_exec_id, task_key, startup_pool
+        )
         kwargs["event_callback"] = event_callback
         result = await run_instance(**kwargs)
 
@@ -264,7 +294,9 @@ async def execute_instance(
         if getattr(orchestrator, "_shutdown", False):
             _interrupt_instance(orchestrator, instance_id, futures)
         else:
-            logger.exception("Instance %s crashed with unexpected error: %s", instance_id, exc)
+            logger.exception(
+                "Instance %s crashed with unexpected error: %s", instance_id, exc
+            )
             _unexpected_failure(orchestrator, instance_id, futures, exc)
     finally:
         if heartbeat_task:

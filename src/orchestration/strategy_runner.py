@@ -46,9 +46,15 @@ async def _execute_strategy(
     )
     orchestrator.repo_path = orchestrator.state_manager.current_state.repo_path
 
-    emit_strategy_started(orchestrator, strategy_id, strategy, effective_name, run_id, strategy_config)
+    emit_strategy_started(
+        orchestrator, strategy_id, strategy, effective_name, run_id, strategy_config
+    )
     results = await strategy.execute(prompt=prompt, base_branch=base_branch, ctx=ctx)
-    state_value = "completed" if any(getattr(r, "success", False) for r in (results or [])) else "failed"
+    state_value = (
+        "completed"
+        if any(getattr(r, "success", False) for r in (results or []))
+        else "failed"
+    )
     orchestrator.state_manager.update_strategy_state(
         strategy_id=strategy_id,
         state=state_value,
@@ -151,7 +157,9 @@ async def run_strategy(
     )
 
     detect_default_workspace_branches(orchestrator, repo_path, base_branch)
-    orchestrator._force_import = bool((strategy_config or {}).get("force_import", False))
+    orchestrator._force_import = bool(
+        (strategy_config or {}).get("force_import", False)
+    )
     await orchestrator.state_manager.start_periodic_snapshots()
 
     orchestrator.event_bus.emit(

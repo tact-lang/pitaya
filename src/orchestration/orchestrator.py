@@ -1,13 +1,19 @@
 """Main orchestration component coordinating Pitaya runs."""
+
 from __future__ import annotations
 import asyncio
 import logging
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
-from ..exceptions import OrchestratorError
-from ..shared import AuthConfig, ContainerLimits, InstanceResult, RetryConfig, InstanceStatus
+from ..shared import (
+    AuthConfig,
+    ContainerLimits,
+    InstanceResult,
+    RetryConfig,
+    InstanceStatus,
+)
 from .event_bus import EventBus
 from .instance_manager import InstanceManager
 from .resume_manager import resume_run as resume_run_helper
@@ -16,6 +22,7 @@ from .state import InstanceInfo, RunState, StateManager
 from .strategy_runner import run_strategy as run_strategy_helper
 
 logger = logging.getLogger(__name__)
+
 
 class Orchestrator:
     """Orchestrates multiple AI coding instances according to strategies."""
@@ -86,13 +93,16 @@ class Orchestrator:
 
         self.event_bus: Optional[EventBus] = None
         self.state_manager: Optional[StateManager] = None
-        self.instance_manager = InstanceManager(self, randomize_queue_order=self._randomize_queue_order)
+        self.instance_manager = InstanceManager(
+            self, randomize_queue_order=self._randomize_queue_order
+        )
         self.repo_path: Optional[Path] = None
 
         if self.auth_config:
             logger.info("Pitaya initialized with auth_config (secrets redacted)")
         else:
             logger.warning("Pitaya initialized with NO auth_config")
+
     def set_pending_redaction_patterns(self, patterns: Optional[List[str]]) -> None:
         """Store regex patterns to redact when the event bus is created."""
         try:
@@ -130,6 +140,7 @@ class Orchestrator:
             int(self.max_parallel_startup or self.max_parallel_instances or 1),
         )
         self._initialized = True
+
     async def shutdown(self) -> None:
         """Shutdown Pitaya cleanly."""
         logger.info("Shutting down Pitaya")
@@ -137,14 +148,21 @@ class Orchestrator:
 
         if self.state_manager and self.state_manager.current_state:
             try:
-                for instance in list(self.state_manager.current_state.instances.values()):
-                    if instance.state in (InstanceStatus.RUNNING, InstanceStatus.QUEUED):
+                for instance in list(
+                    self.state_manager.current_state.instances.values()
+                ):
+                    if instance.state in (
+                        InstanceStatus.RUNNING,
+                        InstanceStatus.QUEUED,
+                    ):
                         self.state_manager.update_instance_state(
                             instance_id=instance.instance_id,
                             state=InstanceStatus.INTERRUPTED,
                         )
             except Exception as exc:
-                logger.warning("Failed to mark running instances as interrupted: %s", exc)
+                logger.warning(
+                    "Failed to mark running instances as interrupted: %s", exc
+                )
 
         await self.instance_manager.shutdown()
 
@@ -155,7 +173,10 @@ class Orchestrator:
                 if inst.state in (InstanceStatus.RUNNING, InstanceStatus.INTERRUPTED)
             ]
             if running_instances:
-                logger.info("Stopping %s running containers in parallel...", len(running_instances))
+                logger.info(
+                    "Stopping %s running containers in parallel...",
+                    len(running_instances),
+                )
                 from ..instance_runner.docker_manager import DockerManager
 
                 async def _stop(inst: InstanceInfo) -> None:
@@ -166,9 +187,13 @@ class Orchestrator:
                             await docker_mgr.stop_container(container, timeout=1)
                             logger.info("Stopped container %s", inst.container_name)
                     except Exception as exc:
-                        logger.warning("Failed to stop container %s: %s", inst.container_name, exc)
+                        logger.warning(
+                            "Failed to stop container %s: %s", inst.container_name, exc
+                        )
 
-                await asyncio.gather(*[_stop(inst) for inst in running_instances], return_exceptions=True)
+                await asyncio.gather(
+                    *[_stop(inst) for inst in running_instances], return_exceptions=True
+                )
 
         if self.event_bus:
             try:

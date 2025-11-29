@@ -53,7 +53,9 @@ def _build_summary(
     }
 
 
-def _build_meta(state, summary_data, run_logs_dir, results_dir, orchestrator) -> Dict[str, Any]:
+def _build_meta(
+    state, summary_data, run_logs_dir, results_dir, orchestrator
+) -> Dict[str, Any]:
     return {
         "run_id": summary_data["run_id"],
         "started_at": summary_data["started_at"],
@@ -65,8 +67,12 @@ def _build_meta(state, summary_data, run_logs_dir, results_dir, orchestrator) ->
         "orchestrator": {
             "max_parallel_instances": orchestrator.max_parallel_instances,
             "max_parallel_startup": orchestrator.max_parallel_startup,
-            "branch_namespace": getattr(orchestrator, "branch_namespace", "hierarchical"),
-            "randomize_queue_order": getattr(orchestrator, "randomize_queue_order", False),
+            "branch_namespace": getattr(
+                orchestrator, "branch_namespace", "hierarchical"
+            ),
+            "randomize_queue_order": getattr(
+                orchestrator, "randomize_queue_order", False
+            ),
             "snapshot_interval": orchestrator.snapshot_interval,
             "event_buffer_size": orchestrator.event_buffer_size,
         },
@@ -115,7 +121,9 @@ def _append_strategy_info(state, summary_data) -> None:
             "state": strat_info.state,
             "config": strat_info.config,
             "started_at": strat_info.started_at.isoformat(),
-            "completed_at": strat_info.completed_at.isoformat() if strat_info.completed_at else None,
+            "completed_at": (
+                strat_info.completed_at.isoformat() if strat_info.completed_at else None
+            ),
             "result_count": len(strat_info.results) if strat_info.results else 0,
         }
 
@@ -134,13 +142,27 @@ def _append_results(results, state, summary_data, branches: List[str]) -> None:
                 "error": result.error,
                 "has_changes": result.has_changes,
                 "duration_seconds": result.duration_seconds,
-                "cost": (result.metrics.get("total_cost", 0.0) if result.metrics else 0.0),
-                "tokens": (result.metrics.get("total_tokens", 0) if result.metrics else 0),
-                "input_tokens": (result.metrics.get("input_tokens", 0) if result.metrics else 0),
-                "output_tokens": (result.metrics.get("output_tokens", 0) if result.metrics else 0),
-                "cost_usd": (result.metrics.get("total_cost", 0.0) if result.metrics else 0.0),
-                "tokens_in": (result.metrics.get("input_tokens", 0) if result.metrics else 0),
-                "tokens_out": (result.metrics.get("output_tokens", 0) if result.metrics else 0),
+                "cost": (
+                    result.metrics.get("total_cost", 0.0) if result.metrics else 0.0
+                ),
+                "tokens": (
+                    result.metrics.get("total_tokens", 0) if result.metrics else 0
+                ),
+                "input_tokens": (
+                    result.metrics.get("input_tokens", 0) if result.metrics else 0
+                ),
+                "output_tokens": (
+                    result.metrics.get("output_tokens", 0) if result.metrics else 0
+                ),
+                "cost_usd": (
+                    result.metrics.get("total_cost", 0.0) if result.metrics else 0.0
+                ),
+                "tokens_in": (
+                    result.metrics.get("input_tokens", 0) if result.metrics else 0
+                ),
+                "tokens_out": (
+                    result.metrics.get("output_tokens", 0) if result.metrics else 0
+                ),
                 "commit_count": commit_stats.get("commit_count", 0),
                 "lines_added": commit_stats.get("insertions", 0),
                 "lines_deleted": commit_stats.get("deletions", 0),
@@ -154,7 +176,9 @@ def _append_results(results, state, summary_data, branches: List[str]) -> None:
             branches.append(result.branch_name)
 
 
-async def save_results(orchestrator, run_id: str, results: List[InstanceResult]) -> None:
+async def save_results(
+    orchestrator, run_id: str, results: List[InstanceResult]
+) -> None:
     """Persist run outputs to ./results and ./logs."""
     results_dir = Path("./results") / run_id
     results_dir.mkdir(parents=True, exist_ok=True)
@@ -167,7 +191,9 @@ async def save_results(orchestrator, run_id: str, results: List[InstanceResult])
         return
 
     try:
-        any_interrupted = any(i.state == InstanceStatus.INTERRUPTED for i in state.instances.values())
+        any_interrupted = any(
+            i.state == InstanceStatus.INTERRUPTED for i in state.instances.values()
+        )
     except Exception:
         any_interrupted = False
     total_instances, completed_instances, failed_instances = compute_counts(state)
@@ -215,7 +241,11 @@ async def save_results(orchestrator, run_id: str, results: List[InstanceResult])
                 result.branch_name or "",
                 result.status,
                 f"{result.duration_seconds:.1f}" if result.duration_seconds else "0",
-                f"{result.metrics.get('total_cost', 0):.2f}" if result.metrics else "0.00",
+                (
+                    f"{result.metrics.get('total_cost', 0):.2f}"
+                    if result.metrics
+                    else "0.00"
+                ),
                 str(result.metrics.get("total_tokens", 0) if result.metrics else 0),
                 str(result.metrics.get("input_tokens", 0) if result.metrics else 0),
                 str(result.metrics.get("output_tokens", 0) if result.metrics else 0),
@@ -239,9 +269,21 @@ async def save_results(orchestrator, run_id: str, results: List[InstanceResult])
                 "config": strat_info.config,
                 "results": [
                     {
-                        "branch_name": (getattr(r, "branch_name", None) if not isinstance(r, dict) else r.get("branch_name")),
-                        "success": (getattr(r, "success", False) if not isinstance(r, dict) else bool(r.get("success", False))),
-                        "metadata": (getattr(r, "metadata", None) if not isinstance(r, dict) else r.get("metadata")),
+                        "branch_name": (
+                            getattr(r, "branch_name", None)
+                            if not isinstance(r, dict)
+                            else r.get("branch_name")
+                        ),
+                        "success": (
+                            getattr(r, "success", False)
+                            if not isinstance(r, dict)
+                            else bool(r.get("success", False))
+                        ),
+                        "metadata": (
+                            getattr(r, "metadata", None)
+                            if not isinstance(r, dict)
+                            else r.get("metadata")
+                        ),
                     }
                     for r in (strat_info.results or [])
                 ],

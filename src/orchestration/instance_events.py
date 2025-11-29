@@ -46,7 +46,10 @@ def progress_payload(event: Dict[str, Any]) -> tuple[Optional[str], Dict[str, An
     elif et == "instance.result_collection_started":
         phase, activity = "result_collection", "Collecting results..."
     elif et == "instance.branch_imported":
-        phase, activity = "branch_imported", f"Imported branch {data.get('branch_name','')}"
+        phase, activity = (
+            "branch_imported",
+            f"Imported branch {data.get('branch_name','')}",
+        )
     elif et == "instance.no_changes":
         phase, activity = "no_changes", "No changes"
     elif et == "instance.workspace_cleaned":
@@ -94,7 +97,9 @@ def build_event_callback(orchestrator, instance_id: str, task_key: Optional[str]
         session_id = data.get("session_id")
         if session_id:
             try:
-                orchestrator.state_manager.update_instance_session_id(instance_id, session_id)
+                orchestrator.state_manager.update_instance_session_id(
+                    instance_id, session_id
+                )
             except Exception:
                 pass
         try:
@@ -149,7 +154,9 @@ def truncate_final_message(
         return truncated, True, ""
 
 
-async def heartbeat_monitor(orchestrator, instance_id: str, interval: float = 2.0) -> None:
+async def heartbeat_monitor(
+    orchestrator, instance_id: str, interval: float = 2.0
+) -> None:
     """Emit periodic debug logs about last observed event."""
     try:
         while True:
@@ -211,7 +218,9 @@ def map_error_type(result, info) -> str:
         ),
     )
     try:
-        if (info.metadata or {}).get("network_egress") == "offline" and mapped != "canceled":
+        if (info.metadata or {}).get(
+            "network_egress"
+        ) == "offline" and mapped != "canceled":
             mapped = "network"
     except Exception:
         pass

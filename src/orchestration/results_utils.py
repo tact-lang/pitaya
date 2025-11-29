@@ -114,7 +114,10 @@ def write_metrics_csv(events_file: Path, dest: Path) -> None:
         inst_cost: Dict[str, float] = {}
         if not events_file.exists():
             return
-        with open(events_file, "r", encoding="utf-8") as ef, open(dest, "w", encoding="utf-8") as tf:
+        with (
+            open(events_file, "r", encoding="utf-8") as ef,
+            open(dest, "w", encoding="utf-8") as tf,
+        ):
             tf.write(
                 "timestamp,active_instances,completed_instances,failed_instances,total_cost,total_tokens,event_type\n"
             )
@@ -137,13 +140,21 @@ def write_metrics_csv(events_file: Path, dest: Path) -> None:
                     failed_set.add(iid)
                 elif et == "instance.agent_turn_complete" and iid:
                     tm = data.get("turn_metrics", {})
-                    inst_tokens[iid] = inst_tokens.get(iid, 0) + int(tm.get("tokens", 0) or 0)
-                    inst_cost[iid] = inst_cost.get(iid, 0.0) + float(tm.get("cost", 0.0) or 0.0)
+                    inst_tokens[iid] = inst_tokens.get(iid, 0) + int(
+                        tm.get("tokens", 0) or 0
+                    )
+                    inst_cost[iid] = inst_cost.get(iid, 0.0) + float(
+                        tm.get("cost", 0.0) or 0.0
+                    )
                 elif et == "instance.agent_completed" and iid:
                     m = data.get("metrics", {})
                     if m:
-                        inst_tokens[iid] = int(m.get("total_tokens", inst_tokens.get(iid, 0)))
-                        inst_cost[iid] = float(m.get("total_cost", inst_cost.get(iid, 0.0)))
+                        inst_tokens[iid] = int(
+                            m.get("total_tokens", inst_tokens.get(iid, 0))
+                        )
+                        inst_cost[iid] = float(
+                            m.get("total_cost", inst_cost.get(iid, 0.0))
+                        )
                 total_cost = sum(inst_cost.values())
                 total_tokens = sum(inst_tokens.values())
                 tf.write(

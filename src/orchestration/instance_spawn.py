@@ -1,4 +1,5 @@
 """Instance spawn helpers."""
+
 from __future__ import annotations
 
 import asyncio
@@ -97,7 +98,9 @@ def _register_instance_if_needed(
     return state_manager.current_state.instances[instance_id]
 
 
-def _attach_to_strategy(state_manager, strategy_execution_id: str, instance_id: str) -> None:
+def _attach_to_strategy(
+    state_manager, strategy_execution_id: str, instance_id: str
+) -> None:
     if (
         strategy_execution_id
         and strategy_execution_id in state_manager.current_state.strategies
@@ -107,7 +110,9 @@ def _attach_to_strategy(state_manager, strategy_execution_id: str, instance_id: 
             ids.append(instance_id)
 
 
-def _emit_terminal_if_missing(orchestrator, instance_id: str, info: InstanceInfo) -> None:
+def _emit_terminal_if_missing(
+    orchestrator, instance_id: str, info: InstanceInfo
+) -> None:
     """Emit canonical terminal events when resuming and the log is missing them."""
     task_key = (info.metadata or {}).get("key")
     if not task_key or not orchestrator.event_bus:
@@ -260,7 +265,9 @@ async def spawn_instance(
                 has_changes=False,
                 metrics={},
                 session_id=info.session_id,
-                status="success" if info.state == InstanceStatus.COMPLETED else "failed",
+                status=(
+                    "success" if info.state == InstanceStatus.COMPLETED else "failed"
+                ),
             )
         future.set_result(info.result)
         manager.futures[instance_id] = future

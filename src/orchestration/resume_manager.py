@@ -31,7 +31,13 @@ async def resume_run(orchestrator, run_id: str) -> List[InstanceResult]:
     orchestrator.repo_path = saved_state.repo_path
 
     try:
-        counts = {"queued": 0, "running": 0, "interrupted": 0, "completed": 0, "failed": 0}
+        counts = {
+            "queued": 0,
+            "running": 0,
+            "interrupted": 0,
+            "completed": 0,
+            "failed": 0,
+        }
         for info in orchestrator.state_manager.current_state.instances.values():
             counts[info.state.value] = counts.get(info.state.value, 0) + 1
         logger.info(
@@ -48,7 +54,9 @@ async def resume_run(orchestrator, run_id: str) -> List[InstanceResult]:
 
     scheduled_ids = await schedule_instances(orchestrator, saved_state)
     if scheduled_ids:
-        logger.info("resume_run: enqueued %s instance(s) for resume", len(scheduled_ids))
+        logger.info(
+            "resume_run: enqueued %s instance(s) for resume", len(scheduled_ids)
+        )
 
     reentry_results = await reenter_strategies(orchestrator, run_id)
 

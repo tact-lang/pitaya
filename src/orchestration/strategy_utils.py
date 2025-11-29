@@ -44,8 +44,13 @@ def prepare_event_bus(orchestrator, run_id: str) -> None:
         pass
 
 
-def detect_default_workspace_branches(orchestrator, repo_path: Path, base_branch: str) -> None:
-    if getattr(orchestrator, "default_workspace_include_branches", None) not in (None, []):
+def detect_default_workspace_branches(
+    orchestrator, repo_path: Path, base_branch: str
+) -> None:
+    if getattr(orchestrator, "default_workspace_include_branches", None) not in (
+        None,
+        [],
+    ):
         return
     try:
         import subprocess as sp
@@ -76,7 +81,12 @@ def resolve_strategy(strategy_name: str) -> Tuple[Any, str]:
 
 
 def emit_strategy_started(
-    orchestrator, strategy_id: str, strategy, effective_name: str, run_id: str, config: Optional[Dict[str, Any]]
+    orchestrator,
+    strategy_id: str,
+    strategy,
+    effective_name: str,
+    run_id: str,
+    config: Optional[Dict[str, Any]],
 ) -> None:
     orchestrator.event_bus.emit(
         "strategy.started",
@@ -97,7 +107,9 @@ def emit_strategy_started(
     )
 
 
-def emit_strategy_completed(orchestrator, strategy_id: str, results, run_id: str) -> None:
+def emit_strategy_completed(
+    orchestrator, strategy_id: str, results, run_id: str
+) -> None:
     orchestrator.event_bus.emit(
         "strategy.completed",
         {

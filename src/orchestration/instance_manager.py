@@ -47,16 +47,10 @@ class InstanceManager:
 
     def __init__(
         self,
-        orchestrator: "Orchestrator",
+        orchestrator,  # Orchestrator; string annotation avoided to prevent cycle in runtime typing
         *,
         randomize_queue_order: bool = False,
     ) -> None:
-        # Lazy import to avoid circular typing
-        from typing import TYPE_CHECKING
-
-        if TYPE_CHECKING:  # pragma: no cover - type checking only
-            from .orchestrator import Orchestrator
-
         self._orch = orchestrator
         self._randomize_queue_order = randomize_queue_order
         self._instance_queue: asyncio.Queue | RandomAsyncQueue = (
@@ -115,7 +109,9 @@ class InstanceManager:
             fut.set_result(interrupt_result)
             try:
                 self._orch.state_manager.update_instance_state(
-                    instance_id=iid, state=InstanceStatus.INTERRUPTED, result=interrupt_result
+                    instance_id=iid,
+                    state=InstanceStatus.INTERRUPTED,
+                    result=interrupt_result,
                 )
             except Exception:
                 pass
@@ -188,7 +184,11 @@ class InstanceManager:
         if info:
             cpu_need = max(
                 1,
-                int((info.metadata or {}).get("container_cpu", self._orch.container_limits.cpu_count)),
+                int(
+                    (info.metadata or {}).get(
+                        "container_cpu", self._orch.container_limits.cpu_count
+                    )
+                ),
             )
             mem_need = max(
                 1,
