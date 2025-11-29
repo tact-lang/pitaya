@@ -8,6 +8,7 @@ import shutil
 from pathlib import Path
 from typing import Dict, Optional
 
+from .git_common import run_command
 from .git_importer import (
     BranchImporter,
     ImportBranchRequest,
@@ -82,6 +83,11 @@ class GitOperations:
         )
         result = await self._branch_importer.import_branch(request)
         return result.to_dict()
+
+    async def _run_command(self, cmd: list[str]) -> tuple[int, str]:
+        """Backward-compatible helper used by runner for git status/commit stats."""
+        result = await run_command(cmd)
+        return result.code, result.output
 
     async def cleanup_workspace(self, workspace_dir: Path) -> None:
         """Remove a temporary workspace directory."""
