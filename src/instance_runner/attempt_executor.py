@@ -237,7 +237,7 @@ class AttemptExecutor(FailureHandlingMixin):
         logger.info(
             "Instance %s canceled; recording interruption", self.params.instance_id
         )
-        self._emit_failure("canceled", "canceled", will_retry=False)
+        self._emit_canceled()
         if self.docker_manager and self.container:
             try:
                 await self.docker_manager.stop_heartbeat(self.container)

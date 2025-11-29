@@ -48,6 +48,18 @@ class EventEmitterMixin:
             },
         )
 
+    def _emit_canceled(self) -> None:
+        self._emit_event(
+            "instance.canceled",
+            {
+                "error": "canceled",
+                "error_type": "canceled",
+                "attempt": self.attempt_number,
+                "total_attempts": self.total_attempts,
+                "will_retry": False,
+            },
+        )
+
     def _emit_runner_completion(self, final_branch: Optional[str]) -> None:
         try:
             self._emit_event(
