@@ -285,12 +285,7 @@ class Orchestrator:
             try:
                 event_log_path = self.logs_dir / run_id / "events.jsonl"
                 if self.event_bus.persist_path != event_log_path:
-                    try:
-                        self.event_bus.close()
-                    except Exception:
-                        pass
-                    self.event_bus.persist_path = event_log_path
-                    self.event_bus._open_persist_file()
+                    self.event_bus.reconfigure_persistence(event_log_path, run_id)
             except Exception:
                 pass
         return self.event_bus.get_events_since(
