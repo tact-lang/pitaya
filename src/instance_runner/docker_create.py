@@ -20,7 +20,9 @@ logger = logging.getLogger(__name__)
 
 
 async def create_container(ctx: CreateContext):
-    ctx.phase_start = ctx.phase_start or 0.0
+    import time
+
+    ctx.phase_start = time.monotonic()
     logger.info(
         f"create_container entry: name={ctx.container_name}, image={ctx.image}, reuse={ctx.reuse_container}, ws={ctx.workspace_dir}"
     )
