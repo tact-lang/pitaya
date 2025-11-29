@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 from ..shared import InstanceResult, InstanceStatus
+from .instance_events import strategy_execution_id, truncate_final_message
 from .state import InstanceInfo
 
 logger = logging.getLogger(__name__)
@@ -129,11 +130,7 @@ def _emit_terminal_if_missing(orchestrator, instance_id: str, info: InstanceInfo
     if seen_terminal:
         return
 
-    strategy_execution_id = None
-    for sid, strat in orchestrator.state_manager.current_state.strategies.items():
-        if instance_id in strat.instance_ids:
-            strategy_execution_id = sid
-            break
+    strategy_exec_id = strategy_execution_id(orchestrator, instance_id)
 
     if info.state == InstanceStatus.COMPLETED:
         result = info.result
@@ -149,30 +146,16 @@ def _emit_terminal_if_missing(orchestrator, instance_id: str, info: InstanceInfo
             "duplicate_of_branch": getattr(result, "duplicate_of_branch", None),
             "dedupe_reason": getattr(result, "dedupe_reason", None),
         }
-        full_msg = getattr(result, "final_message", None) or ""
-        msg_bytes = full_msg.encode("utf-8", errors="ignore")
-        max_bytes = 65536
-        truncated_flag = False
-        rel_path = ""
-        out_msg = full_msg
-        if max_bytes > 0 and len(msg_bytes) > max_bytes:
-            truncated_flag = True
-            out_msg = msg_bytes[:max_bytes].decode("utf-8", errors="ignore")
-            try:
-                run_logs = orchestrator.logs_dir / orchestrator.state_manager.current_state.run_id
-                dest_dir = run_logs / "final_messages"
-                dest_dir.mkdir(parents=True, exist_ok=True)
-                fname = f"{instance_id}.txt"
-                with open(dest_dir / fname, "w", encoding="utf-8", errors="ignore") as fh:
-                    fh.write(full_msg)
-                rel_path = f"final_messages/{fname}"
-            except Exception:
-                truncated_flag = False
-                rel_path = ""
+        out_msg, truncated_flag, rel_path = truncate_final_message(
+            getattr(result, "final_message", "") or "",
+            65536,
+            orchestrator.logs_dir / orchestrator.state_manager.current_state.run_id,
+            instance_id,
+        )
         orchestrator.event_bus.emit_canonical(
             type="task.completed",
             run_id=orchestrator.state_manager.current_state.run_id,
-            strategy_execution_id=strategy_execution_id,
+            strategy_execution_id=strategy_exec_id,
             key=task_key,
             payload={
                 "key": task_key,
@@ -188,7 +171,7 @@ def _emit_terminal_if_missing(orchestrator, instance_id: str, info: InstanceInfo
         orchestrator.event_bus.emit_canonical(
             type="task.failed",
             run_id=orchestrator.state_manager.current_state.run_id,
-            strategy_execution_id=strategy_execution_id,
+            strategy_execution_id=strategy_exec_id,
             key=task_key,
             payload={
                 "key": task_key,
@@ -202,7 +185,7 @@ def _emit_terminal_if_missing(orchestrator, instance_id: str, info: InstanceInfo
         orchestrator.event_bus.emit_canonical(
             type="task.interrupted",
             run_id=orchestrator.state_manager.current_state.run_id,
-            strategy_execution_id=strategy_execution_id,
+            strategy_execution_id=strategy_exec_id,
             key=task_key,
             payload={"key": task_key, "instance_id": instance_id},
         )

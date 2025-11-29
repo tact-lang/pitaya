@@ -90,11 +90,7 @@ class Orchestrator:
         self.repo_path: Optional[Path] = None
 
         if self.auth_config:
-            logger.info(
-                "Pitaya initialized with auth_config: oauth_token=%s, api_key=%s",
-                "***" if self.auth_config.oauth_token else None,
-                "***" if self.auth_config.api_key else None,
-            )
+            logger.info("Pitaya initialized with auth_config (secrets redacted)")
         else:
             logger.warning("Pitaya initialized with NO auth_config")
     def set_pending_redaction_patterns(self, patterns: Optional[List[str]]) -> None:
@@ -103,6 +99,7 @@ class Orchestrator:
             self._pending_redaction_patterns = list(patterns or [])
         except Exception:
             self._pending_redaction_patterns = []
+
     async def initialize(self) -> None:
         """Initialize state manager, event bus, and instance executors."""
         self.state_dir.mkdir(parents=True, exist_ok=True)
