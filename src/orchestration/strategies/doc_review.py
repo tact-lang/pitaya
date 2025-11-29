@@ -24,7 +24,7 @@ import re
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional, TYPE_CHECKING, Tuple
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
 import yaml
 
@@ -33,6 +33,9 @@ from .base import Strategy, StrategyConfig
 
 if TYPE_CHECKING:
     from ..strategy_context import StrategyContext
+
+
+__all__ = ["DocReviewConfig", "DocReviewStrategy"]
 
 
 @dataclass

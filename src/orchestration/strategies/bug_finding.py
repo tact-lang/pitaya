@@ -12,7 +12,7 @@ import logging
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 from ...shared import InstanceResult
 from .base import Strategy, StrategyConfig
@@ -21,6 +21,8 @@ if TYPE_CHECKING:
     from ..strategy_context import StrategyContext
 
 logger = logging.getLogger(__name__)
+
+__all__ = ["BugFindingConfig", "BugFindingStrategy"]
 
 
 @dataclass

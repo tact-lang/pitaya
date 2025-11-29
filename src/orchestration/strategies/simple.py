@@ -5,7 +5,7 @@ Baseline one-shot execution — no parallelism, no extra phases.
 """
 
 import logging
-from typing import List, TYPE_CHECKING
+from typing import TYPE_CHECKING, List
 
 from ...shared import InstanceResult
 from ...exceptions import StrategyError
@@ -15,6 +15,8 @@ if TYPE_CHECKING:
     from ..strategy_context import StrategyContext
 
 logger = logging.getLogger(__name__)
+
+__all__ = ["SimpleStrategy"]
 
 
 class SimpleStrategy(Strategy):
