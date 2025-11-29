@@ -15,6 +15,7 @@ from .strategy_context import StrategyContext
 from .strategy_utils import (
     detect_default_workspace_branches,
     emit_strategy_completed,
+    emit_strategy_failed,
     emit_strategy_started,
     generate_run_id,
     prepare_event_bus,
@@ -49,7 +50,17 @@ async def _execute_strategy(
     emit_strategy_started(
         orchestrator, strategy_id, strategy, effective_name, run_id, strategy_config
     )
-    results = await strategy.execute(prompt=prompt, base_branch=base_branch, ctx=ctx)
+    try:
+        results = await strategy.execute(
+            prompt=prompt, base_branch=base_branch, ctx=ctx
+        )
+    except Exception as exc:
+        orchestrator.state_manager.update_strategy_state(
+            strategy_id=strategy_id,
+            state="failed",
+        )
+        emit_strategy_failed(orchestrator, strategy_id, run_id, str(exc))
+        raise
     state_value = (
         "completed"
         if any(getattr(r, "success", False) for r in (results or []))
@@ -76,8 +87,10 @@ async def _run_multiple(
     runs: int,
 ) -> List[InstanceResult]:
     tasks: List[asyncio.Task] = []
+    strategy_ids: List[str] = []
     for _ in range(runs):
         strategy_id = str(uuid.uuid4())
+        strategy_ids.append(strategy_id)
         orchestrator.state_manager.register_strategy(
             strategy_id=strategy_id,
             strategy_name=effective_strategy_name,
@@ -99,11 +112,19 @@ async def _run_multiple(
         )
     aggregated: List[InstanceResult] = []
     results = await asyncio.gather(*tasks, return_exceptions=True)
-    for res in results:
+    failures: List[str] = []
+    for strat_id, res in zip(strategy_ids, results):
         if isinstance(res, Exception):
             logger.error("Strategy execution failed: %s", res)
+            orchestrator.state_manager.update_strategy_state(
+                strategy_id=strat_id, state="failed"
+            )
+            emit_strategy_failed(orchestrator, strat_id, run_id, str(res))
+            failures.append(strat_id)
             continue
         aggregated.extend(res)
+    if failures:
+        raise OrchestratorError(f"Strategies failed: {', '.join(failures)}")
     return aggregated
 
 
@@ -115,7 +136,7 @@ async def _run_single(
     prompt: str,
     base_branch: str,
     run_id: str,
-    strategy_config: Optional[Dict[str, any]],
+    strategy_config: Optional[Dict[str, Any]],
 ) -> List[InstanceResult]:
     strategy_id = str(uuid.uuid4())
     orchestrator.state_manager.register_strategy(

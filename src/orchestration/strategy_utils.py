@@ -133,3 +133,21 @@ def emit_strategy_completed(
         strategy_execution_id=strategy_id,
         payload=payload,
     )
+
+
+def emit_strategy_failed(
+    orchestrator, strategy_id: str, run_id: str, reason: str
+) -> None:
+    orchestrator.event_bus.emit(
+        "strategy.failed",
+        {
+            "strategy_id": strategy_id,
+            "error": reason,
+        },
+    )
+    orchestrator.event_bus.emit_canonical(
+        type="strategy.completed",
+        run_id=run_id,
+        strategy_execution_id=strategy_id,
+        payload={"status": "failed", "reason": reason},
+    )
