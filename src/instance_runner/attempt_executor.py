@@ -20,6 +20,7 @@ from .container_manager import ContainerManager
 from .git_operations import GitOperations
 from .import_manager import ImportManager
 from .attempt_mixins import FailureHandlingMixin
+from .attempt_timeout import TimeoutCleanupMixin
 from .runner_params import RunnerParams
 from .workspace_manager import WorkspaceManager
 from ..shared import InstanceResult
@@ -28,7 +29,7 @@ from .docker_manager import DockerManager
 logger = logging.getLogger(__name__)
 
 
-class AttemptExecutor(FailureHandlingMixin):
+class AttemptExecutor(FailureHandlingMixin, TimeoutCleanupMixin):
     """Encapsulates a single attempt, including all phases and cleanup."""
 
     def __init__(
@@ -212,9 +213,23 @@ class AttemptExecutor(FailureHandlingMixin):
         self._emit_failure(
             "timeout", str(exc), will_retry=self._will_retry("timeout", str(exc))
         )
-        await self._cleanup_failure(remove_home_volume=False)
-        return self._failure_result(
-            error=str(exc), error_type="timeout", status="timeout"
+        await self._cleanup_timeout()
+        completed_at = datetime.now(timezone.utc).isoformat()
+        return InstanceResult(
+            success=False,
+            error=str(exc),
+            error_type="timeout",
+            session_id=self.agent_session_id,
+            container_name=self.params.container_name,
+            duration_seconds=time.time() - self.start_time,
+            started_at=self.started_at,
+            completed_at=completed_at,
+            retry_attempts=self.attempt_number - 1,
+            log_path=self.log_path,
+            workspace_path=str(self.workspace_dir) if self.workspace_dir else None,
+            status="timeout",
+            final_message=self.final_message,
+            metrics=self.metrics,
         )
 
     async def _handle_known_failure(self, exc: Exception) -> InstanceResult:
@@ -228,7 +243,7 @@ class AttemptExecutor(FailureHandlingMixin):
         self._emit_failure(
             err_type, str(exc), will_retry=self._will_retry(err_type, str(exc))
         )
-        await self._cleanup_failure(remove_home_volume=False)
+        await self._cleanup_failure(remove_home_volume=True)
         return self._failure_result(
             error=str(exc), error_type=err_type, status="failed"
         )
