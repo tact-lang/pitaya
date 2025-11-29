@@ -184,6 +184,7 @@ async def _run_instance_attempt(
             run_id=run_id,
             strategy_execution_id=strategy_execution_id,
             allow_overwrite_protected_refs=allow_overwrite_protected_refs,
+            force_commit=force_commit,
         )
         branch_name = git_ops_result.get("target_branch") or branch_name
         has_changes = git_ops_result.get("has_changes") == "true"
@@ -284,9 +285,15 @@ async def _run_instance_attempt(
             workspace_dir,
         )
     finally:
-        if docker_manager and container and not finalize:
+        if docker_manager and container and finalize:
             try:
                 await docker_manager.cleanup_container(container)
+            except Exception:
+                pass
+        if docker_manager and workspace_dir and finalize:
+            try:
+                git_ops = GitOperations()
+                await git_ops.cleanup_workspace(workspace_dir)
             except Exception:
                 pass
         if docker_manager:

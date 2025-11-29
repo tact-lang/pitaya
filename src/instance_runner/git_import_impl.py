@@ -16,6 +16,7 @@ from .git_import_logic import (
     resolve_branch_heads,
 )
 from .git_utils import is_protected_ref as _is_protected_ref
+from .git_run_cmd_impl import run_command
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +34,7 @@ async def import_branch(
     run_id: Optional[str] = None,
     strategy_execution_id: Optional[str] = None,
     allow_overwrite_protected_refs: bool = False,
+    force_commit: bool = False,
 ) -> Dict[str, Optional[str]]:
     lock_fh = None
     try:
@@ -42,6 +44,9 @@ async def import_branch(
                 "BASE_BRANCH file not found - workspace not properly prepared"
             )
         base_branch = base_branch_file.read_text().strip()
+
+        if force_commit:
+            await _force_commit_workspace(git_ops, workspace_dir)
 
         workspace_head, base_commit, branch_exists = await resolve_branch_heads(
             git_ops, repo_path, workspace_dir, branch_name
@@ -215,6 +220,29 @@ async def import_branch(
         raise GitError(f"Failed to import branch: {e}")
     finally:
         release_import_lock(lock_fh)
+
+
+async def _force_commit_workspace(git_ops, workspace_dir: Path) -> None:
+    """Commit any pending changes in the workspace when force_commit is requested."""
+
+    status_cmd = ["git", "-C", str(workspace_dir), "status", "--porcelain"]
+    rc, out = await run_command(status_cmd)
+    if rc != 0:
+        raise GitError(f"Failed to check workspace status before force commit: {out}")
+
+    if not out.strip():
+        return
+
+    add_cmd = ["git", "-C", str(workspace_dir), "add", "-A"]
+    rc, out = await run_command(add_cmd)
+    if rc != 0:
+        raise GitError(f"Failed to stage changes for force commit: {out}")
+
+    message = "Pitaya force_commit workspace snapshot"
+    commit_cmd = ["git", "-C", str(workspace_dir), "commit", "-m", message]
+    rc, out = await run_command(commit_cmd)
+    if rc != 0:
+        raise GitError(f"Failed to create force commit: {out}")
 
 
 __all__ = ["import_branch"]
