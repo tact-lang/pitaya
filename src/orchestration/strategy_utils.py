@@ -31,10 +31,7 @@ def prepare_event_bus(orchestrator, run_id: str) -> None:
         )
     else:
         event_log_path.parent.mkdir(parents=True, exist_ok=True)
-        if orchestrator.event_bus._persist_file:
-            orchestrator.event_bus.close()
-        orchestrator.event_bus.persist_path = event_log_path
-        orchestrator.event_bus._open_persist_file()
+        orchestrator.event_bus.reconfigure_persistence(event_log_path, run_id)
     try:
         if orchestrator._pending_redaction_patterns:
             orchestrator.event_bus.set_custom_redaction_patterns(
