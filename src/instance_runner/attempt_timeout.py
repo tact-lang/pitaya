@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+
 class TimeoutCleanupMixin:
     """Provides timeout cleanup that preserves workspace for inspection."""
 
