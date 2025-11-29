@@ -3,9 +3,12 @@ from __future__ import annotations
 from argparse import Namespace
 from io import StringIO
 
+import pytest
+
 from rich.console import Console
 
 from src.orchestration.cli import headless
+from src.orchestration.cli import orchestrator_runner
 from src.orchestration.cli.runner_setup import apply_resume_overrides
 from src.orchestration.cli.results_display import (
     Totals,
@@ -101,3 +104,50 @@ def test_coalesce_totals_prefers_state_when_present() -> None:
 
     merged_fallback = _coalesce_totals(None, fallback)
     assert merged_fallback == fallback
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_shutdown_on_init_failure(monkeypatch):
+    class BoomOrch:
+        def __init__(self):
+            self.shutdown_called = False
+
+        async def initialize(self):
+            raise RuntimeError("init fail")
+
+        async def shutdown(self):
+            self.shutdown_called = True
+
+    orch = BoomOrch()
+
+    monkeypatch.setattr(orchestrator_runner, "_validate_docker", lambda *a, **k: None)
+    monkeypatch.setattr(orchestrator_runner, "_preflight", lambda *a, **k: None)
+    monkeypatch.setattr(
+        orchestrator_runner, "load_effective_config", lambda *a, **k: {}
+    )
+    monkeypatch.setattr(orchestrator_runner, "setup_logging", lambda *a, **k: None)
+    monkeypatch.setattr(
+        orchestrator_runner, "validate_full_config", lambda *a, **k: True
+    )
+    monkeypatch.setattr(orchestrator_runner, "get_auth_config", lambda *a, **k: None)
+    monkeypatch.setattr(
+        orchestrator_runner, "_build_orchestrator", lambda *a, **k: orch
+    )
+    monkeypatch.setattr(
+        orchestrator_runner, "_apply_resume_suffix", lambda *a, **k: None
+    )
+    monkeypatch.setattr(
+        orchestrator_runner, "_apply_redaction_patterns", lambda *a, **k: None
+    )
+
+    args = Namespace(
+        json=False,
+        output="streaming",
+        resume=None,
+        prompt="",
+    )
+
+    with pytest.raises(RuntimeError):
+        await orchestrator_runner._run_once(Console(file=StringIO()), args, "run_x")
+
+    assert orch.shutdown_called is True

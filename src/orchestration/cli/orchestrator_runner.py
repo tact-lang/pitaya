@@ -247,9 +247,17 @@ async def _run_once(
     _apply_resume_suffix(orch, full_config)
     _apply_redaction_patterns(orch, full_config)
 
-    await orch.initialize()
-    rc = await _dispatch(console, orch, args, full_config, run_id)
-    return rc, orch
+    try:
+        await orch.initialize()
+        rc = await _dispatch(console, orch, args, full_config, run_id)
+        return rc, orch
+    except BaseException:
+        # Ensure we tear down even if initialize or dispatch fail so containers are cleaned up.
+        try:
+            await orch.shutdown()
+        except Exception:
+            pass
+        raise
 
 
 async def run(console: Console, args: argparse.Namespace) -> int:
