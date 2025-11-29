@@ -1,7 +1,5 @@
 """Main orchestration component coordinating Pitaya runs."""
-
 from __future__ import annotations
-
 import asyncio
 import logging
 from datetime import datetime, timezone
@@ -18,7 +16,6 @@ from .state import InstanceInfo, RunState, StateManager
 from .strategy_runner import run_strategy as run_strategy_helper
 
 logger = logging.getLogger(__name__)
-
 
 class Orchestrator:
     """Orchestrates multiple AI coding instances according to strategies."""
@@ -85,6 +82,7 @@ class Orchestrator:
         self._initialized = False
         self._force_import = False
         self._randomize_queue_order = bool(randomize_queue_order)
+        self.randomize_queue_order = self._randomize_queue_order
 
         self.event_bus: Optional[EventBus] = None
         self.state_manager: Optional[StateManager] = None
@@ -99,14 +97,12 @@ class Orchestrator:
             )
         else:
             logger.warning("Pitaya initialized with NO auth_config")
-
     def set_pending_redaction_patterns(self, patterns: Optional[List[str]]) -> None:
         """Store regex patterns to redact when the event bus is created."""
         try:
             self._pending_redaction_patterns = list(patterns or [])
         except Exception:
             self._pending_redaction_patterns = []
-
     async def initialize(self) -> None:
         """Initialize state manager, event bus, and instance executors."""
         self.state_dir.mkdir(parents=True, exist_ok=True)
@@ -137,7 +133,6 @@ class Orchestrator:
             int(self.max_parallel_startup or self.max_parallel_instances or 1),
         )
         self._initialized = True
-
     async def shutdown(self) -> None:
         """Shutdown Pitaya cleanly."""
         logger.info("Shutting down Pitaya")

@@ -1,8 +1,4 @@
-"""Instance spawn helpers.
-
-Separated from the main orchestrator to keep the spawn path readable and testable.
-"""
-
+"""Instance spawn helpers."""
 from __future__ import annotations
 
 import asyncio

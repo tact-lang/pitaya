@@ -12,7 +12,7 @@ import random
 from typing import Any, Dict, List, Optional, Set
 
 from ..exceptions import OrchestratorError
-from ..shared import ContainerLimits, InstanceResult, InstanceStatus
+from ..shared import InstanceResult, InstanceStatus
 from .instance_runner import execute_instance
 from .instance_spawn import spawn_instance
 
