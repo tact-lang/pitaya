@@ -22,5 +22,8 @@ RUN npm install -g @anthropic-ai/claude-code@2.0.8 @openai/codex@0.63.0 \
 USER node
 WORKDIR /workspace
 
+# Mark the bind-mounted workspace as safe for git (addresses CVE-2022-24765 warnings)
+RUN git config --global --add safe.directory /workspace
+
 # Keep the container alive if run interactively; the runner execs specific CLIs
 CMD ["bash"]
