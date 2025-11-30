@@ -44,7 +44,7 @@ Inspect a previous run without the orchestrator running:
 ```bash
 pitaya-tui --run-id run_20250114_123456
 # or from an events file
-pitaya-tui --events-file logs/run_20250114_123456/events.jsonl --output streaming
+pitaya-tui --events-file .pitaya/logs/run_20250114_123456/events.jsonl --output streaming
 ```
 
 Filters:
@@ -54,5 +54,5 @@ Filters:
 ## Tips
 
 - Cancel with Ctrl+C; a graceful shutdown stops containers, saves state, and prints a resume hint with the run ID.
-- Logs live at `logs/<run_id>/`; results at `results/<run_id>/`.
+- Logs live at `.pitaya/logs/<run_id>/`; results at `.pitaya/results/<run_id>/`.
 - In compact mode, long branches shorten to their unique suffix with a leading `/` so the `k<short8>` tail is visible.

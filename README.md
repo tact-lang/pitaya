@@ -117,8 +117,8 @@ CLI overrides config; `-S key=value` only affects the selected strategy.
 
 ## Results & Logs
 
-- Logs: `logs/<run_id>/events.jsonl` and JSONL component logs (orchestration.jsonl, runner.jsonl, tui.jsonl, other.jsonl)
-- Results: `results/<run_id>/` (summary.json, metadata.json, branches.txt, instance_metrics.csv, instances/<id>.json)
+- Logs: `.pitaya/logs/<run_id>/events.jsonl` and JSONL component logs (orchestration.jsonl, runner.jsonl, tui.jsonl, other.jsonl)
+- Results: `.pitaya/results/<run_id>/` (summary.json, metadata.json, branches.txt, instance_metrics.csv, instances/<id>.json)
 - Branches: `pitaya/<strategy>/<run_id>/k<short8>` (hierarchical namespace)
 - Resume: `pitaya --resume <run_id>`
 

@@ -40,7 +40,7 @@ Create a file `my_strategy.py` in your repo:
 ```python
 from dataclasses import dataclass
 from typing import List
-from pitaya.orchestration.strategies.base import Strategy, StrategyConfig
+from pitaya.orchestration.strategy.base import Strategy, StrategyConfig
 from pitaya.shared import InstanceResult
 
 @dataclass
@@ -80,7 +80,7 @@ Spawn N parallel tasks and wait for all, tolerating failures:
 ```python
 from dataclasses import dataclass
 from typing import List
-from pitaya.orchestration.strategies.base import Strategy, StrategyConfig
+from pitaya.orchestration.strategy.base import Strategy, StrategyConfig
 from pitaya.shared import InstanceResult
 
 @dataclass
