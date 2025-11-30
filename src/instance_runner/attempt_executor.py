@@ -285,24 +285,3 @@ class AttemptExecutor(FailureHandlingMixin, TimeoutCleanupMixin):
             error_type="unexpected",
             status="failed",
         )
-
-    def _failure_result(
-        self, *, error: str, error_type: str, status: str
-    ) -> InstanceResult:
-        completed_at = datetime.now(timezone.utc).isoformat()
-        return InstanceResult(
-            success=False,
-            error=error,
-            error_type=error_type,
-            session_id=self.agent_session_id,
-            container_name=self.params.container_name,
-            duration_seconds=time.time() - self.start_time,
-            started_at=self.started_at,
-            completed_at=completed_at,
-            retry_attempts=self.attempt_number - 1,
-            log_path=self.log_path,
-            workspace_path=None,
-            status=status,
-            final_message=self.final_message,
-            metrics=self.metrics,
-        )

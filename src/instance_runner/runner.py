@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, Optional
 
 from .runner_coordinator import RunnerCoordinator, build_runner_params
+from .runner_params import RunnerParams
 from ..shared import AuthConfig, ContainerLimits, InstanceResult, RetryConfig
 
 
@@ -48,42 +49,47 @@ async def run_instance(
     workspace_include_branches: Optional[list[str]] = None,
 ) -> InstanceResult:
     """Execute a single AI coding instance in Docker (retry-aware)."""
-    params = build_runner_params(
-        prompt=prompt,
-        repo_path=repo_path,
-        base_branch=base_branch,
-        branch_name=branch_name or "",
-        run_id=run_id,
-        strategy_execution_id=strategy_execution_id,
-        instance_id=instance_id,
-        container_name=container_name or "",
-        model=model,
-        session_id=session_id,
-        operator_resume=operator_resume,
-        session_group_key=session_group_key,
-        event_callback=event_callback,
-        startup_semaphore=startup_semaphore,
-        timeout_seconds=timeout_seconds,
-        container_limits=container_limits or ContainerLimits(),
-        auth_config=auth_config,
-        reuse_container=reuse_container,
-        finalize=finalize,
-        docker_image=docker_image,
-        retry_config=retry_config or RetryConfig(),
-        plugin_name=plugin_name,
-        system_prompt=system_prompt,
-        append_system_prompt=append_system_prompt,
-        import_policy=import_policy,
-        import_conflict_policy=import_conflict_policy,
-        skip_empty_import=skip_empty_import,
-        network_egress=network_egress,
-        max_turns=max_turns,
-        allow_overwrite_protected_refs=allow_overwrite_protected_refs,
-        allow_global_session_volume=allow_global_session_volume,
-        agent_cli_args=agent_cli_args,
-        force_commit=force_commit,
-        workspace_include_branches=workspace_include_branches,
-        task_key=task_key,
-    )
+    params = _build_params_from_args(locals())
     coordinator = RunnerCoordinator(params)
     return await coordinator.run()
+
+
+def _build_params_from_args(args: Dict[str, Any]) -> RunnerParams:
+    """Translate run_instance kwargs into RunnerParams with defaults."""
+    return build_runner_params(
+        prompt=args["prompt"],
+        repo_path=args["repo_path"],
+        base_branch=args["base_branch"],
+        branch_name=args["branch_name"] or "",
+        run_id=args["run_id"],
+        strategy_execution_id=args["strategy_execution_id"],
+        instance_id=args["instance_id"],
+        container_name=args["container_name"] or "",
+        model=args["model"],
+        session_id=args["session_id"],
+        operator_resume=args["operator_resume"],
+        session_group_key=args["session_group_key"],
+        event_callback=args["event_callback"],
+        startup_semaphore=args["startup_semaphore"],
+        timeout_seconds=args["timeout_seconds"],
+        container_limits=args["container_limits"] or ContainerLimits(),
+        auth_config=args["auth_config"],
+        reuse_container=args["reuse_container"],
+        finalize=args["finalize"],
+        docker_image=args["docker_image"],
+        retry_config=args["retry_config"] or RetryConfig(),
+        plugin_name=args["plugin_name"],
+        system_prompt=args["system_prompt"],
+        append_system_prompt=args["append_system_prompt"],
+        import_policy=args["import_policy"],
+        import_conflict_policy=args["import_conflict_policy"],
+        skip_empty_import=args["skip_empty_import"],
+        network_egress=args["network_egress"],
+        max_turns=args["max_turns"],
+        allow_overwrite_protected_refs=args["allow_overwrite_protected_refs"],
+        allow_global_session_volume=args["allow_global_session_volume"],
+        agent_cli_args=args["agent_cli_args"],
+        force_commit=args["force_commit"],
+        workspace_include_branches=args["workspace_include_branches"],
+        task_key=args["task_key"],
+    )
