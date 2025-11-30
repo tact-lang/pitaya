@@ -59,7 +59,7 @@ cd pitaya
 uv run pitaya --version
 
 # Or directly via Python module
-python -m src.cli --version
+python -m pitaya.cli --version
 ```
 
 ## Authenticate

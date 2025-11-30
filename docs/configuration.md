@@ -81,7 +81,7 @@ Most strategies leave these at defaults. To force an import even when there are 
 
 ## Directories
 
-- State: `pitaya_state/` (can be changed with `--state-dir`)
+- State: `.pitaya/state/` (can be changed with `--state-dir`)
 - Logs: `logs/<run_id>/` (change with `--logs-dir`)
 - Results: `results/<run_id>/` (summary.json, metadata.json, branches.txt, instance_metrics.csv, instances/<id>.json)
 
@@ -95,7 +95,7 @@ Structured logs
 
 On a fresh run, Pitaya writes the fully merged configuration (CLI + env + .env + file + defaults):
 
-- Unredacted copy to `pitaya_state/<run_id>/config.json` (for fidelity on resume). The `pitaya_state/` directory is git‑ignored by default.
+- Unredacted copy to `.pitaya/state/<run_id>/config.json` (for fidelity on resume). The `.pitaya/state/` directory is git‑ignored by default.
 - Redacted copy to `logs/<run_id>/config.json` (tokens/API keys masked) for auditability alongside logs.
 
 On `--resume <run_id>`, Pitaya loads the saved effective config by default. This preserves durable keys and behavior. CLI overrides on resume are applied as follows:

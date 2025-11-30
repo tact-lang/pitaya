@@ -11,9 +11,9 @@ Usage (module path):
 from dataclasses import dataclass
 from typing import List
 
-from src.orchestration.strategies.base import Strategy, StrategyConfig
-from src.orchestration.strategy_context import StrategyContext
-from src.shared import InstanceResult
+from pitaya.orchestration.strategy.base import Strategy, StrategyConfig
+from pitaya.orchestration.strategy.context import StrategyContext
+from pitaya.shared import InstanceResult
 
 
 @dataclass
