@@ -14,13 +14,23 @@ import logging
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
+from .codex_item_handlers import handle_item_event
+
 logger = logging.getLogger(__name__)
+
+__all__ = ["CodexOutputParser"]
+
+EventPayload = Dict[str, Any]
+EventDict = Dict[str, Any]
+
+MAX_OUTPUT_PREVIEW = 500
 
 
 class CodexOutputParser:
     """Parse Codex ThreadEvents and derive summary metrics."""
 
     def __init__(self) -> None:
+        """Initialize empty parser state for a Codex session."""
         self.session_id: Optional[str] = None
         self.last_message: Optional[str] = None
         self.tokens_in: int = 0
@@ -28,73 +38,65 @@ class CodexOutputParser:
         self.total_tokens: int = 0
         self.last_error: Optional[str] = None
 
-    def _ts(self, payload: Dict[str, Any]) -> str:
-        return payload.get("timestamp") or datetime.now(timezone.utc).isoformat()
-
-    def parse_line(self, line: str) -> Optional[Dict[str, Any]]:
-        line = (line or "").strip()
-        if not line:
+    def parse_line(self, line: str) -> Optional[EventDict]:
+        """Parse a raw JSONL line into an internal event dict or ``None``."""
+        normalized_line = (line or "").strip()
+        if not normalized_line:
             return None
 
-        try:
-            payload = json.loads(line)
-        except json.JSONDecodeError:
-            logger.debug("codex_parser: unable to decode JSON line: %s", line[:160])
+        payload = self._decode_json(normalized_line)
+        if payload is None:
             return None
 
-        # Some events can be wrapped in {"id": "...", "msg": {...}}
         if isinstance(payload.get("msg"), dict):
             payload = payload["msg"]
 
-        event_type = payload.get("type")
-        if not isinstance(event_type, str):
+        event_type = self._normalize_type(payload.get("type"))
+        if event_type is None:
             return None
 
-        normalized = event_type.strip().lower()
-        if not normalized:
-            return None
+        direct_handlers = {
+            "thread.started": self._handle_thread_started,
+            "turn.started": self._handle_turn_started,
+            "turn.completed": self._handle_turn_completed,
+            "turn.failed": self._handle_turn_failed,
+            "error": self._handle_stream_error,
+        }
 
-        if normalized == "thread.started":
-            return self._handle_thread_started(payload)
-        if normalized == "turn.started":
-            return self._handle_turn_started(payload)
-        if normalized == "turn.completed":
-            return self._handle_turn_completed(payload)
-        if normalized == "turn.failed":
-            return self._handle_turn_failed(payload)
-        if normalized.startswith("item."):
-            return self._handle_item_event(normalized, payload)
-        if normalized == "error":
-            return self._handle_stream_error(payload)
+        handler = direct_handlers.get(event_type)
+        if handler:
+            return handler(payload)
 
-        # Unknown event type; log for diagnostics but keep running.
-        logger.debug("codex_parser: unrecognized event type '%s'", normalized)
+        if event_type.startswith("item."):
+            return self._handle_item_event(event_type, payload)
+
+        logger.debug("codex_parser: unrecognized event type '%s'", event_type)
         return None
 
-    def _handle_thread_started(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+    def _handle_thread_started(self, payload: EventPayload) -> EventDict:
         thread_id = payload.get("thread_id")
         if isinstance(thread_id, str) and thread_id:
             self.session_id = thread_id
         return {
             "type": "system",
-            "timestamp": self._ts(payload),
+            "timestamp": self._timestamp(payload),
             "session_id": self.session_id,
             "subtype": "thread_started",
         }
 
-    def _handle_turn_started(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+    def _handle_turn_started(self, payload: EventPayload) -> EventDict:
         return {
             "type": "system",
-            "timestamp": self._ts(payload),
+            "timestamp": self._timestamp(payload),
             "session_id": self.session_id,
             "subtype": "turn_started",
         }
 
-    def _handle_turn_completed(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+    def _handle_turn_completed(self, payload: EventPayload) -> EventDict:
         usage = payload.get("usage") or {}
-        input_tokens = int(usage.get("input_tokens") or 0)
-        cached_tokens = int(usage.get("cached_input_tokens") or 0)
-        output_tokens = int(usage.get("output_tokens") or 0)
+        input_tokens = self._coerce_int(usage.get("input_tokens"))
+        cached_tokens = self._coerce_int(usage.get("cached_input_tokens"))
+        output_tokens = self._coerce_int(usage.get("output_tokens"))
         turn_input = input_tokens + cached_tokens
         turn_total = turn_input + output_tokens
 
@@ -104,7 +106,7 @@ class CodexOutputParser:
 
         return {
             "type": "turn_complete",
-            "timestamp": self._ts(payload),
+            "timestamp": self._timestamp(payload),
             "turn_metrics": {
                 "input_tokens": turn_input,
                 "output_tokens": output_tokens,
@@ -112,7 +114,7 @@ class CodexOutputParser:
             },
         }
 
-    def _handle_turn_failed(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+    def _handle_turn_failed(self, payload: EventPayload) -> EventDict:
         error_payload = payload.get("error") or {}
         message = (
             error_payload.get("message") or payload.get("message") or "unknown error"
@@ -120,212 +122,34 @@ class CodexOutputParser:
         self.last_error = str(message)
         return {
             "type": "error",
-            "timestamp": self._ts(payload),
+            "timestamp": self._timestamp(payload),
             "error_type": "codex",
             "error_message": self.last_error,
         }
 
-    def _handle_stream_error(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+    def _handle_stream_error(self, payload: EventPayload) -> EventDict:
         message = payload.get("message") or "unknown error"
         self.last_error = str(message)
         return {
             "type": "error",
-            "timestamp": self._ts(payload),
+            "timestamp": self._timestamp(payload),
             "error_type": "codex",
             "error_message": self.last_error,
         }
 
     def _handle_item_event(
-        self, event_type: str, payload: Dict[str, Any]
-    ) -> Optional[Dict[str, Any]]:
-        item = payload.get("item")
-        if not isinstance(item, dict):
-            return None
-
-        # Codex emits either flattened fields (type/text/etc.) or nested details.
-        details: Dict[str, Any]
-        if isinstance(item.get("details"), dict):
-            details = item["details"]
-        else:
-            details = item
-
-        detail_type = details.get("type")
-        if not isinstance(detail_type, str):
-            return None
-
-        detail_type = detail_type.strip().lower()
-        if detail_type == "agent_message":
-            return self._handle_agent_message(details, payload)
-        if detail_type == "reasoning":
-            return self._handle_reasoning(details, payload)
-        if detail_type == "command_execution":
-            return self._handle_command_event(event_type, details, payload)
-        if detail_type == "file_change":
-            return self._handle_file_change(details, payload)
-        if detail_type == "mcp_tool_call":
-            return self._handle_mcp_tool_event(event_type, details, payload)
-        if detail_type == "web_search":
-            return self._handle_web_search(event_type, details, payload)
-        if detail_type == "error":
-            return self._handle_item_error(details, payload)
-        if detail_type == "todo_list":
-            # Plans/To-do lists are currently ignored.
-            return None
-
-        logger.debug("codex_parser: unhandled item details type '%s'", detail_type)
-        return None
-
-    def _handle_agent_message(
-        self, details: Dict[str, Any], payload: Dict[str, Any]
-    ) -> Dict[str, Any]:
-        text = str(details.get("text") or "")
-        if text:
-            self.last_message = text
-        return {
-            "type": "assistant",
-            "timestamp": self._ts(payload),
-            "content": text,
-        }
-
-    def _handle_reasoning(
-        self, details: Dict[str, Any], payload: Dict[str, Any]
-    ) -> Dict[str, Any]:
-        text = str(details.get("text") or "")
-        prefixed = f"[reasoning] {text}" if text else "[reasoning]"
-        return {
-            "type": "assistant",
-            "timestamp": self._ts(payload),
-            "content": prefixed,
-        }
-
-    def _handle_command_event(
-        self, event_type: str, details: Dict[str, Any], payload: Dict[str, Any]
-    ) -> Optional[Dict[str, Any]]:
-        command = str(details.get("command") or "").strip()
-        if event_type == "item.started":
-            return {
-                "type": "tool_use",
-                "timestamp": self._ts(payload),
-                "tool": "bash",
-                "action": "bash",
-                "command": command or None,
-            }
-
-        if event_type == "item.completed":
-            exit_code = details.get("exit_code")
-            status = str(details.get("status") or "").lower()
-            success = status == "completed" and (exit_code == 0 or exit_code is None)
-            output = details.get("aggregated_output")
-            if isinstance(output, str):
-                output = output[:500]
-            elif output is not None:
-                output = str(output)[:500]
-            event: Dict[str, Any] = {
-                "type": "tool_result",
-                "timestamp": self._ts(payload),
-                "success": success,
-                "exit_code": exit_code,
-            }
-            if output:
-                event["output"] = output
-            if command:
-                event["command"] = command
-            return event
-
-        return None
-
-    def _handle_file_change(
-        self, details: Dict[str, Any], payload: Dict[str, Any]
-    ) -> Dict[str, Any]:
-        changes = details.get("changes") or []
-        rendered_changes = []
-        for change in changes:
-            path = ""
-            kind = ""
-            if isinstance(change, dict):
-                path = str(change.get("path") or "")
-                kind = str(change.get("kind") or "")
-            rendered_changes.append({"path": path, "kind": kind})
-        status = str(details.get("status") or "")
-        success = status.lower() == "completed"
-        return {
-            "type": "tool_result",
-            "timestamp": self._ts(payload),
-            "tool": "edit",
-            "success": success,
-            "changes": rendered_changes,
-        }
-
-    def _handle_mcp_tool_event(
-        self, event_type: str, details: Dict[str, Any], payload: Dict[str, Any]
-    ) -> Optional[Dict[str, Any]]:
-        server = str(details.get("server") or "")
-        tool_name = str(details.get("tool") or "")
-        arguments = details.get("arguments")
-
-        if event_type == "item.started":
-            return {
-                "type": "tool_use",
-                "timestamp": self._ts(payload),
-                "tool": "mcp",
-                "action": f"{server}:{tool_name}".strip(":"),
-                "arguments": arguments,
-            }
-
-        if event_type == "item.completed":
-            status = str(details.get("status") or "").lower()
-            success = status == "completed"
-            result = details.get("result")
-            error = details.get("error")
-            event: Dict[str, Any] = {
-                "type": "tool_result",
-                "timestamp": self._ts(payload),
-                "tool": "mcp",
-                "success": success,
-                "server": server or None,
-                "tool_name": tool_name or None,
-            }
-            if result is not None:
-                event["result"] = result
-            if error:
-                event["error"] = error
-            return event
-
-        return None
-
-    def _handle_web_search(
-        self, event_type: str, details: Dict[str, Any], payload: Dict[str, Any]
-    ) -> Optional[Dict[str, Any]]:
-        query = str(details.get("query") or "")
-        if event_type == "item.started":
-            return {
-                "type": "tool_use",
-                "timestamp": self._ts(payload),
-                "tool": "web_search",
-                "query": query,
-            }
-        if event_type == "item.completed":
-            return {
-                "type": "tool_result",
-                "timestamp": self._ts(payload),
-                "tool": "web_search",
-                "success": True,
-                "query": query,
-            }
-        return None
-
-    def _handle_item_error(
-        self, details: Dict[str, Any], payload: Dict[str, Any]
-    ) -> Dict[str, Any]:
-        message = str(details.get("message") or "error")
-        return {
-            "type": "error",
-            "timestamp": self._ts(payload),
-            "error_type": "codex",
-            "error_message": message,
-        }
+        self, event_type: str, payload: EventPayload
+    ) -> Optional[EventDict]:
+        return handle_item_event(
+            event_type,
+            payload,
+            timestamp_fn=self._timestamp,
+            truncate_output=self._truncate_output,
+            set_last_message=self._update_last_message,
+        )
 
     def get_summary(self) -> Dict[str, Any]:
+        """Return cumulative session metrics and last known values."""
         return {
             "session_id": self.session_id,
             "final_message": self.last_message,
@@ -336,3 +160,43 @@ class CodexOutputParser:
             },
             "error": self.last_error,
         }
+
+    def _timestamp(self, payload: EventPayload) -> str:
+        timestamp = payload.get("timestamp")
+        if isinstance(timestamp, str) and timestamp.strip():
+            return timestamp
+        return datetime.now(timezone.utc).isoformat()
+
+    def _decode_json(self, raw_line: str) -> Optional[EventPayload]:
+        try:
+            payload = json.loads(raw_line)
+        except json.JSONDecodeError:
+            logger.debug("codex_parser: unable to decode JSON line: %s", raw_line[:160])
+            return None
+        if not isinstance(payload, dict):
+            logger.debug("codex_parser: JSON line did not contain an object")
+            return None
+        return payload
+
+    def _normalize_type(self, value: Any) -> Optional[str]:
+        if not isinstance(value, str):
+            return None
+        normalized = value.strip().lower()
+        return normalized or None
+
+    def _coerce_int(self, value: Any, default: int = 0) -> int:
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return default
+
+    def _update_last_message(self, message: str) -> None:
+        self.last_message = message
+
+    def _truncate_output(self, output: Any) -> Optional[str]:
+        if output is None:
+            return None
+        text = output if isinstance(output, str) else str(output)
+        if len(text) > MAX_OUTPUT_PREVIEW:
+            return text[:MAX_OUTPUT_PREVIEW]
+        return text
