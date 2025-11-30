@@ -15,17 +15,14 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, TYPE_CHECKING
 
 import docker
+from docker.errors import DockerException, ImageNotFound, NotFound
 
 if TYPE_CHECKING:  # pragma: no cover - for type checking only
-    from docker.errors import DockerException, NotFound
     from docker.models.containers import Container
 else:  # pragma: no cover - runtime fallback
     try:
-        from docker.errors import DockerException, NotFound
         from docker.models.containers import Container
     except ImportError:  # pragma: no cover - very unlikely
-        DockerException = Exception
-        NotFound = Exception
         Container = Any
 
 from . import DockerError, TimeoutError
@@ -69,6 +66,12 @@ class DockerManager:
 
         try:
             self.client = docker.from_env(timeout=int(api_timeout))
+            # Expose commonly used error types for helper modules
+            self.NotFound = NotFound
+            self.ImageNotFound = ImageNotFound
+            self.DockerException = DockerException
+            # Provide instance logger for helpers
+            self.logger = logger
         except DockerException as exc:  # type: ignore[misc]
             raise DockerError(f"Failed to connect to Docker daemon: {exc}")
 
