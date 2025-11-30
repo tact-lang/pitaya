@@ -54,13 +54,6 @@ dmypy.json
 .spyproject
 .ropeproject
 
-# Logs
-logs/
-*.log
-log/
-*.log.*
-test_logs/
-
 # Environment variables
 .env
 .env.*
@@ -81,8 +74,5 @@ desktop.ini
 *.backup
 *.orig
 
-# Output directories
-output/
-results/
-runs/
-pitaya_state/
+# Runtime/output
+.pitaya/

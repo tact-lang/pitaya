@@ -38,7 +38,7 @@ strategies:
     iterations: 3
 
 logging:
-  # JSONL component logs under logs/<run_id>/
+  # JSONL component logs under .pitaya/logs/<run_id>/
   max_file_size: 10485760   # 10MB per component file before rotation
   retention_days: 7         # cleanup old run dirs (component logs)
   console_verbose: false    # headless-only: surface agent/tool steps to console (same as --verbose)
@@ -81,13 +81,13 @@ Most strategies leave these at defaults. To force an import even when there are 
 
 ## Directories
 
-- State: `pitaya_state/` (can be changed with `--state-dir`)
-- Logs: `logs/<run_id>/` (change with `--logs-dir`)
-- Results: `results/<run_id>/` (summary.json, metadata.json, branches.txt, instance_metrics.csv, instances/<id>.json)
+- State: `.pitaya/state/` (can be changed with `--state-dir`)
+- Logs: `.pitaya/logs/<run_id>/` (change with `--logs-dir`)
+- Results: `.pitaya/results/<run_id>/` (summary.json, metadata.json, branches.txt, instance_metrics.csv, instances/<id>.json)
 
 Structured logs
 
-- Pitaya writes JSON Lines component logs in `logs/<run_id>/` (orchestration.jsonl, runner.jsonl, tui.jsonl, other.jsonl).
+- Pitaya writes JSON Lines component logs in `.pitaya/logs/<run_id>/` (orchestration.jsonl, runner.jsonl, tui.jsonl, other.jsonl).
 - Old log directories are cleaned up periodically; component files rotate by size.
 - Custom redaction patterns from `logging.redaction.custom_patterns` are applied to both logs and emitted events.
 
@@ -95,8 +95,8 @@ Structured logs
 
 On a fresh run, Pitaya writes the fully merged configuration (CLI + env + .env + file + defaults):
 
-- Unredacted copy to `pitaya_state/<run_id>/config.json` (for fidelity on resume). The `pitaya_state/` directory is git‑ignored by default.
-- Redacted copy to `logs/<run_id>/config.json` (tokens/API keys masked) for auditability alongside logs.
+- Unredacted copy to `.pitaya/state/<run_id>/config.json` (for fidelity on resume). The `.pitaya/state/` directory is git‑ignored by default.
+- Redacted copy to `.pitaya/logs/<run_id>/config.json` (tokens/API keys masked) for auditability alongside logs.
 
 On `--resume <run_id>`, Pitaya loads the saved effective config by default. This preserves durable keys and behavior. CLI overrides on resume are applied as follows:
 

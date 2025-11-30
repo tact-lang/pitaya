@@ -59,7 +59,7 @@ cd pitaya
 uv run pitaya --version
 
 # Or directly via Python module
-python -m src.cli --version
+python -m pitaya --version
 ```
 
 ## Authenticate
@@ -108,7 +108,7 @@ uv run pitaya "Create a HELLO.txt file with 'Hello from Pitaya' text in it and c
 Tips
 
   - Press Ctrl+C to stop the run. Pitaya shuts down gracefully (containers stopped, state saved) and prints a resume hint with the run ID.
-- After completion, results are written under `results/<run_id>/` and logs under `logs/<run_id>/`.
+- After completion, results are written under `.pitaya/results/<run_id>/` and logs under `.pitaya/logs/<run_id>/`.
 - Branches are created only if the agent commits changes.
 
 ## Explore More
@@ -135,8 +135,8 @@ pitaya "Write the funniest and most original joke possible" --strategy iterative
 
 ## Where to Find Results
 
-- Logs: `logs/<run_id>/events.jsonl` and JSONL component logs (orchestration.jsonl, runner.jsonl, tui.jsonl, other.jsonl)
-- Results: `results/<run_id>/` (summary.json, metadata.json, branches.txt, metrics, instances/<id>.json)
+- Logs: `.pitaya/logs/<run_id>/events.jsonl` and JSONL component logs (orchestration.jsonl, runner.jsonl, tui.jsonl, other.jsonl)
+- Results: `.pitaya/results/<run_id>/` (summary.json, metadata.json, branches.txt, metrics, instances/<id>.json)
 - Branches: `pitaya/<strategy>/<run_id>/k<short8>` (hierarchical namespace)
 
 List branches:
