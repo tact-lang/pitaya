@@ -3,12 +3,18 @@
 from __future__ import annotations
 
 import logging
-import os
 from typing import Any, Callable, Dict, List, Optional, Tuple, TYPE_CHECKING
 
 from ..codex_parser import CodexOutputParser
 from ..plugin_interface import PluginCapabilities, RunnerPlugin
 from ...exceptions import AgentError
+from .codex_env import (
+    ENV_API_KEY,
+    collect_codex_env,
+    select_provider_base_url,
+    select_provider_env_key,
+    select_provider_name,
+)
 
 if TYPE_CHECKING:
     from docker.models.containers import Container
@@ -20,12 +26,6 @@ logger = logging.getLogger(__name__)
 
 __all__ = ["CodexPlugin"]
 
-_ENV_API_KEY = "OPENAI_API_KEY"
-_ENV_BASE_URL = "OPENAI_BASE_URL"
-_ENV_PROVIDER_OVERRIDE = "CODEX_ENV_KEY"
-_ENV_BASE_OVERRIDE = "CODEX_BASE_URL"
-_ENV_PROVIDER_NAME_OVERRIDE = "CODEX_MODEL_PROVIDER"
-
 _DEFAULT_IMAGE = "pitaya-agents:latest"
 _BASE_COMMAND = ["codex", "exec", "--json", "-C", "/workspace"]
 _SANDBOX_FLAGS = [
@@ -33,20 +33,6 @@ _SANDBOX_FLAGS = [
     "--sandbox",
     "danger-full-access",
 ]
-_ENV_CODEX_API_KEY = "CODEX_API_KEY"
-
-_PROVIDER_ENV_CANDIDATES: Tuple[Tuple[str, str], ...] = (
-    (_ENV_CODEX_API_KEY, _ENV_BASE_OVERRIDE),
-    ("OPENAI_API_KEY", "OPENAI_BASE_URL"),
-    ("OPENROUTER_API_KEY", "OPENROUTER_BASE_URL"),
-    ("AZURE_OPENAI_API_KEY", "AZURE_OPENAI_BASE_URL"),
-    ("GROQ_API_KEY", "GROQ_BASE_URL"),
-    ("MISTRAL_API_KEY", "MISTRAL_BASE_URL"),
-    ("GEMINI_API_KEY", "GEMINI_BASE_URL"),
-    ("DEEPSEEK_API_KEY", "DEEPSEEK_BASE_URL"),
-    ("OLLAMA_API_KEY", "OLLAMA_BASE_URL"),
-    ("ARCEEAI_API_KEY", "ARCEEAI_BASE_URL"),
-)
 
 
 class CodexPlugin(RunnerPlugin):
@@ -82,7 +68,7 @@ class CodexPlugin(RunnerPlugin):
         """Ensure a Codex API key is available before running."""
         if auth_config and auth_config.get("api_key"):
             return True, None
-        if _select_provider_env_key():
+        if select_provider_env_key():
             return True, None
         return (
             False,
@@ -98,7 +84,7 @@ class CodexPlugin(RunnerPlugin):
         auth_config: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, str]:
         """Prepare Codex environment variables for the container."""
-        return _collect_codex_env(auth_config)
+        return collect_codex_env(auth_config)
 
     async def prepare_container(
         self,
@@ -122,64 +108,11 @@ class CodexPlugin(RunnerPlugin):
         """
         cmd: List[str] = list(_BASE_COMMAND)
         cmd += _SANDBOX_FLAGS
-
-        # Model passthrough (if provided)
-        if model:
-            cmd += ["-m", model]
-
-        provider_env_key = kwargs.get("provider_env_key") or _select_provider_env_key()
-        provider_base_url = kwargs.get(
-            "provider_base_url"
-        ) or _select_provider_base_url(provider_env_key)
-
-        provider_name = kwargs.get("provider_name") or _select_provider_name(
-            provider_env_key
-        )
-
-        if provider_env_key and (
-            provider_env_key != _ENV_API_KEY or provider_base_url or provider_name
-        ):
-            # Select a custom provider key and map model + provider config
-            provider_label = provider_name or "pitaya_env"
-            cmd += ["-c", f"model_provider={provider_label}"]
-            provider_display = provider_name or "PitayaProvider"
-            provider_parts = [f'name="{provider_display}"']
-            if provider_base_url:
-                provider_parts.append(f'base_url="{provider_base_url}"')
-            provider_parts.append(f'env_key="{provider_env_key}"')
-            cmd += [
-                "-c",
-                (
-                    f"model_providers.{provider_label}="
-                    "{" + ", ".join(provider_parts) + "}"
-                ),
-            ]
-            if model:
-                cmd += ["-c", f'model="{model}"']
-        elif model:
-            # No provider override; still allow plain model override.
-            cmd += ["-c", f'model="{model}"']
-
-        # Enable web search in exec mode (both legacy + new flags).
+        self._append_model_flags(cmd, model)
+        self._apply_provider_overrides(cmd, model, kwargs)
         cmd += ["-c", "features.web_search_request=true"]
-
-        # Resume: use Codex's subcommand when a session_id is provided.
-        if session_id:
-            cmd.append("resume")
-            cmd.append(session_id)
-
-        # Agent CLI passthrough args: insert before prompt
-        extra_args = kwargs.get("agent_cli_args")
-        if isinstance(extra_args, (list, tuple)):
-            cmd += [str(arg) for arg in extra_args if arg is not None]
-
-        # Final positional: the prompt (optional for resume; required otherwise)
-        if prompt:
-            cmd.append(prompt)
-        elif not session_id:
-            # Without a prompt or a session to resume, Codex will fail fast; log for clarity.
-            logger.debug("codex: no prompt provided and no session_id to resume")
-
+        self._append_session_and_prompt(cmd, session_id, prompt)
+        self._append_extra_args(cmd, kwargs.get("agent_cli_args"))
         return cmd
 
     async def parse_events(
@@ -266,82 +199,60 @@ class CodexPlugin(RunnerPlugin):
         # Generic Codex error; retryable by default
         return "codex", True
 
+    def _append_model_flags(self, cmd: List[str], model: str) -> None:
+        if model:
+            cmd += ["-m", model]
+
+    def _apply_provider_overrides(
+        self, cmd: List[str], model: str, kwargs: Dict[str, Any]
+    ) -> None:
+        provider_env_key = kwargs.get("provider_env_key") or select_provider_env_key()
+        provider_base_url = kwargs.get("provider_base_url") or select_provider_base_url(
+            provider_env_key
+        )
+        provider_name = kwargs.get("provider_name") or select_provider_name(
+            provider_env_key
+        )
+        if provider_env_key and (
+            provider_env_key != ENV_API_KEY or provider_base_url or provider_name
+        ):
+            provider_label = provider_name or "pitaya_env"
+            cmd += ["-c", f"model_provider={provider_label}"]
+            provider_display = provider_name or "PitayaProvider"
+            provider_parts = [f'name="{provider_display}"']
+            if provider_base_url:
+                provider_parts.append(f'base_url="{provider_base_url}"')
+            provider_parts.append(f'env_key="{provider_env_key}"')
+            cmd += [
+                "-c",
+                (
+                    f"model_providers.{provider_label}="
+                    "{" + ", ".join(provider_parts) + "}"
+                ),
+            ]
+            if model:
+                cmd += ["-c", f'model="{model}"']
+        elif model:
+            cmd += ["-c", f'model="{model}"']
+
+    def _append_session_and_prompt(
+        self, cmd: List[str], session_id: Optional[str], prompt: str
+    ) -> None:
+        if session_id:
+            cmd.extend(["resume", session_id])
+        if prompt:
+            cmd.append(prompt)
+        elif not session_id:
+            logger.debug("codex: no prompt provided and no session_id to resume")
+
+    def _append_extra_args(self, cmd: List[str], extra_args: Any) -> None:
+        if isinstance(extra_args, (list, tuple)):
+            cmd += [str(arg) for arg in extra_args if arg is not None]
+
 
 def _collect_codex_env(auth_config: Optional[Dict[str, Any]]) -> Dict[str, str]:
-    env: Dict[str, str] = {}
-
-    if auth_config:
-        api_key = auth_config.get("api_key")
-        if api_key:
-            env[_ENV_CODEX_API_KEY] = str(api_key)
-            env.setdefault(_ENV_API_KEY, str(api_key))
-        if auth_config.get("base_url"):
-            val = str(auth_config["base_url"]).strip()
-            if val:
-                env[_ENV_BASE_URL] = val
-
-    for env_key, base_key in _PROVIDER_ENV_CANDIDATES:
-        val = os.environ.get(env_key)
-        if val:
-            env.setdefault(env_key, val)
-        bval = os.environ.get(base_key)
-        if bval:
-            env.setdefault(base_key, bval)
-
-    override_env = os.environ.get(_ENV_PROVIDER_OVERRIDE)
-    if override_env and os.environ.get(override_env):
-        env.setdefault(override_env, os.environ.get(override_env))
-    base_override = os.environ.get(_ENV_BASE_OVERRIDE)
-    if base_override:
-        env.setdefault(_ENV_BASE_URL, base_override)
-
-    return env
+    return collect_codex_env(auth_config)
 
 
 def _select_provider_env_key() -> Optional[str]:
-    """Select which provider API key env to use, ignoring empty values.
-
-    Preference order:
-    1) CODEX_ENV_KEY override when it points to a non-empty env var
-    2) CODEX_API_KEY when non-empty
-    3) OPENAI_API_KEY when non-empty
-    4) First non-empty candidate in _PROVIDER_ENV_CANDIDATES (e.g., OPENROUTER_API_KEY)
-    """
-    override = os.environ.get(_ENV_PROVIDER_OVERRIDE)
-    if override and os.environ.get(override):
-        return override
-    if os.environ.get(_ENV_CODEX_API_KEY):
-        return _ENV_CODEX_API_KEY
-    if os.environ.get(_ENV_API_KEY):
-        return _ENV_API_KEY
-    for env_key, _ in _PROVIDER_ENV_CANDIDATES:
-        if os.environ.get(env_key):
-            return env_key
-    return None
-
-
-def _select_provider_base_url(env_key: Optional[str]) -> Optional[str]:
-    base = os.environ.get(_ENV_BASE_OVERRIDE)
-    if base:
-        return base
-    if env_key:
-        for candidate_key, base_key in _PROVIDER_ENV_CANDIDATES:
-            if candidate_key == env_key:
-                bval = os.environ.get(base_key)
-                if bval:
-                    return bval
-    b = os.environ.get(_ENV_BASE_URL)
-    return b if b else None
-
-
-def _select_provider_name(env_key: Optional[str]) -> Optional[str]:
-    if os.environ.get(_ENV_PROVIDER_NAME_OVERRIDE):
-        return os.environ[_ENV_PROVIDER_NAME_OVERRIDE]
-    if not env_key:
-        return None
-    if env_key == _ENV_API_KEY:
-        return None
-    prefix = env_key.lower().replace("_api_key", "")
-    if prefix:
-        return prefix
-    return None
+    return select_provider_env_key()

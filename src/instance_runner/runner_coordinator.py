@@ -153,7 +153,7 @@ class RunnerCoordinator:
 
 def build_runner_params(
     *,
-    prompt: str,
+    prompt,
     repo_path,
     base_branch,
     branch_name,
@@ -190,44 +190,45 @@ def build_runner_params(
     task_key,
 ) -> RunnerParams:
     """Create RunnerParams with defaults for missing identifiers."""
-    _instance_id = instance_id or str(uuid.uuid4())
-    _session_group_key = session_group_key or task_key or _instance_id
-    _limits = container_limits or ContainerLimits()
-    _retry = retry_config or RetryConfig()
-    return RunnerParams(
-        prompt=prompt,
-        repo_path=repo_path,
-        base_branch=base_branch,
-        branch_name=branch_name,
-        run_id=run_id,
-        strategy_execution_id=strategy_execution_id,
-        instance_id=_instance_id,
-        container_name=container_name,
-        model=model,
-        session_id=session_id,
-        operator_resume=operator_resume,
-        session_group_key=_session_group_key,
-        event_callback=event_callback,
-        startup_semaphore=startup_semaphore,
-        timeout_seconds=timeout_seconds,
-        container_limits=_limits,
-        auth_config=auth_config,
-        reuse_container=reuse_container,
-        finalize=finalize,
-        docker_image=docker_image or "",
-        retry_config=_retry,
-        plugin_name=plugin_name,
-        system_prompt=system_prompt,
-        append_system_prompt=append_system_prompt,
-        import_policy=import_policy,
-        import_conflict_policy=import_conflict_policy,
-        skip_empty_import=skip_empty_import,
-        network_egress=network_egress,
-        max_turns=max_turns,
-        allow_overwrite_protected_refs=allow_overwrite_protected_refs,
-        allow_global_session_volume=allow_global_session_volume,
-        agent_cli_args=agent_cli_args,
-        force_commit=force_commit,
-        workspace_include_branches=workspace_include_branches,
-        task_key=task_key,
-    )
+    instance = instance_id or str(uuid.uuid4())
+    session_group = session_group_key or task_key or instance
+    limits = container_limits or ContainerLimits()
+    retry = retry_config or RetryConfig()
+    params = {
+        "prompt": prompt,
+        "repo_path": repo_path,
+        "base_branch": base_branch,
+        "branch_name": branch_name,
+        "run_id": run_id,
+        "strategy_execution_id": strategy_execution_id,
+        "instance_id": instance,
+        "container_name": container_name,
+        "model": model,
+        "session_id": session_id,
+        "operator_resume": operator_resume,
+        "session_group_key": session_group,
+        "event_callback": event_callback,
+        "startup_semaphore": startup_semaphore,
+        "timeout_seconds": timeout_seconds,
+        "container_limits": limits,
+        "auth_config": auth_config,
+        "reuse_container": reuse_container,
+        "finalize": finalize,
+        "docker_image": docker_image or "",
+        "retry_config": retry,
+        "plugin_name": plugin_name,
+        "system_prompt": system_prompt,
+        "append_system_prompt": append_system_prompt,
+        "import_policy": import_policy,
+        "import_conflict_policy": import_conflict_policy,
+        "skip_empty_import": skip_empty_import,
+        "network_egress": network_egress,
+        "max_turns": max_turns,
+        "allow_overwrite_protected_refs": allow_overwrite_protected_refs,
+        "allow_global_session_volume": allow_global_session_volume,
+        "agent_cli_args": agent_cli_args,
+        "force_commit": force_commit,
+        "workspace_include_branches": workspace_include_branches,
+        "task_key": task_key,
+    }
+    return RunnerParams(**params)
