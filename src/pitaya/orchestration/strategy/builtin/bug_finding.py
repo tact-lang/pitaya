@@ -65,7 +65,7 @@ class BugFindingStrategy(Strategy):
 
     @property
     def name(self) -> str:
-        return "bug-finding"
+        return "bug_finding"
 
     def get_config_class(self) -> type[BugFindingConfig]:
         return BugFindingConfig

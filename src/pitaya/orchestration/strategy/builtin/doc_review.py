@@ -65,7 +65,7 @@ class DocReviewConfig(StrategyConfig):
 class DocReviewStrategy(Strategy):
     @property
     def name(self) -> str:
-        return "doc-review"
+        return "doc_review"
 
     def get_config_class(self) -> type[StrategyConfig]:
         return DocReviewConfig

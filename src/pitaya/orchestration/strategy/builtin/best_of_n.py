@@ -79,7 +79,7 @@ class BestOfNStrategy(Strategy):
 
     @property
     def name(self) -> str:
-        return "best-of-n"
+        return "best_of_n"
 
     def get_config_class(self) -> type[StrategyConfig]:
         return BestOfNConfig
