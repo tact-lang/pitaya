@@ -172,7 +172,7 @@ class PRReviewConfig(StrategyConfig):
 class PRReviewStrategy(Strategy):
     @property
     def name(self) -> str:
-        return "pr_review"
+        return "pr-review"
 
     def get_config_class(self) -> type[StrategyConfig]:
         return PRReviewConfig

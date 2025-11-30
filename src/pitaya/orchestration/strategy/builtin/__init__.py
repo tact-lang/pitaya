@@ -11,11 +11,11 @@ from pitaya.orchestration.strategy.builtin.pr_review import PRReviewStrategy
 AVAILABLE_STRATEGIES = {
     "simple": SimpleStrategy,
     "scoring": ScoringStrategy,
-    "best_of_n": BestOfNStrategy,
+    "best-of-n": BestOfNStrategy,
     "iterative": IterativeStrategy,
-    "bug_finding": BugFindingStrategy,
-    "doc_review": DocReviewStrategy,
-    "pr_review": PRReviewStrategy,
+    "bug-finding": BugFindingStrategy,
+    "doc-review": DocReviewStrategy,
+    "pr-review": PRReviewStrategy,
 }
 
 __all__ = [
