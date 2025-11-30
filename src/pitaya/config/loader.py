@@ -94,6 +94,8 @@ def build_cli_config(args) -> Dict[str, Any]:
         cfg.setdefault("orchestration", {})["state_dir"] = args.state_dir
     if getattr(args, "logs_dir", None):
         cfg.setdefault("orchestration", {})["logs_dir"] = args.logs_dir
+    if getattr(args, "results_dir", None):
+        cfg["results_dir"] = args.results_dir
     if getattr(args, "output", None):
         cfg["output"] = args.output
     if getattr(args, "oauth_token", None):

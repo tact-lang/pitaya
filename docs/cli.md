@@ -170,7 +170,7 @@ pitaya "task" --force-commit                  # force a commit if changes exist
 - Precedence: CLI > env > .env > project config > defaults.
 - Directories:
   - State: `--state-dir ./.pitaya/state` (default)
-  - Logs: `--logs-dir ./logs` (default)
+  - Logs: `--logs-dir .pitaya/logs` (default)
 
 ## Maintenance
 

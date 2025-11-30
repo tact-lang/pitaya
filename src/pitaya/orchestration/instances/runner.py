@@ -157,6 +157,7 @@ def _prepare_run_kwargs(orchestrator, info, strategy_exec_id, task_key, startup_
         workspace_include_branches=(info.metadata or {}).get(
             "workspace_include_branches"
         ),
+        logs_dir=orchestrator.logs_dir,
     )
 
 

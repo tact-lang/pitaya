@@ -49,3 +49,4 @@ class RunnerParams:
     force_commit: bool
     workspace_include_branches: Optional[list[str]]
     task_key: Optional[str]
+    logs_dir: Path

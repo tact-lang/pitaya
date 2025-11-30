@@ -188,6 +188,7 @@ def build_runner_params(
     force_commit,
     workspace_include_branches,
     task_key,
+    logs_dir,
 ) -> RunnerParams:
     """Create RunnerParams with defaults for missing identifiers."""
     instance = instance_id or str(uuid.uuid4())
@@ -230,5 +231,6 @@ def build_runner_params(
         "force_commit": force_commit,
         "workspace_include_branches": workspace_include_branches,
         "task_key": task_key,
+        "logs_dir": logs_dir,
     }
     return RunnerParams(**params)

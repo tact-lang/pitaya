@@ -226,7 +226,7 @@ def _apply_unsafe_overrides(cfg: Dict[str, Any], overrides: Dict[str, Any]) -> N
 
 def _explicit_cli_overrides(args: argparse.Namespace) -> Dict[str, Any]:
     try:
-        from ..cli_parser import create_parser
+        from pitaya.cli.parser import create_parser
     except Exception:
         return build_cli_config(args)
 

@@ -159,6 +159,7 @@ def _build_orchestrator(
         max_parallel_startup=start,
         state_dir=Path(orch_cfg.get("state_dir", Path(".pitaya/state"))),
         logs_dir=Path(orch_cfg.get("logs_dir", Path(".pitaya/logs"))),
+        results_dir=Path(cfg.get("results_dir", Path(".pitaya/results"))),
         container_limits=_container_limits(cfg),
         retry_config=RetryConfig(max_attempts=3),
         auth_config=auth,

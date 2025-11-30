@@ -60,11 +60,11 @@ class AttemptExecutor(FailureHandlingMixin, TimeoutCleanupMixin):
         self.metrics: Dict[str, Any] = {}
         self.started_at = datetime.now(timezone.utc).isoformat()
         self.start_time = time.time()
-        self.log_path = (
-            f"./logs/{params.run_id}/instance_{params.instance_id}.log"
-            if params.run_id and params.instance_id
-            else None
-        )
+        self.log_path = None
+        if params.run_id and params.instance_id:
+            self.log_path = str(
+                params.logs_dir / params.run_id / f"instance_{params.instance_id}.log"
+            )
 
     async def run(self) -> InstanceResult:
         try:

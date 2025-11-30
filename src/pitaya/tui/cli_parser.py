@@ -19,7 +19,7 @@ def create_tui_parser() -> argparse.ArgumentParser:
             "  # Watch a run by ID\n"
             "  pitaya-tui --run-id run_20250114_123456\n\n"
             "  # Stream as text from a file\n"
-            "  pitaya-tui --events-file logs/run_20250114_123456/events.jsonl --output streaming\n\n"
+            "  pitaya-tui --events-file .pitaya/logs/run_20250114_123456/events.jsonl --output streaming\n\n"
             "  # Emit JSON events (NDJSON, no TUI)\n"
             "  pitaya-tui --events-file events.jsonl --output json\n"
         ),

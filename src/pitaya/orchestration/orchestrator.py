@@ -33,6 +33,7 @@ class Orchestrator:
         max_parallel_startup: Optional[int] = None,
         state_dir: Path = Path("./.pitaya/state"),
         logs_dir: Path = Path("./.pitaya/logs"),
+        results_dir: Path = Path("./.pitaya/results"),
         container_limits: Optional[ContainerLimits] = None,
         retry_config: Optional[RetryConfig] = None,
         auth_config: Optional[AuthConfig] = None,
@@ -56,6 +57,7 @@ class Orchestrator:
         self.max_parallel_startup: Optional[int] = max_parallel_startup
         self.state_dir = state_dir
         self.logs_dir = logs_dir
+        self.results_dir = results_dir
         self.container_limits = container_limits or ContainerLimits()
         self.retry_config = retry_config or RetryConfig()
         self.auth_config = auth_config
@@ -114,6 +116,7 @@ class Orchestrator:
         """Initialize state manager, event bus, and instance executors."""
         self.state_dir.mkdir(parents=True, exist_ok=True)
         self.logs_dir.mkdir(parents=True, exist_ok=True)
+        self.results_dir.mkdir(parents=True, exist_ok=True)
         await self._check_disk_space()
 
         self.state_manager = StateManager(

@@ -47,6 +47,7 @@ async def run_instance(
     agent_cli_args: Optional[list[str]] = None,
     force_commit: bool = False,
     workspace_include_branches: Optional[list[str]] = None,
+    logs_dir: Path = Path(".pitaya/logs"),
 ) -> InstanceResult:
     """Execute a single AI coding instance in Docker (retry-aware)."""
     params = _build_params_from_args(locals())
@@ -92,4 +93,5 @@ def _build_params_from_args(args: Dict[str, Any]) -> RunnerParams:
         force_commit=args["force_commit"],
         workspace_include_branches=args["workspace_include_branches"],
         task_key=args["task_key"],
+        logs_dir=args["logs_dir"],
     )

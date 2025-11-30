@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from pathlib import Path
 
 from rich.console import Group
 from rich.panel import Panel
@@ -96,20 +97,24 @@ class FooterMixin:
         lines.append(line1)
 
         try:
-            logs_path = (
-                str(self._events_file.parent)
-                if getattr(self, "_events_file", None)
-                else f"logs/{run.run_id}"
-            )
+            if getattr(self, "_events_file", None):
+                run_logs_dir = self._events_file.parent
+                logs_root = run_logs_dir.parent
+                results_path = logs_root.parent / "results" / run.run_id
+                logs_path = str(run_logs_dir)
+            else:
+                logs_root = Path(".pitaya/logs")
+                logs_path = str(logs_root / run.run_id)
+                results_path = Path(".pitaya/results") / run.run_id
         except Exception:
-            logs_path = f"logs/{run.run_id}"
-        results_path = f"results/{run.run_id}"
+            logs_path = f".pitaya/logs/{run.run_id}"
+            results_path = Path(".pitaya/results") / run.run_id
         line2 = Text()
         line2.append("Logs: ", style="bold white")
         line2.append(str(logs_path), style="bright_blue")
         line2.append("  •  ", style="white")
         line2.append("Results: ", style="bold white")
-        line2.append(results_path, style="bright_blue")
+        line2.append(str(results_path), style="bright_blue")
         lines.append(line2)
 
         return lines

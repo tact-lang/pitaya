@@ -44,6 +44,7 @@ class _Dummy(FailureHandlingMixin):
             force_commit=False,
             workspace_include_branches=None,
             task_key=None,
+            logs_dir=Path(".pitaya/logs"),
         )
         self.attempt_number = 1
         self.total_attempts = 1

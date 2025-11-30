@@ -521,6 +521,11 @@ class PRReviewStrategy(Strategy):
                 if run_id:
                     sidecar_path = _write_review_sidecar(
                         run_id=str(run_id),
+                        base_dir=getattr(
+                            getattr(ctx, "_orchestrator", None),
+                            "results_dir",
+                            Path("./results"),
+                        ),
                         intro=(comp_res.final_message or "").strip(),
                         event=event,
                         selected_ids=selected_ids,
@@ -1277,6 +1282,7 @@ def _resolve_commit_id(
 def _write_review_sidecar(
     *,
     run_id: str,
+    base_dir: Path,
     intro: str,
     event: str,
     selected_ids: List[str],
@@ -1285,8 +1291,8 @@ def _write_review_sidecar(
 ) -> str:
     """Write results/<run_id>/review/index.json and return its relative path."""
     try:
-        base_dir = Path("./results") / run_id / "review"
-        base_dir.mkdir(parents=True, exist_ok=True)
+        review_dir = Path(base_dir) / run_id / "review"
+        review_dir.mkdir(parents=True, exist_ok=True)
         payload = {
             "intro": intro,
             "event": event,
@@ -1294,7 +1300,7 @@ def _write_review_sidecar(
             "selected_details": selected_details,
             "commit_id": commit_id,
         }
-        out_path = base_dir / "index.json"
+        out_path = review_dir / "index.json"
         out_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
         # Return path relative to run results dir
         return "review/index.json"

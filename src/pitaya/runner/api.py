@@ -59,6 +59,7 @@ async def run_instance(
     force_commit: bool = False,
     # Workspace preparation options
     workspace_include_branches: Optional[list[str]] = None,
+    logs_dir: Path = Path(".pitaya/logs"),
 ) -> InstanceResult:
     """Run a single AI coding instance; thin wrapper over `runner.run_instance`."""
     return await _run_instance(
@@ -97,6 +98,7 @@ async def run_instance(
         agent_cli_args=agent_cli_args,
         force_commit=force_commit,
         workspace_include_branches=workspace_include_branches,
+        logs_dir=logs_dir,
     )
 
 

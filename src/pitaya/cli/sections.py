@@ -32,7 +32,7 @@ def add_global_and_positional(parser: argparse.ArgumentParser) -> None:
 
 
 def add_strategy_args(parser: argparse.ArgumentParser) -> None:
-    from ..strategies import AVAILABLE_STRATEGIES
+    from pitaya.orchestration.strategy.builtin import AVAILABLE_STRATEGIES
 
     g = parser.add_argument_group("Strategy")
     g.add_argument(
@@ -180,6 +180,7 @@ def add_state_args(parser: argparse.ArgumentParser) -> None:
     g.add_argument("--config", type=Path, help="Config file (default pitaya.yaml)")
     g.add_argument("--state-dir", type=Path, default=Path(".pitaya/state"))
     g.add_argument("--logs-dir", type=Path, default=Path(".pitaya/logs"))
+    g.add_argument("--results-dir", type=Path, default=Path(".pitaya/results"))
     g.add_argument(
         "--redact",
         choices=["true", "false"],
