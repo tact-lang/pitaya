@@ -179,7 +179,7 @@ def add_state_args(parser: argparse.ArgumentParser) -> None:
     g = parser.add_argument_group("Config, State & Logs")
     g.add_argument("--config", type=Path, help="Config file (default pitaya.yaml)")
     g.add_argument("--state-dir", type=Path, default=Path(".pitaya/state"))
-    g.add_argument("--logs-dir", type=Path, default=Path("./logs"))
+    g.add_argument("--logs-dir", type=Path, default=Path(".pitaya/logs"))
     g.add_argument(
         "--redact",
         choices=["true", "false"],

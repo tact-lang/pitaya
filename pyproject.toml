@@ -49,7 +49,6 @@ packages = ["src/pitaya"]
 exclude = [
   "logs",
   "results",
-  "pitaya_state",
   ".pitaya",
   ".venv",
   ".ruff_cache",

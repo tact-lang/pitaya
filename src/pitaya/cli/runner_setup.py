@@ -89,7 +89,7 @@ def setup_logging(
         return
 
     logs_dir_cfg = full_config.get("orchestration", {}).get("logs_dir") or getattr(
-        args, "logs_dir", Path("./logs")
+        args, "logs_dir", Path(".pitaya/logs")
     )
     logs_dir = Path(logs_dir_cfg)
     logging_cfg = full_config.get("logging", {}) or {}
@@ -171,7 +171,7 @@ def persist_config_snapshots(
         )
         ldir = Path(
             full_config.get("orchestration", {}).get(
-                "logs_dir", getattr(args, "logs_dir", Path("./logs"))
+                "logs_dir", getattr(args, "logs_dir", Path(".pitaya/logs"))
             )
         )
         (sdir / run_id).mkdir(parents=True, exist_ok=True)
