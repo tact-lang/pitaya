@@ -9,7 +9,6 @@ from pitaya.runner.parsing.codex_parser import CodexOutputParser
 from pitaya.shared.plugin import PluginCapabilities, RunnerPlugin
 from pitaya.exceptions import AgentError
 from .codex_env import (
-    ENV_API_KEY,
     collect_codex_env,
     select_provider_base_url,
     select_provider_env_key,
