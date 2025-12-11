@@ -43,3 +43,26 @@ async def test_build_command_resume_with_prompt() -> None:
     assert any("features.web_search_request=true" in arg for arg in cmd)
     assert cmd[-1] == "do thing"
     assert cmd[-2] == "sess-123"
+
+
+@pytest.mark.asyncio
+async def test_build_command_forces_env_provider_for_openai_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("CODEX_ENV_KEY", raising=False)
+    monkeypatch.delenv("CODEX_API_KEY", raising=False)
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+
+    plugin = CodexPlugin()
+    cmd = await plugin.build_command(
+        prompt="hello",
+        model="openai/gpt-5.1",
+        session_id=None,
+    )
+
+    # Should override provider even when using OPENAI_API_KEY so Codex doesn't
+    # require interactive OpenAI auth.
+    assert any("model_provider=pitaya_env" in arg for arg in cmd)
+    assert any("model_providers.pitaya_env" in arg for arg in cmd)
+    assert any('wire_api="responses"' in arg for arg in cmd)

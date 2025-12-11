@@ -213,26 +213,34 @@ class CodexPlugin(RunnerPlugin):
         provider_name = kwargs.get("provider_name") or select_provider_name(
             provider_env_key
         )
-        if provider_env_key and (
-            provider_env_key != ENV_API_KEY or provider_base_url or provider_name
-        ):
-            provider_label = provider_name or "pitaya_env"
-            cmd += ["-c", f"model_provider={provider_label}"]
-            provider_display = provider_name or "PitayaProvider"
-            provider_parts = [f'name="{provider_display}"']
-            if provider_base_url:
-                provider_parts.append(f'base_url="{provider_base_url}"')
-            provider_parts.append(f'env_key="{provider_env_key}"')
-            cmd += [
-                "-c",
-                (
-                    f"model_providers.{provider_label}="
-                    "{" + ", ".join(provider_parts) + "}"
-                ),
-            ]
+        if not provider_env_key:
             if model:
                 cmd += ["-c", f'model="{model}"']
-        elif model:
+            return
+
+        # Codex 0.71+ ships an OpenAI provider that expects interactive auth
+        # (auth.json / login). When Pitaya supplies OPENAI_API_KEY, we must
+        # force an env-backed provider to keep headless runs working.
+        provider_label = provider_name or "pitaya_env"
+        cmd += ["-c", f"model_provider={provider_label}"]
+
+        provider_display = provider_name or "PitayaProvider"
+        provider_parts = [f'name="{provider_display}"']
+        if provider_base_url:
+            provider_parts.append(f'base_url="{provider_base_url}"')
+        provider_parts.append(f'env_key="{provider_env_key}"')
+
+        if provider_env_key in ("OPENAI_API_KEY", "CODEX_API_KEY"):
+            provider_parts.append('wire_api="responses"')
+
+        cmd += [
+            "-c",
+            (
+                f"model_providers.{provider_label}="
+                "{" + ", ".join(provider_parts) + "}"
+            ),
+        ]
+        if model:
             cmd += ["-c", f'model="{model}"']
 
     def _append_session_and_prompt(
